@@ -15,8 +15,8 @@ export default function MCSMFilesTab({
     const [showNewInput, setShowNewInput] = useState(null);
 
     useEffect(() => {
-        if (!instances || instances.length === 0) fetchAllInstances();
-    }, [instances, fetchAllInstances]);
+        fetchAllInstances();
+    }, [fetchAllInstances]);
 
     const allInstances = (instances || []).map((inst) => ({
         ...inst,
