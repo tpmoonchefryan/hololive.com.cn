@@ -246,7 +246,7 @@ async function handleAdminInstance(config, res, query) {
   if (!uuid || !daemonId) return sendJSON(res, 400, { error: "missing uuid or daemonId" });
 
   const result = await mcsmFetch(config, "/instance", {
-    query: { uuid, daemonId },
+    query: { uuid, remote_uuid: daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -261,7 +261,7 @@ async function handleInstanceAction(config, res, action, query) {
 
   const result = await mcsmFetch(config, `/protected_instance/${action}`, {
     method: "GET",
-    query: { uuid, daemonId },
+    query: { uuid, remote_uuid: daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -282,7 +282,7 @@ async function handleInstanceCommand(config, req, res, query) {
 
   const result = await mcsmFetch(config, "/protected_instance/command", {
     method: "GET",
-    query: { uuid, daemonId, command: body.command },
+    query: { uuid, remote_uuid: daemonId, command: body.command },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -293,7 +293,7 @@ async function handleInstanceOutputLog(config, res, query) {
   if (!uuid || !daemonId) return sendJSON(res, 400, { error: "missing uuid or daemonId" });
 
   const result = await mcsmFetch(config, "/protected_instance/outputlog", {
-    query: { uuid, daemonId },
+    query: { uuid, remote_uuid: daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -307,7 +307,7 @@ async function handleFilesList(config, res, query) {
   if (!isSafePath(target)) return sendJSON(res, 400, { error: "invalid path" });
 
   const result = await mcsmFetch(config, "/files/list", {
-    query: { uuid, daemonId, target, page: query.get("page") || "0", page_size: query.get("page_size") || "100" },
+    query: { uuid, remote_uuid: daemonId, target, page: query.get("page") || "0", page_size: query.get("page_size") || "100" },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -324,7 +324,7 @@ async function handleFilesRead(config, req, res) {
   const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
     body: { target: body.target },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -341,7 +341,7 @@ async function handleFilesWrite(config, req, res) {
   const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
     body: { target: body.target, text: body.content },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -357,7 +357,7 @@ async function handleFilesMkdir(config, req, res) {
   const result = await mcsmFetch(config, "/files/mkdir", {
     method: "POST",
     body: { target: body.target },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -373,7 +373,7 @@ async function handleFilesTouch(config, req, res) {
   const result = await mcsmFetch(config, "/files/touch", {
     method: "POST",
     body: { target: body.target },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -388,11 +388,11 @@ async function handleFilesDelete(config, req, res) {
     if (!isSafePath(t)) return sendJSON(res, 400, { error: "invalid path" });
   }
 
-  // MCSM DELETE /files/ expects query: {uuid, daemonId}, body: {targets}
+  // MCSM DELETE /files/ expects query: {uuid, remote_uuid}, body: {targets}
   const result = await mcsmFetch(config, "/files/", {
     method: "DELETE",
     body: { targets: body.targets },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
@@ -412,7 +412,7 @@ async function handleFilesMove(config, req, res) {
   const result = await mcsmFetch(config, "/files/move", {
     method: "PUT",
     body: { targets: body.targets },
-    query: { uuid: body.uuid, daemonId: body.daemonId },
+    query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
