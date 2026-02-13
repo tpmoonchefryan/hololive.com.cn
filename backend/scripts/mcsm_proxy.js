@@ -95,6 +95,8 @@ async function verifyPBAuth(authHeader) {
 // --- MCSM API helper ---
 async function mcsmFetch(config, path, { method = "GET", body, query } = {}) {
   const url = new URL(`/api${path}`, config.panelUrl);
+  // MCSM v9.x only supports apikey as query param; v10+ also supports x-request-api-key header
+  url.searchParams.set("apikey", config.apiKey);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -107,7 +109,7 @@ async function mcsmFetch(config, path, { method = "GET", body, query } = {}) {
   const opts = {
     method,
     signal: controller.signal,
-    headers: { "x-request-api-key": config.apiKey },
+    headers: {},
   };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -116,7 +118,8 @@ async function mcsmFetch(config, path, { method = "GET", body, query } = {}) {
 
   try {
     const finalUrl = url.toString();
-    logger.debug(`MCSM ${method} ${finalUrl}`);
+    const logUrl = finalUrl.replace(/apikey=[^&]+/, "apikey=***");
+    logger.debug(`MCSM ${method} ${logUrl}`);
     const res = await fetch(finalUrl, opts);
     clearTimeout(timeout);
     const data = await res.json();
