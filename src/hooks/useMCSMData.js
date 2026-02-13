@@ -113,10 +113,11 @@ export default function useMCSMData() {
         setTestingConnection(true);
         try {
             const data = await mcsmGet("/admin/overview");
-            if (data?.data) {
+            if (data?.status === 200 && data?.data && typeof data.data === "object") {
                 notify(t("admin.mcsm.settings.testSuccess"), "success");
             } else {
-                notify(t("admin.mcsm.settings.testFailed"), "error");
+                const msg = typeof data?.data === "string" ? data.data : t("admin.mcsm.settings.testFailed");
+                notify(msg, "error");
             }
         } catch (err) {
             logger.error("Test connection failed:", err);
