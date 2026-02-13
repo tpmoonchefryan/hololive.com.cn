@@ -7,6 +7,18 @@ import { createAppLogger } from "../lib/appLogger";
 const logger = createAppLogger("useMCSMData");
 const MCSM_API = "/mcsm-api";
 
+// Extract instances array from various MCSM response shapes
+function extractInstances(data) {
+    if (!data) return [];
+    // Shape 1: { status, data: { data: [...], page, ... } } (paginated)
+    if (data?.data?.data && Array.isArray(data.data.data)) return data.data.data;
+    // Shape 2: { status, data: [...] } (direct array)
+    if (Array.isArray(data?.data)) return data.data;
+    // Shape 3: { data: [...] } without status wrapper
+    if (Array.isArray(data)) return data;
+    return [];
+}
+
 function authHeaders() {
     return { Authorization: pb.authStore.token };
 }
@@ -138,7 +150,7 @@ export default function useMCSMData() {
     const fetchInstances = useCallback(async (daemonId) => {
         try {
             const data = await mcsmGet("/admin/instances", { daemonId, page: 1, page_size: 100 });
-            if (data?.data) setInstances(data.data.data || []);
+            setInstances(extractInstances(data));
         } catch (err) {
             logger.error("Failed to fetch instances:", err);
         }
@@ -156,7 +168,7 @@ export default function useMCSMData() {
                 if (!node.available || !node.uuid) continue;
                 try {
                     const data = await mcsmGet("/admin/instances", { daemonId: node.uuid, page: 1, page_size: 100 });
-                    const list = data?.data?.data || [];
+                    const list = extractInstances(data);
                     for (const inst of list) {
                         all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
                     }

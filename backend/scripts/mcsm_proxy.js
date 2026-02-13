@@ -220,14 +220,16 @@ async function handleAdminOverview(config, res) {
 }
 
 async function handleAdminInstances(config, res, query) {
-  const result = await mcsmFetch(config, "/service/remote_service_instances", {
-    query: {
-      daemonId: query.get("daemonId"),
-      page: query.get("page") || "1",
-      page_size: query.get("page_size") || "20",
-      instance_name: query.get("instance_name") || "",
-    },
-  });
+  const q = {
+    daemonId: query.get("daemonId"),
+    page: query.get("page") || "1",
+    page_size: query.get("page_size") || "100",
+  };
+  const instanceName = query.get("instance_name");
+  if (instanceName) q.instance_name = instanceName;
+
+  const result = await mcsmFetch(config, "/service/remote_service_instances", { query: q });
+  logger.info(`instances fetch daemonId=${q.daemonId} status=${result.status} dataType=${typeof result.data?.data} isArray=${Array.isArray(result.data?.data)}`);
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
 
