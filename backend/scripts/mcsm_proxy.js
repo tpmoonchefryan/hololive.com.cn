@@ -176,21 +176,14 @@ function parseJSON(str) {
 let publicStatusCache = null;
 let publicStatusExpiresAt = 0;
 
-// --- Fetch instances for a single node ---
-async function fetchNodeInstances(config, daemonId) {
-  try {
-    const result = await mcsmFetch(config, "/service/remote_service_instances", {
-      query: { daemonId, page: 1, page_size: 100 },
-    });
-    const instList = result.data?.data?.data || [];
-    if (result.data?.status !== 200) {
-      logger.warn(`remote_service_instances daemonId=${daemonId} status=${result.data?.status} msg=${typeof result.data?.data === "string" ? result.data.data : ""}`);
-    }
-    return instList;
-  } catch (err) {
-    logger.warn(`Failed to fetch instances for node ${daemonId}: ${err?.message}`);
+// --- Fetch all nodes with instances via remote_services ---
+async function fetchNodesWithInstances(config) {
+  const result = await mcsmFetch(config, "/service/remote_services");
+  if (result.data?.status !== 200) {
+    logger.warn(`remote_services status=${result.data?.status} msg=${typeof result.data?.data === "string" ? result.data.data : ""}`);
     return [];
   }
+  return Array.isArray(result.data?.data) ? result.data.data : [];
 }
 
 // --- Public route handler ---
@@ -203,24 +196,17 @@ async function handlePublicStatus(req, res) {
     return sendJSON(res, 200, publicStatusCache);
   }
 
-  // Get node list from overview
-  const overviewResult = await mcsmFetch(config, "/overview");
-  if (overviewResult.status !== 200 || !overviewResult.data?.data) {
-    return sendJSON(res, 502, { error: "upstream error" });
-  }
-
-  const remoteNodes = overviewResult.data.data.remote || [];
+  const nodes = await fetchNodesWithInstances(config);
   const hiddenSet = new Set(Array.isArray(config.hiddenInstances) ? config.hiddenInstances : []);
   const instances = [];
 
-  for (const node of remoteNodes) {
+  for (const node of nodes) {
     if (!node.available || !node.uuid) continue;
     const nodeCpu = typeof node.system?.cpuUsage === "number" ? Math.round(node.system.cpuUsage * 100) / 100 : null;
     const nodeMemTotal = typeof node.system?.totalmem === "number" ? node.system.totalmem : null;
     const nodeMemUsed = typeof node.system?.memUsage === "number" ? node.system.memUsage : null;
 
-    const instList = await fetchNodeInstances(config, node.uuid);
-    for (const inst of instList) {
+    for (const inst of node.instances || []) {
       if (hiddenSet.has(inst.instanceUuid)) continue;
       instances.push({
         instanceUuid: inst.instanceUuid,
@@ -250,28 +236,7 @@ async function handleAdminOverview(config, res) {
 }
 
 async function handleAdminInstances(config, res) {
-  // Get node list from overview, then fetch instances per-node
-  const overviewResult = await mcsmFetch(config, "/overview");
-  if (overviewResult.status !== 200 || !overviewResult.data?.data) {
-    return sendJSON(res, 502, overviewResult.data || { error: "upstream error" });
-  }
-
-  const remoteNodes = overviewResult.data.data.remote || [];
-  const nodes = [];
-
-  for (const node of remoteNodes) {
-    if (!node.uuid) continue;
-    const instList = node.available ? await fetchNodeInstances(config, node.uuid) : [];
-    nodes.push({
-      uuid: node.uuid,
-      remarks: node.remarks || node.uuid,
-      available: !!node.available,
-      system: node.system || null,
-      instance: node.instance || null,
-      instances: instList,
-    });
-  }
-
+  const nodes = await fetchNodesWithInstances(config);
   return sendJSON(res, 200, { status: 200, data: nodes });
 }
 
