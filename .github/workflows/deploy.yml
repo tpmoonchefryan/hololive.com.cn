@@ -101,11 +101,16 @@ jobs:
           # Ensure map-proxy service + nginx route are installed/updated
           sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_map_proxy.sh
           sudo /var/www/hololive.com.cn/backend/scripts/setup_map_proxy.sh
-          
+
+          # Ensure mcsm-proxy service + nginx route are installed/updated
+          sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
+          sudo /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
+
           # Restart PocketBase and Velocity Sync Service
           # Note: The runner user must have permission to run this (e.g. root or sudo w/o password)
           sudo systemctl restart pocketbase
           sudo systemctl restart velocity-sync
           sudo systemctl restart map-proxy
+          sudo systemctl restart mcsm-proxy
           
           echo "Deployment successful."

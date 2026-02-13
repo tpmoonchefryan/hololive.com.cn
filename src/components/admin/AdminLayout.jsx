@@ -24,6 +24,7 @@ import {
   Map,
   Server,
   ClipboardList,
+  Monitor,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import pb from "../../lib/pocketbase";
@@ -66,8 +67,14 @@ export default function AdminLayout() {
     {
       label: t("admin.sidebar.velocity"),
       key: "velocity",
-      icon: Activity, // Using Activity (Network icon might be missing or problematic)
+      icon: Activity,
       path: `/${adminKey}/webadmin/velocity`,
+    },
+    {
+      label: t("admin.sidebar.mcsm"),
+      key: "mcsm",
+      icon: Monitor,
+      path: `/${adminKey}/webadmin/mcsm`,
     },
     {
       label: t("admin.sidebar.posts"),

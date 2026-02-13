@@ -1,0 +1,19 @@
+[Unit]
+Description=MCSM Proxy Service
+After=network.target pocketbase.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/hololive.com.cn/backend/scripts
+ExecStart=/usr/bin/node mcsm_proxy.js
+Restart=always
+RestartSec=5
+Environment=PB_URL=http://127.0.0.1:8090
+Environment=MCSM_PROXY_PORT=18091
+Environment=MCSM_ALLOWED_ORIGIN=https://hololive.com.cn
+Environment=MCSM_REQUEST_TIMEOUT_MS=15000
+Environment=MCSM_CONFIG_CACHE_TTL_MS=60000
+
+[Install]
+WantedBy=multi-user.target

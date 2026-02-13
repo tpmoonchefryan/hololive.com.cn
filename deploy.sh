@@ -126,6 +126,15 @@ if [ -f "$INSTALL_DIR/backend/scripts/map-proxy.service" ]; then
     systemctl restart map-proxy
 fi
 
+# Setup mcsm-proxy service if script exists
+if [ -f "$INSTALL_DIR/backend/scripts/mcsm-proxy.service" ]; then
+    log "Installing mcsm-proxy service..."
+    cp "$INSTALL_DIR/backend/scripts/mcsm-proxy.service" /etc/systemd/system/mcsm-proxy.service
+    systemctl daemon-reload
+    systemctl enable mcsm-proxy
+    systemctl restart mcsm-proxy
+fi
+
 # Wait for PB to start
 sleep 5
 

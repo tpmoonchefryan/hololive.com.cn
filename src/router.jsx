@@ -28,6 +28,7 @@ const ServerInfoFields = lazy(() => import("./pages/admin/ServerInfoFields"));
 const AuditLogs = lazy(() => import("./pages/admin/AuditLogs"));
 const ArticleDetail = lazy(() => import("./pages/ArticleDetail"));
 const VelocityManager = lazy(() => import("./pages/admin/VelocityManager"));
+const MCSMManager = lazy(() => import("./pages/admin/MCSMManager"));
 
 function RouteFallback() {
   const { t } = useTranslation("common");
@@ -180,6 +181,10 @@ const router = createBrowserRouter([
               {
                 path: "velocity",
                 element: withSuspense(<VelocityManager />),
+              },
+              {
+                path: "mcsm",
+                element: withSuspense(<MCSMManager />),
               },
             ],
           },

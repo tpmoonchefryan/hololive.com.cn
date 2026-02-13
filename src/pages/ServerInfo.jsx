@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import pb from "../lib/pocketbase";
 import { getServerInfoIcon } from "../lib/serverInfoIcons";
 import { createAppLogger } from "../lib/appLogger";
+import MCSMStatusPanel from "../components/server/MCSMStatusPanel";
 
 const logger = createAppLogger("ServerInfo");
 
@@ -500,6 +501,15 @@ export default function ServerInfo() {
             )}
           </motion.div>
         )}
+
+        {/* MCSM Server Resource Status */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.2 }}
+        >
+          <MCSMStatusPanel />
+        </motion.div>
 
         {/* Map Selector and Display */}
         {loading ? (
