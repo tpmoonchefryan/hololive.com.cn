@@ -7,18 +7,6 @@ import { createAppLogger } from "../lib/appLogger";
 const logger = createAppLogger("useMCSMData");
 const MCSM_API = "/mcsm-api";
 
-// Extract instances array from various MCSM response shapes
-function extractInstances(data) {
-    if (!data) return [];
-    // Shape 1: { status, data: { data: [...], page, ... } } (paginated)
-    if (data?.data?.data && Array.isArray(data.data.data)) return data.data.data;
-    // Shape 2: { status, data: [...] } (direct array)
-    if (Array.isArray(data?.data)) return data.data;
-    // Shape 3: { data: [...] } without status wrapper
-    if (Array.isArray(data)) return data;
-    return [];
-}
-
 function authHeaders() {
     return { Authorization: pb.authStore.token };
 }
@@ -147,10 +135,17 @@ export default function useMCSMData() {
         }
     }, []);
 
-    const fetchInstances = useCallback(async (daemonId) => {
+    const fetchInstances = useCallback(async () => {
         try {
-            const data = await mcsmGet("/admin/instances", { daemonId, page: 1, page_size: 100 });
-            setInstances(extractInstances(data));
+            const data = await mcsmGet("/admin/instances");
+            const nodes = Array.isArray(data?.data) ? data.data : [];
+            const all = [];
+            for (const node of nodes) {
+                for (const inst of node.instances || []) {
+                    all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
+                }
+            }
+            setInstances(all);
         } catch (err) {
             logger.error("Failed to fetch instances:", err);
         }
@@ -158,22 +153,14 @@ export default function useMCSMData() {
 
     const fetchAllInstances = useCallback(async () => {
         try {
-            // Get overview first to know all nodes
-            const ovData = await mcsmGet("/admin/overview");
-            const nodes = ovData?.data?.remote || [];
-            if (ovData?.data) setOverview(ovData.data);
+            // /admin/instances now returns all nodes with their instances via remote_services
+            const data = await mcsmGet("/admin/instances");
+            const nodes = Array.isArray(data?.data) ? data.data : [];
 
             const all = [];
             for (const node of nodes) {
-                if (!node.available || !node.uuid) continue;
-                try {
-                    const data = await mcsmGet("/admin/instances", { daemonId: node.uuid, page: 1, page_size: 100 });
-                    const list = extractInstances(data);
-                    for (const inst of list) {
-                        all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
-                    }
-                } catch (err) {
-                    logger.error(`Failed to fetch instances for node ${node.uuid}:`, err);
+                for (const inst of node.instances || []) {
+                    all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
                 }
             }
             setInstances(all);

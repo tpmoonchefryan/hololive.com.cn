@@ -174,37 +174,27 @@ async function handlePublicStatus(req, res) {
     return sendJSON(res, 200, publicStatusCache);
   }
 
-  const result = await mcsmFetch(config, "/overview");
+  // Use /api/service/remote_services which returns all nodes with instances
+  const result = await mcsmFetch(config, "/service/remote_services");
   if (result.status !== 200 || !result.data?.data) {
     return sendJSON(res, 502, { error: "upstream error" });
   }
 
-  const overview = result.data.data;
+  const nodes = result.data.data;
   const instances = [];
 
-  // Fetch instances from each available node
-  const nodes = overview.remote || [];
-  for (const node of nodes) {
-    if (!node.available || !node.uuid) continue;
-    try {
-      const instResult = await mcsmFetch(config, "/service/remote_service_instances", {
-        query: { daemonId: node.uuid, page: "1", page_size: "100" },
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    for (const inst of node.instances || []) {
+      instances.push({
+        instanceUuid: inst.instanceUuid,
+        daemonId: node.uuid,
+        name: config.instanceLabels[inst.instanceUuid] || inst.config?.nickname || inst.instanceUuid,
+        status: inst.status,
+        currentPlayers: inst.info?.currentPlayers ?? -1,
+        maxPlayers: inst.info?.maxPlayers ?? -1,
+        cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
+        memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
       });
-      const instList = instResult.data?.data?.data || [];
-      for (const inst of instList) {
-        instances.push({
-          instanceUuid: inst.instanceUuid,
-          daemonId: node.uuid,
-          name: config.instanceLabels[inst.instanceUuid] || inst.config?.nickname || inst.instanceUuid,
-          status: inst.status,
-          currentPlayers: inst.info?.currentPlayers ?? -1,
-          maxPlayers: inst.info?.maxPlayers ?? -1,
-          cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
-          memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
-        });
-      }
-    } catch (err) {
-      logger.warn(`Failed to fetch instances for node ${node.uuid}: ${err?.message}`);
     }
   }
 
@@ -219,17 +209,9 @@ async function handleAdminOverview(config, res) {
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
 
-async function handleAdminInstances(config, res, query) {
-  const q = {
-    daemonId: query.get("daemonId"),
-    page: query.get("page") || "1",
-    page_size: query.get("page_size") || "100",
-  };
-  const instanceName = query.get("instance_name");
-  if (instanceName) q.instance_name = instanceName;
-
-  const result = await mcsmFetch(config, "/service/remote_service_instances", { query: q });
-  logger.info(`instances fetch daemonId=${q.daemonId} status=${result.status} dataType=${typeof result.data?.data} isArray=${Array.isArray(result.data?.data)}`);
+async function handleAdminInstances(config, res) {
+  // Use /api/service/remote_services which returns all nodes with full instance details
+  const result = await mcsmFetch(config, "/service/remote_services");
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
 
@@ -445,7 +427,7 @@ const server = http.createServer(async (req, res) => {
         return await handleAdminOverview(config, res);
       }
       if (path === "/admin/instances" && req.method === "GET") {
-        return await handleAdminInstances(config, res, query);
+        return await handleAdminInstances(config, res);
       }
       if (path === "/admin/instance" && req.method === "GET") {
         return await handleAdminInstance(config, res, query);
