@@ -182,18 +182,29 @@ async function handlePublicStatus(req, res) {
   const overview = result.data.data;
   const instances = [];
 
-  for (const node of overview.remote || []) {
-    for (const inst of node.instances || []) {
-      instances.push({
-        instanceUuid: inst.instanceUuid,
-        daemonId: node.uuid,
-        name: config.instanceLabels[inst.instanceUuid] || inst.config?.nickname || inst.instanceUuid,
-        status: inst.status,
-        currentPlayers: inst.info?.currentPlayers ?? -1,
-        maxPlayers: inst.info?.maxPlayers ?? -1,
-        cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
-        memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
+  // Fetch instances from each available node
+  const nodes = overview.remote || [];
+  for (const node of nodes) {
+    if (!node.available || !node.uuid) continue;
+    try {
+      const instResult = await mcsmFetch(config, "/service/remote_service_instances", {
+        query: { daemonId: node.uuid, page: "1", page_size: "100" },
       });
+      const instList = instResult.data?.data?.data || [];
+      for (const inst of instList) {
+        instances.push({
+          instanceUuid: inst.instanceUuid,
+          daemonId: node.uuid,
+          name: config.instanceLabels[inst.instanceUuid] || inst.config?.nickname || inst.instanceUuid,
+          status: inst.status,
+          currentPlayers: inst.info?.currentPlayers ?? -1,
+          maxPlayers: inst.info?.maxPlayers ?? -1,
+          cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
+          memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
+        });
+      }
+    } catch (err) {
+      logger.warn(`Failed to fetch instances for node ${node.uuid}: ${err?.message}`);
     }
   }
 

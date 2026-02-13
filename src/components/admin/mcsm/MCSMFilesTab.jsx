@@ -4,7 +4,7 @@ import { Folder, File, ChevronRight, Trash2, Plus, Edit3, Loader2 } from "lucide
 import MCSMFileEditor from "./MCSMFileEditor";
 
 export default function MCSMFilesTab({
-    overview, selectedInstance, setSelectedInstance,
+    instances, fetchAllInstances, selectedInstance, setSelectedInstance,
     files, currentPath, filesLoading,
     fetchFiles, readFile, writeFile, createDir, createFile, deleteFiles,
 }) {
@@ -14,14 +14,14 @@ export default function MCSMFilesTab({
     const [newItemName, setNewItemName] = useState("");
     const [showNewInput, setShowNewInput] = useState(null);
 
-    const remoteNodes = overview?.remote || [];
-    const allInstances = remoteNodes.flatMap((node) =>
-        (node.instances || []).map((inst) => ({
-            ...inst,
-            daemonId: node.uuid,
-            label: `${node.remarks || node.uuid} / ${inst.config?.nickname || inst.instanceUuid}`,
-        }))
-    );
+    useEffect(() => {
+        if (!instances || instances.length === 0) fetchAllInstances();
+    }, [instances, fetchAllInstances]);
+
+    const allInstances = (instances || []).map((inst) => ({
+        ...inst,
+        label: `${inst.nodeName || inst.daemonId} / ${inst.config?.nickname || inst.instanceUuid}`,
+    }));
 
     const handleSelect = (e) => {
         const uuid = e.target.value;

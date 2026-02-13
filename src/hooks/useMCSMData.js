@@ -144,6 +144,32 @@ export default function useMCSMData() {
         }
     }, []);
 
+    const fetchAllInstances = useCallback(async () => {
+        try {
+            // Get overview first to know all nodes
+            const ovData = await mcsmGet("/admin/overview");
+            const nodes = ovData?.data?.remote || [];
+            if (ovData?.data) setOverview(ovData.data);
+
+            const all = [];
+            for (const node of nodes) {
+                if (!node.available || !node.uuid) continue;
+                try {
+                    const data = await mcsmGet("/admin/instances", { daemonId: node.uuid, page: 1, page_size: 100 });
+                    const list = data?.data?.data || [];
+                    for (const inst of list) {
+                        all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
+                    }
+                } catch (err) {
+                    logger.error(`Failed to fetch instances for node ${node.uuid}:`, err);
+                }
+            }
+            setInstances(all);
+        } catch (err) {
+            logger.error("Failed to fetch all instances:", err);
+        }
+    }, []);
+
     const handleInstanceAction = useCallback(async (action, uuid, daemonId) => {
         if (action === "kill") {
             const ok = await confirm({ message: t("admin.mcsm.instances.confirmKill"), danger: true });
@@ -251,7 +277,7 @@ export default function useMCSMData() {
         consoleLog, commandInput, setCommandInput, sendingCommand,
         actionLoading, files, currentPath, filesLoading, testingConnection,
         fetchConfig, handleSaveConfig, handleTestConnection,
-        fetchOverview, fetchInstances, handleInstanceAction,
+        fetchOverview, fetchInstances, fetchAllInstances, handleInstanceAction,
         startConsolePolling, stopConsolePolling, handleSendCommand,
         fetchFiles, readFile, writeFile, createDir, createFile, deleteFiles, moveFile,
     };

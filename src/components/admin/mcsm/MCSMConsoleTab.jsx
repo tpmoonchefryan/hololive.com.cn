@@ -3,21 +3,21 @@ import { useTranslation } from "react-i18next";
 import { Send, Loader2 } from "lucide-react";
 
 export default function MCSMConsoleTab({
-    overview, selectedInstance, setSelectedInstance,
+    instances, fetchAllInstances, selectedInstance, setSelectedInstance,
     consoleLog, commandInput, setCommandInput, sendingCommand,
     startConsolePolling, stopConsolePolling, handleSendCommand,
 }) {
     const { t } = useTranslation();
     const logEndRef = useRef(null);
-    const remoteNodes = overview?.remote || [];
 
-    const allInstances = remoteNodes.flatMap((node) =>
-        (node.instances || []).map((inst) => ({
-            ...inst,
-            daemonId: node.uuid,
-            label: `${node.remarks || node.uuid} / ${inst.config?.nickname || inst.instanceUuid}`,
-        }))
-    );
+    useEffect(() => {
+        if (!instances || instances.length === 0) fetchAllInstances();
+    }, [instances, fetchAllInstances]);
+
+    const allInstances = (instances || []).map((inst) => ({
+        ...inst,
+        label: `${inst.nodeName || inst.daemonId} / ${inst.config?.nickname || inst.instanceUuid}`,
+    }));
 
     useEffect(() => {
         if (selectedInstance) {

@@ -80,15 +80,16 @@ export default function MCSMManager() {
                 )}
                 {data.activeTab === "instances" && (
                     <MCSMInstancesTab
-                        overview={data.overview}
-                        fetchOverview={data.fetchOverview}
+                        instances={data.instances}
+                        fetchAllInstances={data.fetchAllInstances}
                         handleInstanceAction={data.handleInstanceAction}
                         actionLoading={data.actionLoading}
                     />
                 )}
                 {data.activeTab === "console" && (
                     <MCSMConsoleTab
-                        overview={data.overview}
+                        instances={data.instances}
+                        fetchAllInstances={data.fetchAllInstances}
                         selectedInstance={data.selectedInstance}
                         setSelectedInstance={data.setSelectedInstance}
                         consoleLog={data.consoleLog}
@@ -102,7 +103,8 @@ export default function MCSMManager() {
                 )}
                 {data.activeTab === "files" && (
                     <MCSMFilesTab
-                        overview={data.overview}
+                        instances={data.instances}
+                        fetchAllInstances={data.fetchAllInstances}
                         selectedInstance={data.selectedInstance}
                         setSelectedInstance={data.setSelectedInstance}
                         files={data.files}

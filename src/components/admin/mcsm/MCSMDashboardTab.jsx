@@ -21,10 +21,8 @@ export default function MCSMDashboardTab({ overview, fetchOverview }) {
     }
 
     const remoteNodes = overview.remote || [];
-    const totalInstances = remoteNodes.reduce((sum, n) => sum + (n.instances?.length || 0), 0);
-    const runningInstances = remoteNodes.reduce(
-        (sum, n) => sum + (n.instances?.filter((i) => i.status === 3).length || 0), 0
-    );
+    const totalInstances = remoteNodes.reduce((sum, n) => sum + (n.instance?.total || 0), 0);
+    const runningInstances = remoteNodes.reduce((sum, n) => sum + (n.instance?.running || 0), 0);
 
     return (
         <div className="space-y-6">
@@ -67,9 +65,21 @@ export default function MCSMDashboardTab({ overview, fetchOverview }) {
                                         {node.available ? t("admin.mcsm.dashboard.online") : t("admin.mcsm.dashboard.offline")}
                                     </span>
                                 </div>
-                                <p className="text-xs text-slate-500">
-                                    {t("admin.mcsm.dashboard.instanceCount", { count: node.instances?.length || 0 })}
-                                </p>
+                                <div className="flex items-center gap-4 text-xs text-slate-500">
+                                    <span>{t("admin.mcsm.dashboard.instanceCount", { count: node.instance?.total || 0 })} ({node.instance?.running || 0} {t("admin.mcsm.dashboard.online")})</span>
+                                    {node.system && (
+                                        <>
+                                            <span className="flex items-center gap-1">
+                                                <Cpu className="w-3 h-3" />
+                                                {typeof node.system.cpuUsage === "number" ? `${Math.round(node.system.cpuUsage * 100)}%` : "-"}
+                                            </span>
+                                            <span className="flex items-center gap-1">
+                                                <MemoryStick className="w-3 h-3" />
+                                                {node.system.totalmem ? `${Math.round((node.system.totalmem - (node.system.freemem || 0)) / 1024 / 1024 / 1024 * 10) / 10}/${Math.round(node.system.totalmem / 1024 / 1024 / 1024 * 10) / 10}GB` : "-"}
+                                            </span>
+                                        </>
+                                    )}
+                                </div>
                             </div>
                         ))}
                     </div>
