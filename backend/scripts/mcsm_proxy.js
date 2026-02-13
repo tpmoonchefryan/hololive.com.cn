@@ -298,11 +298,18 @@ async function handleInstanceOutputLog(config, res, query) {
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
 
+// --- Normalize file target path for MCSM v9.x (Windows compat) ---
+function normalizeMcsmTarget(target) {
+  if (!target || target === "/") return ".";
+  // Strip leading slash for relative path
+  return target.replace(/^\//, "");
+}
+
 // --- File management handlers ---
 async function handleFilesList(config, res, query) {
   const uuid = query.get("uuid");
   const daemonId = query.get("daemonId");
-  const target = query.get("target") || "/";
+  const target = normalizeMcsmTarget(query.get("target"));
   if (!uuid || !daemonId) return sendJSON(res, 400, { error: "missing uuid or daemonId" });
   if (!isSafePath(target)) return sendJSON(res, 400, { error: "invalid path" });
 
@@ -323,7 +330,7 @@ async function handleFilesRead(config, req, res) {
   // MCSM uses PUT /files/ with only target (no text) to read file content
   const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
-    body: { target: body.target },
+    body: { target: normalizeMcsmTarget(body.target) },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
@@ -340,7 +347,7 @@ async function handleFilesWrite(config, req, res) {
   // MCSM uses PUT /files/ with target + text to write file content
   const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
-    body: { target: body.target, text: body.content },
+    body: { target: normalizeMcsmTarget(body.target), text: body.content },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
@@ -356,7 +363,7 @@ async function handleFilesMkdir(config, req, res) {
 
   const result = await mcsmFetch(config, "/files/mkdir", {
     method: "POST",
-    body: { target: body.target },
+    body: { target: normalizeMcsmTarget(body.target) },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
@@ -372,7 +379,7 @@ async function handleFilesTouch(config, req, res) {
 
   const result = await mcsmFetch(config, "/files/touch", {
     method: "POST",
-    body: { target: body.target },
+    body: { target: normalizeMcsmTarget(body.target) },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
@@ -391,7 +398,7 @@ async function handleFilesDelete(config, req, res) {
   // MCSM DELETE /files/ expects query: {uuid, remote_uuid}, body: {targets}
   const result = await mcsmFetch(config, "/files/", {
     method: "DELETE",
-    body: { targets: body.targets },
+    body: { targets: body.targets.map(normalizeMcsmTarget) },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
@@ -411,7 +418,7 @@ async function handleFilesMove(config, req, res) {
 
   const result = await mcsmFetch(config, "/files/move", {
     method: "PUT",
-    body: { targets: body.targets },
+    body: { targets: body.targets.map(([from, to]) => [normalizeMcsmTarget(from), normalizeMcsmTarget(to)]) },
     query: { uuid: body.uuid, remote_uuid: body.daemonId },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
