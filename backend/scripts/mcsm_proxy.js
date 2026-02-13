@@ -314,7 +314,7 @@ async function handleFilesList(config, res, query) {
   if (!isSafePath(target)) return sendJSON(res, 400, { error: "invalid path" });
 
   const result = await mcsmFetch(config, "/files/list", {
-    query: { uuid, remote_uuid: daemonId, target, page: query.get("page") || "0", page_size: query.get("page_size") || "100" },
+    query: { uuid, remote_uuid: daemonId, target, file_name: "", page: query.get("page") || "0", page_size: query.get("page_size") || "100" },
   });
   return sendJSON(res, result.status === 200 ? 200 : 502, result.data);
 }
