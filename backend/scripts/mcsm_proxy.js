@@ -47,16 +47,28 @@ setInterval(() => {
 let cachedConfig = null;
 let configExpiresAt = 0;
 
-async function loadConfig() {
+async function loadConfig(authHeader) {
   const now = Date.now();
+  // Public routes (no auth): always use cache if available
+  if (!authHeader) {
+    if (cachedConfig) return cachedConfig;
+    throw new Error("no cached config available for public route");
+  }
+  // Admin routes: short 5s cache so config changes are picked up quickly
   if (cachedConfig && now < configExpiresAt) return cachedConfig;
 
   const endpoint = `${PB_URL}/api/collections/mcsm_config/records?perPage=1`;
-  const res = await fetch(endpoint);
-  if (!res.ok) throw new Error(`failed to load mcsm_config: HTTP ${res.status}`);
+  const res = await fetch(endpoint, { headers: { Authorization: authHeader } });
+  if (!res.ok) {
+    if (cachedConfig) return cachedConfig;
+    throw new Error(`failed to load mcsm_config: HTTP ${res.status}`);
+  }
   const payload = await res.json();
   const item = payload?.items?.[0];
-  if (!item) throw new Error("mcsm_config record not found");
+  if (!item) {
+    if (cachedConfig) return cachedConfig;
+    throw new Error("mcsm_config record not found");
+  }
 
   cachedConfig = {
     panelUrl: `${item.panel_url || ""}`.replace(/\/$/, ""),
@@ -65,7 +77,7 @@ async function loadConfig() {
     publicCacheTtl: item.public_cache_ttl || 10000,
     instanceLabels: item.instance_labels || {},
   };
-  configExpiresAt = now + CONFIG_CACHE_TTL_MS;
+  configExpiresAt = now + 5000; // 5s TTL for admin-loaded config
   return cachedConfig;
 }
 
@@ -413,7 +425,7 @@ const server = http.createServer(async (req, res) => {
       const isValid = await verifyPBAuth(authHeader);
       if (!isValid) return sendJSON(res, 401, { error: "unauthorized" });
 
-      const config = await loadConfig();
+      const config = await loadConfig(authHeader);
       if (!config.enabled) return sendJSON(res, 503, { error: "mcsm disabled" });
 
       if (path === "/admin/overview" && req.method === "GET") {
