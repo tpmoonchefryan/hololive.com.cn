@@ -76,6 +76,7 @@ async function loadConfig(authHeader) {
     enabled: !!item.enabled,
     publicCacheTtl: item.public_cache_ttl || 10000,
     instanceLabels: item.instance_labels || {},
+    hiddenInstances: item.hidden_instances || [],
   };
   configExpiresAt = now + 5000; // 5s TTL for admin-loaded config
   return cachedConfig;
@@ -96,24 +97,32 @@ async function mcsmFetch(config, path, { method = "GET", body, query } = {}) {
   const url = new URL(`/api${path}`, config.panelUrl);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== null) url.searchParams.set(k, v);
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
     }
   }
-  url.searchParams.set("apikey", config.apiKey);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  const opts = { method, signal: controller.signal, headers: {} };
+  const opts = {
+    method,
+    signal: controller.signal,
+    headers: { "x-request-api-key": config.apiKey },
+  };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
 
   try {
-    const res = await fetch(url.toString(), opts);
+    const finalUrl = url.toString();
+    logger.debug(`MCSM ${method} ${finalUrl}`);
+    const res = await fetch(finalUrl, opts);
     clearTimeout(timeout);
     const data = await res.json();
+    if (data?.status && data.status !== 200) {
+      logger.warn(`MCSM ${method} ${path} → ${data.status}: ${typeof data.data === "string" ? data.data : JSON.stringify(data.data)}`);
+    }
     return { status: res.status, data };
   } catch (err) {
     clearTimeout(timeout);
@@ -181,10 +190,15 @@ async function handlePublicStatus(req, res) {
   }
 
   const nodes = result.data.data;
+  const hiddenSet = new Set(Array.isArray(config.hiddenInstances) ? config.hiddenInstances : []);
   const instances = [];
 
   for (const node of Array.isArray(nodes) ? nodes : []) {
+    const nodeCpu = typeof node.system?.cpuUsage === "number" ? Math.round(node.system.cpuUsage * 100) / 100 : null;
+    const nodeMemTotal = typeof node.system?.totalmem === "number" ? node.system.totalmem : null;
+    const nodeMemUsed = typeof node.system?.memUsage === "number" ? node.system.memUsage : null;
     for (const inst of node.instances || []) {
+      if (hiddenSet.has(inst.instanceUuid)) continue;
       instances.push({
         instanceUuid: inst.instanceUuid,
         daemonId: node.uuid,
@@ -194,6 +208,9 @@ async function handlePublicStatus(req, res) {
         maxPlayers: inst.info?.maxPlayers ?? -1,
         cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
         memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
+        nodeCpu,
+        nodeMemTotal,
+        nodeMemUsed,
       });
     }
   }
@@ -295,7 +312,8 @@ async function handleFilesRead(config, req, res) {
   }
   if (!isSafePath(body.target)) return sendJSON(res, 400, { error: "invalid path" });
 
-  const result = await mcsmFetch(config, "/files/read", {
+  // MCSM uses PUT /files/ with only target (no text) to read file content
+  const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
     body: { target: body.target },
     query: { uuid: body.uuid, daemonId: body.daemonId },
@@ -311,7 +329,8 @@ async function handleFilesWrite(config, req, res) {
   }
   if (!isSafePath(body.target)) return sendJSON(res, 400, { error: "invalid path" });
 
-  const result = await mcsmFetch(config, "/files/write", {
+  // MCSM uses PUT /files/ with target + text to write file content
+  const result = await mcsmFetch(config, "/files/", {
     method: "PUT",
     body: { target: body.target, text: body.content },
     query: { uuid: body.uuid, daemonId: body.daemonId },
@@ -361,7 +380,8 @@ async function handleFilesDelete(config, req, res) {
     if (!isSafePath(t)) return sendJSON(res, 400, { error: "invalid path" });
   }
 
-  const result = await mcsmFetch(config, "/files", {
+  // MCSM DELETE /files/ expects query: {uuid, daemonId}, body: {targets}
+  const result = await mcsmFetch(config, "/files/", {
     method: "DELETE",
     body: { targets: body.targets },
     query: { uuid: body.uuid, daemonId: body.daemonId },

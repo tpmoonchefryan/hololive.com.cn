@@ -268,6 +268,45 @@ export default function useMCSMData() {
         await mcsmPut("/admin/files/move", { uuid, daemonId, targets });
     }, []);
 
+    const handleToggleHide = useCallback(async (instanceUuid) => {
+        if (!configId || !config) return;
+        const hidden = Array.isArray(config.hidden_instances) ? [...config.hidden_instances] : [];
+        const idx = hidden.indexOf(instanceUuid);
+        if (idx >= 0) {
+            hidden.splice(idx, 1);
+        } else {
+            hidden.push(instanceUuid);
+        }
+        const updated = { ...config, hidden_instances: hidden };
+        try {
+            await pb.collection("mcsm_config").update(configId, updated);
+            setConfig(updated);
+            notify(t("admin.mcsm.settings.saveSuccess"), "success");
+        } catch (err) {
+            logger.error("Failed to toggle hide:", err);
+            notify(t("admin.mcsm.settings.saveError"), "error");
+        }
+    }, [configId, config, t, notify]);
+
+    const handleRenameInstance = useCallback(async (instanceUuid, newName) => {
+        if (!configId || !config) return;
+        const labels = { ...(config.instance_labels || {}) };
+        if (newName) {
+            labels[instanceUuid] = newName;
+        } else {
+            delete labels[instanceUuid];
+        }
+        const updated = { ...config, instance_labels: labels };
+        try {
+            await pb.collection("mcsm_config").update(configId, updated);
+            setConfig(updated);
+            notify(t("admin.mcsm.settings.saveSuccess"), "success");
+        } catch (err) {
+            logger.error("Failed to rename instance:", err);
+            notify(t("admin.mcsm.settings.saveError"), "error");
+        }
+    }, [configId, config, t, notify]);
+
     return {
         activeTab, setActiveTab,
         config, setConfig, configId,
@@ -279,5 +318,6 @@ export default function useMCSMData() {
         fetchOverview, fetchInstances, fetchAllInstances, handleInstanceAction,
         startConsolePolling, stopConsolePolling, handleSendCommand,
         fetchFiles, readFile, writeFile, createDir, createFile, deleteFiles, moveFile,
+        handleToggleHide, handleRenameInstance,
     };
 }

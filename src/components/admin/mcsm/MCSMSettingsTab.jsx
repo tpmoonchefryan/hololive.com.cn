@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Save, Loader2, Wifi, Plus, Trash2 } from "lucide-react";
+import { Save, Loader2, Wifi, Plus, Trash2, EyeOff } from "lucide-react";
 import { useState } from "react";
 
 export default function MCSMSettingsTab({ config, setConfig, saving, onSave, onTest, testingConnection }) {
@@ -10,6 +10,7 @@ export default function MCSMSettingsTab({ config, setConfig, saving, onSave, onT
     if (!config) return null;
 
     const labels = config.instance_labels || {};
+    const hiddenInstances = Array.isArray(config.hidden_instances) ? config.hidden_instances : [];
 
     const handleAddLabel = () => {
         if (!newLabelUuid.trim() || !newLabelName.trim()) return;
@@ -22,6 +23,10 @@ export default function MCSMSettingsTab({ config, setConfig, saving, onSave, onT
         const next = { ...labels };
         delete next[uuid];
         setConfig({ ...config, instance_labels: next });
+    };
+
+    const handleUnhide = (uuid) => {
+        setConfig({ ...config, hidden_instances: hiddenInstances.filter((id) => id !== uuid) });
     };
 
     return (
@@ -105,6 +110,27 @@ export default function MCSMSettingsTab({ config, setConfig, saving, onSave, onT
                     </button>
                 </div>
             </div>
+
+            {hiddenInstances.length > 0 && (
+                <div>
+                    <h3 className="text-sm font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                        <EyeOff className="w-3.5 h-3.5" />
+                        {t("admin.mcsm.settings.hiddenInstances")}
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-2">{t("admin.mcsm.settings.hiddenDesc")}</p>
+                    <div className="space-y-1">
+                        {hiddenInstances.map((uuid) => (
+                            <div key={uuid} className="flex items-center gap-2 text-sm">
+                                <code className="px-2 py-1 bg-slate-100 rounded text-xs flex-1 truncate">{uuid}</code>
+                                {labels[uuid] && <span className="text-slate-500">{labels[uuid]}</span>}
+                                <button onClick={() => handleUnhide(uuid)} className="p-1 text-amber-600 hover:text-amber-800">
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <div className="flex items-center gap-3 pt-2">
                 <button

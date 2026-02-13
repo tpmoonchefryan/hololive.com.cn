@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Activity, Users, Cpu, MemoryStick, Loader2 } from "lucide-react";
+import { Activity, Cpu, MemoryStick, Loader2 } from "lucide-react";
 import { createAppLogger } from "../../lib/appLogger";
 
 const logger = createAppLogger("MCSMStatusPanel");
@@ -61,38 +61,45 @@ export default function MCSMStatusPanel() {
                 </div>
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {(data?.instances || []).map((inst) => (
-                        <div key={inst.instanceUuid} className="p-4 rounded-lg bg-slate-50 hover:bg-slate-100 transition-colors">
-                            <div className="flex items-center justify-between mb-3">
-                                <span className="font-semibold text-slate-800 truncate">{inst.name}</span>
-                                <span className={`w-3 h-3 rounded-full ${STATUS_COLORS[inst.status] || "bg-gray-400"} ${inst.status === 3 ? "animate-pulse" : ""}`} />
-                            </div>
-                            <div className="space-y-2 text-sm">
-                                <div className="flex items-center gap-2 text-slate-600">
-                                    <Users className="w-4 h-4" />
-                                    <span>{inst.currentPlayers >= 0 ? inst.currentPlayers : "-"} / {inst.maxPlayers >= 0 ? inst.maxPlayers : "-"}</span>
+                    {(data?.instances || []).map((inst) => {
+                        const nodeMem = inst.nodeMemTotal && inst.nodeMemUsed != null
+                            ? Math.round(inst.nodeMemUsed / inst.nodeMemTotal * 100)
+                            : null;
+                        return (
+                            <div key={inst.instanceUuid} className="p-4 rounded-lg bg-slate-50 hover:bg-slate-100 transition-colors">
+                                <div className="flex items-center justify-between mb-3">
+                                    <span className="font-semibold text-slate-800 truncate">{inst.name}</span>
+                                    <span className={`w-3 h-3 rounded-full ${STATUS_COLORS[inst.status] || "bg-gray-400"} ${inst.status === 3 ? "animate-pulse" : ""}`} />
                                 </div>
-                                {inst.cpuUsage !== null && (
-                                    <div className="flex items-center gap-2">
-                                        <Cpu className="w-4 h-4 text-slate-500" />
-                                        <div className="flex-1 bg-slate-200 rounded-full h-2">
-                                            <div
-                                                className="bg-blue-500 h-2 rounded-full transition-all"
-                                                style={{ width: `${Math.min(inst.cpuUsage, 100)}%` }}
-                                            />
+                                <div className="space-y-2 text-sm">
+                                    {inst.nodeCpu !== null && (
+                                        <div className="flex items-center gap-2">
+                                            <Cpu className="w-4 h-4 text-slate-500 shrink-0" />
+                                            <div className="flex-1 bg-slate-200 rounded-full h-2">
+                                                <div
+                                                    className="bg-blue-500 h-2 rounded-full transition-all"
+                                                    style={{ width: `${Math.min(inst.nodeCpu, 100)}%` }}
+                                                />
+                                            </div>
+                                            <span className="text-xs text-slate-500 w-12 text-right">{inst.nodeCpu}%</span>
                                         </div>
-                                        <span className="text-xs text-slate-500 w-12 text-right">{inst.cpuUsage}%</span>
-                                    </div>
-                                )}
-                                {inst.memUsage !== null && (
-                                    <div className="flex items-center gap-2">
-                                        <MemoryStick className="w-4 h-4 text-slate-500" />
-                                        <span className="text-slate-600">{inst.memUsage} MB</span>
-                                    </div>
-                                )}
+                                    )}
+                                    {nodeMem !== null && (
+                                        <div className="flex items-center gap-2">
+                                            <MemoryStick className="w-4 h-4 text-slate-500 shrink-0" />
+                                            <div className="flex-1 bg-slate-200 rounded-full h-2">
+                                                <div
+                                                    className="bg-purple-500 h-2 rounded-full transition-all"
+                                                    style={{ width: `${Math.min(nodeMem, 100)}%` }}
+                                                />
+                                            </div>
+                                            <span className="text-xs text-slate-500 w-12 text-right">{nodeMem}%</span>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
         </div>

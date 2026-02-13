@@ -84,6 +84,9 @@ export default function MCSMManager() {
                         fetchAllInstances={data.fetchAllInstances}
                         handleInstanceAction={data.handleInstanceAction}
                         actionLoading={data.actionLoading}
+                        config={data.config}
+                        onToggleHide={data.handleToggleHide}
+                        onRename={data.handleRenameInstance}
                     />
                 )}
                 {data.activeTab === "console" && (

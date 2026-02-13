@@ -3,12 +3,18 @@ import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 import MCSMInstanceCard from "./MCSMInstanceCard";
 
-export default function MCSMInstancesTab({ instances, fetchAllInstances, handleInstanceAction, actionLoading }) {
+export default function MCSMInstancesTab({
+    instances, fetchAllInstances, handleInstanceAction, actionLoading,
+    config, onToggleHide, onRename,
+}) {
     const { t } = useTranslation();
 
     useEffect(() => {
         fetchAllInstances();
     }, [fetchAllInstances]);
+
+    const hiddenSet = new Set(config?.hidden_instances || []);
+    const labels = config?.instance_labels || {};
 
     return (
         <div className="space-y-6">
@@ -35,6 +41,10 @@ export default function MCSMInstancesTab({ instances, fetchAllInstances, handleI
                             instance={inst}
                             actions={handleInstanceAction}
                             actionLoading={actionLoading}
+                            isHidden={hiddenSet.has(inst.instanceUuid)}
+                            displayName={labels[inst.instanceUuid] || ""}
+                            onToggleHide={onToggleHide}
+                            onRename={onRename}
                         />
                     ))}
                 </div>
