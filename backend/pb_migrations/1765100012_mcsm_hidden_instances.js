@@ -5,7 +5,7 @@
 migrate((app) => {
     const collection = app.findCollectionByNameOrId("mcsm_config");
 
-    collection.fields.push({
+    collection.fields.add(new Field({
         "hidden": false,
         "id": "json_mcsm_hidden",
         "maxSize": 50000,
@@ -14,7 +14,7 @@ migrate((app) => {
         "required": false,
         "system": false,
         "type": "json"
-    });
+    }));
 
     app.save(collection);
 
