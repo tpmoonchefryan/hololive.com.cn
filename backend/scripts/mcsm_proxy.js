@@ -243,9 +243,10 @@ async function handlePublicStatus(req, res) {
         status: inst.status,
         currentPlayers: inst.info?.currentPlayers ?? -1,
         maxPlayers: inst.info?.maxPlayers ?? -1,
-        cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
-        memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
         // Public page should display node-level metrics for the instance host node.
+        // Keep cpuUsage/memUsage keys for frontend compatibility, but value is node usage (%).
+        cpuUsage: nodeCpuPercent,
+        memUsage: nodeMemoryPercent,
         nodeCpuPercent,
         nodeMemoryPercent,
         // Legacy fields kept for backward compatibility.

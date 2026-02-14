@@ -79,11 +79,11 @@ export default function MCSMStatusPanel() {
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {(data?.instances || []).map((inst) => {
-                        const nodeCpuPercent = normalizePercent(
-                            inst.nodeCpuPercent ?? inst.nodeCpu
+                        const cpuPercent = normalizePercent(
+                            inst.cpuUsage ?? inst.nodeCpuPercent ?? inst.nodeCpu
                         );
-                        const nodeMemoryPercent = normalizePercent(
-                            inst.nodeMemoryPercent ?? (
+                        const memoryPercent = normalizePercent(
+                            inst.memUsage ?? inst.nodeMemoryPercent ?? (
                                 inst.nodeMemTotal && inst.nodeMemUsed != null
                                     ? (inst.nodeMemUsed / inst.nodeMemTotal) * 100
                                     : null
@@ -96,14 +96,14 @@ export default function MCSMStatusPanel() {
                                 label: t("serverInfo.mcsm.cpu", { defaultValue: "CPU" }),
                                 icon: Cpu,
                                 barClass: "bg-blue-500",
-                                value: nodeCpuPercent,
+                                value: cpuPercent,
                             },
                             {
                                 key: "memory",
                                 label: t("serverInfo.mcsm.memory", { defaultValue: "内存" }),
                                 icon: MemoryStick,
                                 barClass: "bg-purple-500",
-                                value: nodeMemoryPercent,
+                                value: memoryPercent,
                             },
                         ];
 
