@@ -49,6 +49,15 @@ const DEFAULT_TRANSLATION_CONFIG = {
   cache_ttl_ms: 1800000,
 };
 
+function createAppError(code, message, extra = {}) {
+  const error = new Error(message);
+  error.code = code;
+  if (extra && typeof extra === "object") {
+    Object.assign(error, extra);
+  }
+  return error;
+}
+
 function sanitizeApiKey(raw) {
   const value = `${raw || ""}`.trim();
   if (!value) return "";
@@ -358,9 +367,58 @@ function parseJSONObject(text) {
   return null;
 }
 
+function normalizeLangAlias(raw) {
+  const value = `${raw || ""}`.trim().toLowerCase();
+  if (!value) return "";
+  if (["en", "english", "英文", "英语", "英語"].includes(value)) return "en";
+  if (["ja", "japanese", "日文", "日语", "日語", "日本語"].includes(value)) return "ja";
+  if (["zh", "chinese", "中文", "汉语", "漢語", "中国語"].includes(value)) return "zh";
+  return "";
+}
+
+function parseLooseLanguageObject(text, targets) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const objectSlice = trimmed.slice(firstBrace, lastBrace + 1);
+    const repaired = objectSlice
+      .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)/g, '$1"$2"$3')
+      .replace(/'/g, '"')
+      .replace(/,\s*([}\]])/g, "$1");
+    const parsed = parseJSON(repaired);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  const map = {};
+  for (const line of lines) {
+    const match = line.match(/^\s*["'`]?([A-Za-z\u4e00-\u9fa5]+)["'`]?\s*[:：]\s*(.+?)\s*$/);
+    if (!match) continue;
+    const lang = normalizeLangAlias(match[1]);
+    if (!lang) continue;
+    if (!SUPPORTED_LANGS.includes(lang)) continue;
+    map[lang] = match[2];
+  }
+
+  if (targets.every((lang) => typeof map[lang] === "string")) {
+    return map;
+  }
+
+  return null;
+}
+
 function ensureTranslationShape(parsed, { sourceLang, targets }) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("model output is not a valid JSON object");
+    throw createAppError(
+      "MODEL_PARSE_ERROR",
+      "model output is not a valid JSON object"
+    );
   }
 
   const result = {};
@@ -380,7 +438,17 @@ function ensureTranslationShape(parsed, { sourceLang, targets }) {
   const noSourceLang = !Object.prototype.hasOwnProperty.call(parsed, sourceLang);
 
   if (!hasAllTargets) {
-    throw new Error("model output missing target languages");
+    throw createAppError(
+      "MODEL_STRUCTURE_ERROR",
+      "model output missing target languages",
+      {
+        checks: {
+          json_parse: true,
+          has_all_targets: false,
+          no_source_lang: noSourceLang,
+        },
+      }
+    );
   }
 
   return {
@@ -414,7 +482,7 @@ async function rightCodeRequest(config, prompt) {
 
   try {
     if (!config.right_code_api_key) {
-      throw new Error("Right Code API key is empty");
+      throw createAppError("RIGHT_CODE_KEY_EMPTY", "Right Code API key is empty");
     }
 
     const endpoint =
@@ -473,7 +541,15 @@ async function rightCodeRequest(config, prompt) {
         payload?.message ||
         `${rawText || ""}`.trim().slice(0, 300) ||
         "unknown error";
-      lastError = new Error(`Right Code request failed: HTTP ${res.status} - ${detail}`);
+      lastError = createAppError(
+        "RIGHT_CODE_HTTP_ERROR",
+        `Right Code request failed: HTTP ${res.status} - ${detail}`,
+        {
+          http_status: res.status,
+          auth_mode: authMode,
+          response_excerpt: `${rawText || ""}`.trim().slice(0, 500),
+        }
+      );
 
       // If auth fails on first mode, try fallback mode.
       if ((res.status === 401 || res.status === 403) && authMode === "authorization") {
@@ -484,7 +560,7 @@ async function rightCodeRequest(config, prompt) {
       throw lastError;
     }
 
-    throw lastError || new Error("Right Code request failed");
+    throw lastError || createAppError("RIGHT_CODE_UNKNOWN_ERROR", "Right Code request failed");
   } finally {
     clearTimeout(timeout);
   }
@@ -585,12 +661,26 @@ async function translateByConfig(config, { sourceLang, targets, text }) {
     const modelPayload = await rightCodeRequest(config, prompt);
     const modelText = extractResponseText(modelPayload);
     if (!modelText) {
-      throw new Error("empty model output");
+      throw createAppError("MODEL_EMPTY_OUTPUT", "empty model output");
     }
 
-    const parsed = parseJSONObject(modelText);
+    let parsed = parseJSONObject(modelText);
     if (!parsed) {
-      throw new Error("failed to parse model JSON output");
+      parsed = parseLooseLanguageObject(modelText, targets);
+    }
+    if (!parsed) {
+      throw createAppError(
+        "MODEL_PARSE_ERROR",
+        "failed to parse model JSON output",
+        {
+          output_excerpt: modelText.slice(0, 500),
+          checks: {
+            json_parse: false,
+            has_all_targets: false,
+            no_source_lang: false,
+          },
+        }
+      );
     }
 
     const shaped = ensureTranslationShape(parsed, { sourceLang, targets });
@@ -738,17 +828,26 @@ async function handleTranslateTest(req, res, authHeader) {
     });
   } catch (error) {
     logger.warn("translate test failed:", error?.message || error);
+    const connectivityOk =
+      error?.code === "MODEL_PARSE_ERROR" ||
+      error?.code === "MODEL_STRUCTURE_ERROR" ||
+      error?.code === "MODEL_EMPTY_OUTPUT";
+    const checks = error?.checks || {
+      json_parse: false,
+      no_source_lang: false,
+      has_all_targets: false,
+    };
+
     return sendJSON(res, 200, {
       ok: false,
-      connectivity_ok: false,
+      connectivity_ok: connectivityOk,
       structure_ok: false,
       error: error?.message || "translation test failed",
-      checks: {
-        json_parse: false,
-        no_source_lang: false,
-        has_all_targets: false,
-      },
+      checks,
+      output_excerpt: error?.output_excerpt || error?.response_excerpt || "",
       meta: {
+        code: error?.code || "UNKNOWN",
+        http_status: error?.http_status || null,
         duration_ms: Date.now() - startAt,
       },
     });
