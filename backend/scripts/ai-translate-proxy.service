@@ -1,0 +1,20 @@
+[Unit]
+Description=AI Translation Proxy Service
+After=network.target pocketbase.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/hololive.com.cn/backend/scripts
+ExecStart=/usr/bin/node ai_translate_proxy.js
+Restart=always
+RestartSec=5
+Environment=PB_URL=http://127.0.0.1:8090
+Environment=AI_TRANSLATE_PROXY_PORT=18093
+Environment=AI_TRANSLATE_ALLOWED_ORIGIN=https://hololive.com.cn
+Environment=AI_TRANSLATE_CONFIG_CACHE_TTL_MS=5000
+Environment=AI_TRANSLATE_DEFAULT_TIMEOUT_MS=20000
+Environment=AI_TRANSLATE_RATE_LIMIT_MAX=30
+
+[Install]
+WantedBy=multi-user.target

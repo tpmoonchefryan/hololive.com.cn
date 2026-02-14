@@ -6,6 +6,11 @@ import ImagePicker from "../../components/admin/ImagePicker";
 import { logCreate, logUpdate } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
+import {
+  detectSourceLanguage,
+  getTargetLangs,
+  requestAdminTranslation,
+} from "../../lib/adminTranslateApi";
 
 /**
  * 文章编辑器组件（支持三语言）
@@ -135,7 +140,6 @@ export default function PostEditor() {
       const fieldsToTranslate = ["title", "summary", "content"];
       const updatedFormData = { ...formData };
       let translatedCount = 0;
-      const { detectSourceLanguage, translateFields } = await import("../../lib/translation");
 
       for (let i = 0; i < fieldsToTranslate.length; i++) {
         const fieldName = fieldsToTranslate[i];
@@ -145,27 +149,42 @@ export default function PostEditor() {
         // 检测源语言
         const sourceLang = detectSourceLanguage(field);
         if (!sourceLang) continue;
+        const sourceText = field[sourceLang]?.trim();
+        if (!sourceText) continue;
 
         // 确定目标语言
-        const targetLangs = ["zh", "en", "ja"].filter((lang) => lang !== sourceLang);
+        const targetLangs = getTargetLangs(sourceLang);
+        if (targetLangs.length === 0) continue;
 
         // 添加延迟
         if (i > 0) {
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
 
-        // 翻译字段
-        const translated = await translateFields(
-          field,
+        const response = await requestAdminTranslation({
+          scene: "post_editor",
           sourceLang,
-          targetLangs,
-          (progressMsg) => {
-            setToast({ type: "info", message: progressMsg });
-          }
-        );
+          targets: targetLangs,
+          fields: {
+            [fieldName]: sourceText,
+          },
+        });
+        const translatedMap = response?.translations?.[fieldName] || {};
 
-        updatedFormData[fieldName] = translated;
-        translatedCount++;
+        let hasAnyTarget = false;
+        const nextFieldValue = {
+          ...updatedFormData[fieldName],
+        };
+        for (const targetLang of targetLangs) {
+          if (typeof translatedMap[targetLang] === "string") {
+            nextFieldValue[targetLang] = translatedMap[targetLang];
+            hasAnyTarget = true;
+          }
+        }
+        if (hasAnyTarget) {
+          updatedFormData[fieldName] = nextFieldValue;
+          translatedCount++;
+        }
       }
 
       if (translatedCount === 0) {

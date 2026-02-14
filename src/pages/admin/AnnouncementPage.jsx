@@ -10,11 +10,17 @@ import {
   Eye,
   Calendar,
   Clock,
+  Languages,
 } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import Modal from "../../components/admin/ui/Modal";
 import { formatLocalizedDate } from "../../utils/localeFormat";
+import {
+  detectSourceLanguage,
+  getTargetLangs,
+  requestAdminTranslation,
+} from "../../lib/adminTranslateApi";
 
 /**
  * Announcement Management Page
@@ -30,6 +36,7 @@ export default function AnnouncementPage() {
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [translating, setTranslating] = useState(false);
   const [formData, setFormData] = useState({
     content: { zh: "", en: "", ja: "" },
     link: "",
@@ -178,6 +185,64 @@ export default function AnnouncementPage() {
     }
   };
 
+  // AI auto translate announcement content
+  const handleAutoTranslate = async () => {
+    try {
+      const sourceLang = detectSourceLanguage(formData.content);
+      if (!sourceLang || !formData.content[sourceLang]?.trim()) {
+        setToast({
+          type: "error",
+          message: t("admin.announcements.toast.noContent"),
+        });
+        return;
+      }
+
+      setTranslating(true);
+      const targets = getTargetLangs(sourceLang);
+      const sourceText = formData.content[sourceLang].trim();
+
+      const response = await requestAdminTranslation({
+        scene: "announcement_editor",
+        sourceLang,
+        targets,
+        fields: {
+          content: sourceText,
+        },
+      });
+
+      const translated = response?.translations?.content || {};
+      setFormData((prev) => ({
+        ...prev,
+        content: {
+          ...prev.content,
+          ...targets.reduce((acc, lang) => {
+            if (typeof translated[lang] === "string") {
+              acc[lang] = translated[lang];
+            }
+            return acc;
+          }, {}),
+        },
+      }));
+
+      setToast({
+        type: "success",
+        message: t("admin.announcements.toast.translateSuccess"),
+      });
+    } catch (error) {
+      logger.error("Failed to auto-translate announcement:", error);
+      const errorMsg =
+        error?.response?.message ||
+        error?.message ||
+        t("admin.announcements.toast.translateError");
+      setToast({
+        type: "error",
+        message: errorMsg,
+      });
+    } finally {
+      setTranslating(false);
+    }
+  };
+
   // Delete announcement
   const handleDelete = async (id) => {
     try {
@@ -258,9 +323,26 @@ export default function AnnouncementPage() {
           <form onSubmit={handleSave} className="space-y-6 px-6 py-5">
             {/* Multi-language Input */}
             <div className="space-y-4">
-              <h4 className="text-sm font-semibold text-slate-800">
-                {t("admin.announcements.form.contentLabel")}
-              </h4>
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-slate-800">
+                  {t("admin.announcements.form.contentLabel")}
+                </h4>
+                <button
+                  type="button"
+                  disabled={translating}
+                  onClick={handleAutoTranslate}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-900 hover:bg-slate-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {translating ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Languages className="w-3.5 h-3.5" />
+                  )}
+                  {translating
+                    ? t("admin.announcements.form.translating")
+                    : t("admin.announcements.form.translate")}
+                </button>
+              </div>
               <div className="space-y-3">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">

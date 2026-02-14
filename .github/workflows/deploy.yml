@@ -112,6 +112,12 @@ jobs:
             sudo /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh
           fi
 
+          # Ensure ai-translate-proxy service + nginx route are installed/updated
+          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh ]; then
+            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh
+            sudo /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh
+          fi
+
           # Restart PocketBase and Velocity Sync Service
           # Note: The runner user must have permission to run this (e.g. root or sudo w/o password)
           sudo systemctl restart pocketbase
@@ -119,5 +125,6 @@ jobs:
           sudo systemctl restart map-proxy
           sudo systemctl restart mcsm-proxy
           sudo systemctl restart pb-admin-gate
+          sudo systemctl restart ai-translate-proxy
           
           echo "Deployment successful."

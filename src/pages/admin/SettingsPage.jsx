@@ -7,8 +7,80 @@ import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "../../components/admin/ui/Modal";
+import { testAdminTranslationConfig } from "../../lib/adminTranslateApi";
 
 const SETTINGS_ID = "1"; // 单例模式，固定 ID
+const DEFAULT_TRANSLATION_TEST_TEXT = "这是配置测试文本，请翻译。";
+const DEFAULT_TRANSLATION_CONFIG = {
+  enabled: true,
+  engine: "free",
+  ai_provider: "right_code",
+  right_code_base_url: "https://www.right.codes/codex/v1",
+  right_code_api_key: "",
+  right_code_model: "gpt-5.2",
+  right_code_endpoint: "responses",
+  request_timeout_ms: 20000,
+  max_input_chars: 30000,
+  fill_policy: "fill_empty_only",
+  enable_cache: true,
+  cache_ttl_ms: 1800000,
+};
+
+function normalizeTranslationConfig(raw = {}) {
+  return {
+    ...DEFAULT_TRANSLATION_CONFIG,
+    ...raw,
+    enabled: raw?.enabled !== false,
+    engine: raw?.engine === "ai" ? "ai" : "free",
+    ai_provider: raw?.ai_provider === "right_code" ? "right_code" : "right_code",
+    right_code_base_url: `${raw?.right_code_base_url || DEFAULT_TRANSLATION_CONFIG.right_code_base_url}`.replace(/\/$/, ""),
+    right_code_api_key: `${raw?.right_code_api_key || ""}`,
+    right_code_model: `${raw?.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`,
+    right_code_endpoint:
+      raw?.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses",
+    request_timeout_ms: Number.isFinite(Number(raw?.request_timeout_ms))
+      ? Number(raw.request_timeout_ms)
+      : DEFAULT_TRANSLATION_CONFIG.request_timeout_ms,
+    max_input_chars: Number.isFinite(Number(raw?.max_input_chars))
+      ? Number(raw.max_input_chars)
+      : DEFAULT_TRANSLATION_CONFIG.max_input_chars,
+    fill_policy:
+      raw?.fill_policy === "overwrite_target" ? "overwrite_target" : "fill_empty_only",
+    enable_cache: raw?.enable_cache !== false,
+    cache_ttl_ms: Number.isFinite(Number(raw?.cache_ttl_ms))
+      ? Number(raw.cache_ttl_ms)
+      : DEFAULT_TRANSLATION_CONFIG.cache_ttl_ms,
+  };
+}
+
+function normalizeTranslationConfigForSave(raw = {}) {
+  const normalized = normalizeTranslationConfig(raw);
+  return {
+    enabled: normalized.enabled !== false,
+    engine: normalized.engine === "ai" ? "ai" : "free",
+    ai_provider: "right_code",
+    right_code_base_url: `${normalized.right_code_base_url || DEFAULT_TRANSLATION_CONFIG.right_code_base_url}`.replace(/\/$/, ""),
+    right_code_api_key: `${normalized.right_code_api_key || ""}`.trim(),
+    right_code_model: `${normalized.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`.trim() || DEFAULT_TRANSLATION_CONFIG.right_code_model,
+    right_code_endpoint:
+      normalized.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses",
+    request_timeout_ms: Math.max(
+      1000,
+      Number.parseInt(`${normalized.request_timeout_ms || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms}`, 10) || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms
+    ),
+    max_input_chars: Math.max(
+      100,
+      Number.parseInt(`${normalized.max_input_chars || DEFAULT_TRANSLATION_CONFIG.max_input_chars}`, 10) || DEFAULT_TRANSLATION_CONFIG.max_input_chars
+    ),
+    fill_policy:
+      normalized.fill_policy === "overwrite_target" ? "overwrite_target" : "fill_empty_only",
+    enable_cache: normalized.enable_cache !== false,
+    cache_ttl_ms: Math.max(
+      1000,
+      Number.parseInt(`${normalized.cache_ttl_ms || DEFAULT_TRANSLATION_CONFIG.cache_ttl_ms}`, 10) || DEFAULT_TRANSLATION_CONFIG.cache_ttl_ms
+    ),
+  };
+}
 
 /**
  * 系统设置页面
@@ -24,8 +96,13 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [translationConfigId, setTranslationConfigId] = useState("");
   const [showKeyWarning, setShowKeyWarning] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState(null);
+  const [pendingTranslationUpdate, setPendingTranslationUpdate] = useState(null);
+  const [testingTranslation, setTestingTranslation] = useState(false);
+  const [translationTestText, setTranslationTestText] = useState(DEFAULT_TRANSLATION_TEST_TEXT);
+  const [translationTestResult, setTranslationTestResult] = useState(null);
 
   // 表单状态
   const [formData, setFormData] = useState({
@@ -36,6 +113,7 @@ export default function SettingsPage() {
     },
     admin_entrance_key: "",
     enable_pb_public_entry: true,
+    translation_config: { ...DEFAULT_TRANSLATION_CONFIG },
   });
   const [baiduExtractToast, setBaiduExtractToast] = useState(false);
 
@@ -43,23 +121,54 @@ export default function SettingsPage() {
   const fetchSettings = useCallback(async () => {
     try {
       setLoading(true);
-      const settingsData = await pb.collection("system_settings").getOne(SETTINGS_ID);
+      setError(null);
+
+      let settingsData = null;
+      try {
+        settingsData = await pb.collection("system_settings").getOne(SETTINGS_ID);
+      } catch (err) {
+        if (err?.status !== 404) {
+          throw err;
+        }
+      }
+
+      let translationRecord = null;
+      try {
+        const result = await pb.collection("translation_config").getList(1, 1, {
+          sort: "-updated",
+        });
+        translationRecord = result?.items?.[0] || null;
+      } catch (err) {
+        const message = `${err?.response?.message || err?.message || ""}`.toLowerCase();
+        const missingCollectionContext =
+          err?.status === 404 && message.includes("missing collection context");
+        if (err?.status !== 404 && !missingCollectionContext) {
+          throw err;
+        }
+        logger.warn("translation_config is unavailable, fallback to defaults.");
+      }
+
       setSettings(settingsData);
+      setTranslationConfigId(translationRecord?.id || "");
       setFormData({
-        microsoft_auth_config: settingsData.microsoft_auth_config || {},
-        analytics_config: settingsData.analytics_config || { google: "", baidu: "" },
-        admin_entrance_key: settingsData.admin_entrance_key || "",
-        enable_pb_public_entry: settingsData.enable_pb_public_entry !== false,
+        microsoft_auth_config: settingsData?.microsoft_auth_config || {},
+        analytics_config: settingsData?.analytics_config || { google: "", baidu: "" },
+        admin_entrance_key: settingsData?.admin_entrance_key || "",
+        enable_pb_public_entry: settingsData?.enable_pb_public_entry !== false,
+        translation_config: normalizeTranslationConfig(translationRecord || {}),
       });
     } catch (error) {
       logger.error("Failed to fetch settings:", error);
       // 如果记录不存在，使用默认值
       if (error?.status === 404) {
+        setSettings(null);
+        setTranslationConfigId("");
         setFormData({
           microsoft_auth_config: {},
           analytics_config: { google: "", baidu: "" },
           admin_entrance_key: "",
           enable_pb_public_entry: true,
+          translation_config: { ...DEFAULT_TRANSLATION_CONFIG },
         });
       } else {
         setError(t("admin.settingsPage.error"));
@@ -102,7 +211,53 @@ export default function SettingsPage() {
     checkMismatch();
   }, [settings, adminKey, t, confirm]);
 
-  const saveSettings = async (updateData, keyChanged) => {
+  const patchTranslationConfig = (patch) => {
+    setFormData((prev) => ({
+      ...prev,
+      translation_config: {
+        ...prev.translation_config,
+        ...patch,
+      },
+    }));
+  };
+
+  const saveTranslationConfig = async (updateData) => {
+    if (!updateData || typeof updateData !== "object") return;
+
+    try {
+      if (translationConfigId) {
+        await pb.collection("translation_config").update(translationConfigId, updateData);
+        return;
+      }
+
+      const list = await pb.collection("translation_config").getList(1, 1, {
+        sort: "-updated",
+      });
+      const existing = list?.items?.[0];
+      if (existing?.id) {
+        await pb.collection("translation_config").update(existing.id, updateData);
+        setTranslationConfigId(existing.id);
+        return;
+      }
+
+      const created = await pb.collection("translation_config").create(updateData);
+      if (created?.id) {
+        setTranslationConfigId(created.id);
+      }
+    } catch (error) {
+      const message = `${error?.response?.message || error?.message || ""}`.toLowerCase();
+      const missingCollectionContext =
+        error?.status === 404 && message.includes("missing collection context");
+      if (error?.status === 404 || missingCollectionContext) {
+        throw new Error(t("admin.settingsPage.translation.errors.collectionMissing"), {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  };
+
+  const saveSettings = async (updateData, translationUpdateData, keyChanged) => {
     setSaving(true);
     setError(null);
 
@@ -120,6 +275,9 @@ export default function SettingsPage() {
           throw err;
         }
       }
+
+      // 保存翻译配置（单例）
+      await saveTranslationConfig(translationUpdateData);
 
       // 记录系统设置更新日志
       const logDetails = keyChanged
@@ -148,6 +306,46 @@ export default function SettingsPage() {
     }
   };
 
+  const handleTestTranslation = async () => {
+    try {
+      setTestingTranslation(true);
+      setTranslationTestResult(null);
+
+      const overrideConfig = normalizeTranslationConfigForSave(formData.translation_config);
+      const result = await testAdminTranslationConfig({
+        sourceLang: "zh",
+        targets: ["en", "ja"],
+        sampleText: translationTestText || DEFAULT_TRANSLATION_TEST_TEXT,
+        overrideConfig,
+      });
+
+      setTranslationTestResult(result);
+      if (result?.ok) {
+        notify(t("admin.settingsPage.translation.test.success"), "success");
+      } else {
+        notify(
+          `${t("admin.settingsPage.translation.test.failed")}: ${result?.error || t("admin.settingsPage.unknownError")}`,
+          "error"
+        );
+      }
+    } catch (error) {
+      logger.error("Failed to test translation config:", error);
+      const errorMsg =
+        error?.response?.message ||
+        error?.message ||
+        t("admin.settingsPage.translation.test.failed");
+      setTranslationTestResult({
+        ok: false,
+        connectivity_ok: false,
+        structure_ok: false,
+        error: errorMsg,
+      });
+      notify(`${t("admin.settingsPage.translation.test.failed")}: ${errorMsg}`, "error");
+    } finally {
+      setTestingTranslation(false);
+    }
+  };
+
   // 保存设置（含 Key 修改前置检查）
   const handleSave = async (e) => {
     e.preventDefault();
@@ -171,6 +369,9 @@ export default function SettingsPage() {
       admin_entrance_key: normalizedKey,
       enable_pb_public_entry: formData.enable_pb_public_entry !== false,
     };
+    const translationUpdateData = normalizeTranslationConfigForSave(
+      formData.translation_config
+    );
 
     // 检查 admin_entrance_key 是否改变
     const keyChanged =
@@ -179,11 +380,12 @@ export default function SettingsPage() {
     if (keyChanged) {
       // 触发自定义红色警告模态，而不是直接保存
       setPendingUpdate(updateData);
+      setPendingTranslationUpdate(translationUpdateData);
       setShowKeyWarning(true);
       return;
     }
 
-    await saveSettings(updateData, false);
+    await saveSettings(updateData, translationUpdateData, false);
   };
 
   return (
@@ -194,6 +396,7 @@ export default function SettingsPage() {
         onClose={() => {
           setShowKeyWarning(false);
           setPendingUpdate(null);
+          setPendingTranslationUpdate(null);
         }}
         title={t("admin.settingsPage.modal.title")}
         size="md"
@@ -241,6 +444,7 @@ export default function SettingsPage() {
               onClick={() => {
                 setShowKeyWarning(false);
                 setPendingUpdate(null);
+                setPendingTranslationUpdate(null);
               }}
               className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 transition-colors"
             >
@@ -249,7 +453,10 @@ export default function SettingsPage() {
             <button
               type="button"
               disabled={saving}
-              onClick={() => pendingUpdate && saveSettings(pendingUpdate, true)}
+              onClick={() =>
+                pendingUpdate &&
+                saveSettings(pendingUpdate, pendingTranslationUpdate, true)
+              }
               className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
               {saving && (
@@ -469,6 +676,300 @@ export default function SettingsPage() {
                     </span>
                   </label>
                 </div>
+              </div>
+            </div>
+
+            {/* Section 3: 翻译管理 */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+              <div className="flex items-center gap-2 mb-3">
+                <Settings className="w-5 h-5 text-slate-600" />
+                <h2 className="text-lg md:text-xl font-semibold text-slate-900">
+                  {t("admin.settingsPage.translation.title")}
+                </h2>
+              </div>
+              <p className="text-xs md:text-sm text-slate-500 mb-6">
+                {t("admin.settingsPage.translation.description")}
+              </p>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    {t("admin.settingsPage.translation.enabled")}
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={formData.translation_config.enabled !== false}
+                      onChange={(e) =>
+                        patchTranslationConfig({ enabled: e.target.checked })
+                      }
+                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                    />
+                    <span className="font-medium">
+                      {formData.translation_config.enabled !== false
+                        ? t("admin.settingsPage.translation.enabledOn")
+                        : t("admin.settingsPage.translation.enabledOff")}
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    {t("admin.settingsPage.translation.engineLabel")}
+                  </label>
+                  <select
+                    value={formData.translation_config.engine}
+                    onChange={(e) =>
+                      patchTranslationConfig({ engine: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                  >
+                    <option value="free">
+                      {t("admin.settingsPage.translation.engineFree")}
+                    </option>
+                    <option value="ai">
+                      {t("admin.settingsPage.translation.engineAi")}
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    {t("admin.settingsPage.translation.fillPolicyLabel")}
+                  </label>
+                  <select
+                    value={formData.translation_config.fill_policy}
+                    onChange={(e) =>
+                      patchTranslationConfig({ fill_policy: e.target.value })
+                    }
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                  >
+                    <option value="fill_empty_only">
+                      {t("admin.settingsPage.translation.fillPolicyFillEmpty")}
+                    </option>
+                    <option value="overwrite_target">
+                      {t("admin.settingsPage.translation.fillPolicyOverwrite")}
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    {t("admin.settingsPage.translation.cacheLabel")}
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={formData.translation_config.enable_cache !== false}
+                      onChange={(e) =>
+                        patchTranslationConfig({ enable_cache: e.target.checked })
+                      }
+                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                    />
+                    <span className="font-medium">
+                      {formData.translation_config.enable_cache !== false
+                        ? t("admin.settingsPage.translation.cacheOn")
+                        : t("admin.settingsPage.translation.cacheOff")}
+                    </span>
+                  </label>
+                </div>
+
+                {formData.translation_config.engine === "ai" && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.providerLabel")}
+                      </label>
+                      <select
+                        value={formData.translation_config.ai_provider}
+                        onChange={(e) =>
+                          patchTranslationConfig({ ai_provider: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                      >
+                        <option value="right_code">Right Code</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.endpointLabel")}
+                      </label>
+                      <select
+                        value={formData.translation_config.right_code_endpoint}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            right_code_endpoint: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                      >
+                        <option value="responses">responses</option>
+                        <option value="chat_completions">chat/completions</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.baseUrlLabel")}
+                      </label>
+                      <input
+                        type="text"
+                        value={formData.translation_config.right_code_base_url}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            right_code_base_url: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        placeholder="https://www.right.codes/codex/v1"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.modelLabel")}
+                      </label>
+                      <input
+                        type="text"
+                        value={formData.translation_config.right_code_model}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            right_code_model: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        placeholder="gpt-5.2"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.apiKeyLabel")}
+                      </label>
+                      <input
+                        type="password"
+                        value={formData.translation_config.right_code_api_key}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            right_code_api_key: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent font-mono"
+                        placeholder={t("admin.settingsPage.translation.apiKeyPlaceholder")}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.timeoutLabel")}
+                      </label>
+                      <input
+                        type="number"
+                        min={1000}
+                        step={1000}
+                        value={formData.translation_config.request_timeout_ms}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            request_timeout_ms: Number.parseInt(e.target.value || "0", 10) || 0,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                        {t("admin.settingsPage.translation.maxInputLabel")}
+                      </label>
+                      <input
+                        type="number"
+                        min={100}
+                        step={100}
+                        value={formData.translation_config.max_input_chars}
+                        onChange={(e) =>
+                          patchTranslationConfig({
+                            max_input_chars: Number.parseInt(e.target.value || "0", 10) || 0,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">
+                    {t("admin.settingsPage.translation.test.title")}
+                  </p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    {t("admin.settingsPage.translation.test.desc")}
+                  </p>
+                </div>
+                <textarea
+                  rows={3}
+                  value={translationTestText}
+                  onChange={(e) => setTranslationTestText(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent text-sm"
+                  placeholder={t("admin.settingsPage.translation.test.placeholder")}
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={testingTranslation}
+                    onClick={handleTestTranslation}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {testingTranslation && (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    )}
+                    {testingTranslation
+                      ? t("admin.settingsPage.translation.test.testing")
+                      : t("admin.settingsPage.translation.test.button")}
+                  </button>
+                  <span className="text-xs text-slate-500">
+                    {t("admin.settingsPage.translation.onlyTwoTargetsHint")}
+                  </span>
+                </div>
+
+                {translationTestResult && (
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs space-y-2">
+                    <p className="text-slate-700">
+                      {t("admin.settingsPage.translation.test.connectivity")}{" "}
+                      <strong className={translationTestResult.connectivity_ok ? "text-emerald-700" : "text-red-700"}>
+                        {translationTestResult.connectivity_ok
+                          ? t("admin.settingsPage.translation.test.ok")
+                          : t("admin.settingsPage.translation.test.failedShort")}
+                      </strong>
+                    </p>
+                    <p className="text-slate-700">
+                      {t("admin.settingsPage.translation.test.structure")}{" "}
+                      <strong className={translationTestResult.structure_ok ? "text-emerald-700" : "text-red-700"}>
+                        {translationTestResult.structure_ok
+                          ? t("admin.settingsPage.translation.test.ok")
+                          : t("admin.settingsPage.translation.test.failedShort")}
+                      </strong>
+                    </p>
+                    {translationTestResult?.result_preview && (
+                      <div className="space-y-1">
+                        <p className="text-slate-600">
+                          EN: {translationTestResult.result_preview.en || ""}
+                        </p>
+                        <p className="text-slate-600">
+                          JA: {translationTestResult.result_preview.ja || ""}
+                        </p>
+                      </div>
+                    )}
+                    {translationTestResult?.error && (
+                      <p className="text-red-700">
+                        {t("admin.settingsPage.translation.test.errorLabel")}
+                        {translationTestResult.error}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

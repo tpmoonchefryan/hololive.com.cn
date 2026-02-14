@@ -17,6 +17,7 @@ PB_VERSION="0.26.5"
 INSTALL_DIR="/var/www/$DOMAIN"
 PB_PORT="8090"
 PB_ADMIN_GATE_PORT="18092"
+AI_TRANSLATE_PROXY_PORT="18093"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -145,6 +146,15 @@ if [ -f "$INSTALL_DIR/backend/scripts/pb-admin-gate.service" ]; then
     systemctl restart pb-admin-gate
 fi
 
+# Setup ai-translate-proxy service if script exists
+if [ -f "$INSTALL_DIR/backend/scripts/ai-translate-proxy.service" ]; then
+    log "Installing ai-translate-proxy service..."
+    cp "$INSTALL_DIR/backend/scripts/ai-translate-proxy.service" /etc/systemd/system/ai-translate-proxy.service
+    systemctl daemon-reload
+    systemctl enable ai-translate-proxy
+    systemctl restart ai-translate-proxy
+fi
+
 # Wait for PB to start
 sleep 5
 
@@ -217,6 +227,16 @@ server {
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
         proxy_cache_bypass \$http_upgrade;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # AI Translation Proxy
+    location /ai-api/ {
+        proxy_pass http://127.0.0.1:$AI_TRANSLATE_PROXY_PORT/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
