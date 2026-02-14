@@ -212,6 +212,15 @@ async function fetchNodesWithInstances(config) {
   return Array.isArray(result.data?.data) ? result.data.data : [];
 }
 
+async function fetchOverviewRemoteNodes(config) {
+  const result = await mcsmFetch(config, "/overview");
+  if (result.data?.status !== 200 || typeof result.data?.data !== "object") {
+    logger.warn(`overview status=${result.data?.status} msg=${typeof result.data?.data === "string" ? result.data.data : ""}`);
+    return [];
+  }
+  return Array.isArray(result.data.data?.remote) ? result.data.data.remote : [];
+}
+
 // --- Public route handler ---
 async function handlePublicStatus(req, res) {
   const now = Date.now();
@@ -223,14 +232,30 @@ async function handlePublicStatus(req, res) {
   }
 
   const nodes = await fetchNodesWithInstances(config);
+  const overviewRemoteNodes = await fetchOverviewRemoteNodes(config);
+  const overviewNodeMap = new Map(
+    overviewRemoteNodes
+      .filter((node) => node && node.uuid)
+      .map((node) => [node.uuid, node])
+  );
   const hiddenSet = new Set(Array.isArray(config.hiddenInstances) ? config.hiddenInstances : []);
   const instances = [];
 
   for (const node of nodes) {
     if (!node.available || !node.uuid) continue;
-    const nodeCpuPercent = normalizePercent(node.system?.cpuUsage);
-    const nodeMemTotal = typeof node.system?.totalmem === "number" ? node.system.totalmem : null;
-    const nodeMemUsed = typeof node.system?.memUsage === "number" ? node.system.memUsage : null;
+    // Keep the same metric source as admin dashboard node list: /overview -> remote[].system
+    const dashboardNode = overviewNodeMap.get(node.uuid);
+    const metricSystem = dashboardNode?.system || node.system || {};
+
+    const nodeCpuPercent = normalizePercent(metricSystem.cpuUsage);
+    const nodeMemTotal = typeof metricSystem.totalmem === "number" ? metricSystem.totalmem : null;
+    const nodeMemFree = typeof metricSystem.freemem === "number" ? metricSystem.freemem : null;
+    const nodeMemUsedByFree = nodeMemTotal !== null && nodeMemFree !== null
+      ? Math.max(0, nodeMemTotal - nodeMemFree)
+      : null;
+    const nodeMemUsed = typeof metricSystem.memUsage === "number"
+      ? metricSystem.memUsage
+      : nodeMemUsedByFree;
     const nodeMemoryPercent = calcNodeMemoryPercent(nodeMemUsed, nodeMemTotal);
 
     for (const inst of node.instances || []) {
