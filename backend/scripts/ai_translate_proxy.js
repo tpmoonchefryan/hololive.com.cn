@@ -367,6 +367,76 @@ function parseJSONObject(text) {
   return null;
 }
 
+function parseSSEPayload(rawText) {
+  if (typeof rawText !== "string" || !rawText.includes("data:")) {
+    return null;
+  }
+
+  const records = rawText.split(/\r?\n\r?\n/);
+  const outputChunks = [];
+  let completedResponse = null;
+  let errorMessage = "";
+
+  for (const record of records) {
+    if (!record || !record.trim()) continue;
+    const lines = record.split(/\r?\n/);
+    const dataLines = lines.filter((line) => line.startsWith("data:"));
+    if (dataLines.length === 0) continue;
+
+    const data = dataLines
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") continue;
+
+    const event = parseJSON(data);
+    if (!event || typeof event !== "object") continue;
+
+    const type = `${event.type || ""}`;
+    if (type === "response.output_text.delta" && typeof event.delta === "string") {
+      outputChunks.push(event.delta);
+      continue;
+    }
+    if (type === "response.output_text.done" && typeof event.text === "string") {
+      outputChunks.push(event.text);
+      continue;
+    }
+    if (type === "response.completed" && event.response && typeof event.response === "object") {
+      completedResponse = event.response;
+      continue;
+    }
+    if (type === "response.error" || type === "response.failed" || type === "error") {
+      const message = event?.error?.message || event?.message;
+      if (typeof message === "string" && message.trim()) {
+        errorMessage = message.trim();
+      }
+    }
+  }
+
+  const outputText = outputChunks.join("").trim();
+  if (completedResponse) {
+    return {
+      response: completedResponse,
+      output: completedResponse.output,
+      output_text:
+        outputText ||
+        (typeof completedResponse.output_text === "string"
+          ? completedResponse.output_text
+          : ""),
+    };
+  }
+
+  if (outputText) {
+    return { output_text: outputText };
+  }
+
+  if (errorMessage) {
+    return { error: { message: errorMessage } };
+  }
+
+  return null;
+}
+
 function normalizeLangAlias(raw) {
   const value = `${raw || ""}`.trim().toLowerCase();
   if (!value) return "";
@@ -532,13 +602,15 @@ async function rightCodeRequest(config, prompt) {
 
       const rawText = await res.text();
       const payload = parseJSON(rawText);
+      const ssePayload = payload ? null : parseSSEPayload(rawText);
       if (res.ok) {
-        return payload || { output_text: rawText || "" };
+        return payload || ssePayload || { output_text: rawText || "" };
       }
 
       const detail =
         payload?.error?.message ||
         payload?.message ||
+        ssePayload?.error?.message ||
         `${rawText || ""}`.trim().slice(0, 300) ||
         "unknown error";
       lastError = createAppError(
