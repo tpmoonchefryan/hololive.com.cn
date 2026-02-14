@@ -27,6 +27,9 @@ const DEFAULT_TRANSLATION_CONFIG = {
 };
 
 function normalizeTranslationConfig(raw = {}) {
+  const normalizedApiKey = `${raw?.right_code_api_key || ""}`
+    .trim()
+    .replace(/^Bearer\s+/i, "");
   return {
     ...DEFAULT_TRANSLATION_CONFIG,
     ...raw,
@@ -34,7 +37,7 @@ function normalizeTranslationConfig(raw = {}) {
     engine: raw?.engine === "ai" ? "ai" : "free",
     ai_provider: raw?.ai_provider === "right_code" ? "right_code" : "right_code",
     right_code_base_url: `${raw?.right_code_base_url || DEFAULT_TRANSLATION_CONFIG.right_code_base_url}`.replace(/\/$/, ""),
-    right_code_api_key: `${raw?.right_code_api_key || ""}`,
+    right_code_api_key: normalizedApiKey,
     right_code_model: `${raw?.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`,
     right_code_endpoint:
       raw?.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses",
@@ -55,12 +58,15 @@ function normalizeTranslationConfig(raw = {}) {
 
 function normalizeTranslationConfigForSave(raw = {}) {
   const normalized = normalizeTranslationConfig(raw);
+  const normalizedApiKey = `${normalized.right_code_api_key || ""}`
+    .trim()
+    .replace(/^Bearer\s+/i, "");
   return {
     enabled: normalized.enabled !== false,
     engine: normalized.engine === "ai" ? "ai" : "free",
     ai_provider: "right_code",
     right_code_base_url: `${normalized.right_code_base_url || DEFAULT_TRANSLATION_CONFIG.right_code_base_url}`.replace(/\/$/, ""),
-    right_code_api_key: `${normalized.right_code_api_key || ""}`.trim(),
+    right_code_api_key: normalizedApiKey,
     right_code_model: `${normalized.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`.trim() || DEFAULT_TRANSLATION_CONFIG.right_code_model,
     right_code_endpoint:
       normalized.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses",

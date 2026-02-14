@@ -49,6 +49,12 @@ const DEFAULT_TRANSLATION_CONFIG = {
   cache_ttl_ms: 1800000,
 };
 
+function sanitizeApiKey(raw) {
+  const value = `${raw || ""}`.trim();
+  if (!value) return "";
+  return value.replace(/^Bearer\s+/i, "").trim();
+}
+
 const FIXED_TRANSLATION_PROMPT = [
   "你是严格的多语言翻译引擎。",
   "要求：",
@@ -178,7 +184,7 @@ function normalizeTranslationConfig(raw) {
     /\/$/,
     ""
   );
-  cfg.right_code_api_key = `${cfg.right_code_api_key || ""}`.trim();
+  cfg.right_code_api_key = sanitizeApiKey(cfg.right_code_api_key);
   cfg.right_code_model = `${cfg.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`.trim() || DEFAULT_TRANSLATION_CONFIG.right_code_model;
   cfg.right_code_endpoint =
     cfg.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses";
@@ -435,26 +441,50 @@ async function rightCodeRequest(config, prompt) {
             ],
           };
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.right_code_api_key}`,
-      },
-      body: JSON.stringify(body),
-    });
+    const authModes = ["authorization", "x-api-key"];
+    let lastError = null;
 
-    const payload = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg =
+    for (const authMode of authModes) {
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (authMode === "authorization") {
+        headers.Authorization = `Bearer ${config.right_code_api_key}`;
+      } else {
+        headers["x-api-key"] = config.right_code_api_key;
+      }
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      const rawText = await res.text();
+      const payload = parseJSON(rawText);
+      if (res.ok) {
+        return payload || { output_text: rawText || "" };
+      }
+
+      const detail =
         payload?.error?.message ||
         payload?.message ||
-        `Right Code request failed: HTTP ${res.status}`;
-      throw new Error(msg);
+        `${rawText || ""}`.trim().slice(0, 300) ||
+        "unknown error";
+      lastError = new Error(`Right Code request failed: HTTP ${res.status} - ${detail}`);
+
+      // If auth fails on first mode, try fallback mode.
+      if ((res.status === 401 || res.status === 403) && authMode === "authorization") {
+        logger.warn("Right Code authorization header failed, retrying with x-api-key.");
+        continue;
+      }
+
+      throw lastError;
     }
 
-    return payload;
+    throw lastError || new Error("Right Code request failed");
   } finally {
     clearTimeout(timeout);
   }
