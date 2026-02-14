@@ -27,7 +27,7 @@ const resources = {
       navbar: {
         home: '首页',
         docs: '文档',
-        siteTitle: '月球厨师莱恩的MC笔记',
+        siteTitle: '莱恩的MC笔记',
         logoAlt: '站点图标',
         openMenu: '打开菜单',
         closeMenu: '关闭菜单',
@@ -129,6 +129,8 @@ const resources = {
         },
         mcsm: {
           title: '服务器资源状态',
+          cpu: 'CPU',
+          memory: '内存',
         },
         map: {
           loadError: '加载地图列表失败，请稍后重试',
@@ -1082,7 +1084,7 @@ const resources = {
       navbar: {
         home: 'Home',
         docs: 'Docs',
-        siteTitle: "TPMOONCHEFRYAN's MC Notes",
+        siteTitle: "莱恩的MC笔记",
         logoAlt: 'Site Logo',
         openMenu: 'Open Menu',
         closeMenu: 'Close Menu',
@@ -1184,6 +1186,8 @@ const resources = {
         },
         mcsm: {
           title: 'Server Resource Status',
+          cpu: 'CPU',
+          memory: 'Memory',
         },
         map: {
           loadError: 'Failed to load map list, please retry later',
@@ -2123,7 +2127,7 @@ const resources = {
       navbar: {
         home: 'ホーム',
         docs: 'ドキュメント',
-        siteTitle: 'TPMOONCHEFRYANのMCノート',
+        siteTitle: '莱恩的MC笔记',
         logoAlt: 'サイトロゴ',
         openMenu: 'メニューを開く',
         closeMenu: 'メニューを閉じる',
@@ -2225,6 +2229,8 @@ const resources = {
         },
         mcsm: {
           title: 'サーバーリソース状態',
+          cpu: 'CPU',
+          memory: 'メモリ',
         },
         map: {
           loadError: 'マップ一覧の読み込みに失敗しました。後でもう一度お試しください',

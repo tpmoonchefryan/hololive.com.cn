@@ -172,6 +172,32 @@ function parseJSON(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+function normalizePercent(raw) {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return null;
+  }
+  const percent = raw <= 1 ? raw * 100 : raw;
+  return Math.round(percent * 100) / 100;
+}
+
+function calcNodeMemoryPercent(used, total) {
+  if (typeof used !== "number" || !Number.isFinite(used) || used < 0) {
+    return null;
+  }
+
+  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+    const ratio = used <= 1 ? used : used / total;
+    if (!Number.isFinite(ratio) || ratio < 0) return null;
+    return Math.round(ratio * 10000) / 100;
+  }
+
+  if (used <= 1) {
+    return Math.round(used * 10000) / 100;
+  }
+
+  return null;
+}
+
 // --- Public status cache ---
 let publicStatusCache = null;
 let publicStatusExpiresAt = 0;
@@ -202,22 +228,28 @@ async function handlePublicStatus(req, res) {
 
   for (const node of nodes) {
     if (!node.available || !node.uuid) continue;
-    const nodeCpu = typeof node.system?.cpuUsage === "number" ? Math.round(node.system.cpuUsage * 100) / 100 : null;
+    const nodeCpuPercent = normalizePercent(node.system?.cpuUsage);
     const nodeMemTotal = typeof node.system?.totalmem === "number" ? node.system.totalmem : null;
     const nodeMemUsed = typeof node.system?.memUsage === "number" ? node.system.memUsage : null;
+    const nodeMemoryPercent = calcNodeMemoryPercent(nodeMemUsed, nodeMemTotal);
 
     for (const inst of node.instances || []) {
       if (hiddenSet.has(inst.instanceUuid)) continue;
       instances.push({
         instanceUuid: inst.instanceUuid,
         daemonId: node.uuid,
+        nodeName: node.remarks || node.uuid,
         name: config.instanceLabels[inst.instanceUuid] || inst.config?.nickname || inst.instanceUuid,
         status: inst.status,
         currentPlayers: inst.info?.currentPlayers ?? -1,
         maxPlayers: inst.info?.maxPlayers ?? -1,
         cpuUsage: typeof inst.info?.cpuUsage === "number" ? Math.round(inst.info.cpuUsage * 100) / 100 : null,
         memUsage: typeof inst.info?.memUsage === "number" ? Math.round(inst.info.memUsage / 1024 / 1024) : null,
-        nodeCpu,
+        // Public page should display node-level metrics for the instance host node.
+        nodeCpuPercent,
+        nodeMemoryPercent,
+        // Legacy fields kept for backward compatibility.
+        nodeCpu: nodeCpuPercent,
         nodeMemTotal,
         nodeMemUsed,
       });
