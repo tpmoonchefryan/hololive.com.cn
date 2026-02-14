@@ -346,6 +346,57 @@ function parseJSONObject(text) {
     return direct;
   }
 
+  // Some providers may concatenate multiple JSON objects, e.g. {"en":"..."}{"en":"..."}.
+  // Extract all balanced object candidates and return the first valid one.
+  const objectCandidates = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (inString) {
+      if (ch === quote) {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          objectCandidates.push(trimmed.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+  }
+  for (const candidate of objectCandidates) {
+    const parsed = parseJSON(candidate);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  }
+
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (fenced?.[1]) {
     const parsed = parseJSON(fenced[1].trim());
