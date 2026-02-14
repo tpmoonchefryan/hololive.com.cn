@@ -16,6 +16,7 @@ EMAIL="ryan.lan_home@outlook.com"
 PB_VERSION="0.26.5"
 INSTALL_DIR="/var/www/$DOMAIN"
 PB_PORT="8090"
+PB_ADMIN_GATE_PORT="18092"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -135,6 +136,15 @@ if [ -f "$INSTALL_DIR/backend/scripts/mcsm-proxy.service" ]; then
     systemctl restart mcsm-proxy
 fi
 
+# Setup pb-admin-gate service if script exists
+if [ -f "$INSTALL_DIR/backend/scripts/pb-admin-gate.service" ]; then
+    log "Installing pb-admin-gate service..."
+    cp "$INSTALL_DIR/backend/scripts/pb-admin-gate.service" /etc/systemd/system/pb-admin-gate.service
+    systemctl daemon-reload
+    systemctl enable pb-admin-gate
+    systemctl restart pb-admin-gate
+fi
+
 # Wait for PB to start
 sleep 5
 
@@ -201,7 +211,7 @@ server {
 
     # Admin UI Proxy to PocketBase
     location /_/ {
-        proxy_pass http://127.0.0.1:$PB_PORT;
+        proxy_pass http://127.0.0.1:$PB_ADMIN_GATE_PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';

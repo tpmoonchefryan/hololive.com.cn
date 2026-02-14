@@ -35,6 +35,7 @@ export default function SettingsPage() {
       baidu: "",
     },
     admin_entrance_key: "",
+    enable_pb_public_entry: true,
   });
   const [baiduExtractToast, setBaiduExtractToast] = useState(false);
 
@@ -48,6 +49,7 @@ export default function SettingsPage() {
         microsoft_auth_config: settingsData.microsoft_auth_config || {},
         analytics_config: settingsData.analytics_config || { google: "", baidu: "" },
         admin_entrance_key: settingsData.admin_entrance_key || "",
+        enable_pb_public_entry: settingsData.enable_pb_public_entry !== false,
       });
     } catch (error) {
       logger.error("Failed to fetch settings:", error);
@@ -57,6 +59,7 @@ export default function SettingsPage() {
           microsoft_auth_config: {},
           analytics_config: { google: "", baidu: "" },
           admin_entrance_key: "",
+          enable_pb_public_entry: true,
         });
       } else {
         setError(t("admin.settingsPage.error"));
@@ -166,6 +169,7 @@ export default function SettingsPage() {
         baidu: formData.analytics_config.baidu?.trim() || "",
       },
       admin_entrance_key: normalizedKey,
+      enable_pb_public_entry: formData.enable_pb_public_entry !== false,
     };
 
     // 检查 admin_entrance_key 是否改变
@@ -431,6 +435,40 @@ export default function SettingsPage() {
                     /{adminKey}/webadmin
                   </code>
                 </p>
+              </div>
+
+              <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-900">
+                      {t("admin.settingsPage.access.pbPublicEntryLabel")}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      {t("admin.settingsPage.access.pbPublicEntryDesc")}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {t("admin.settingsPage.access.pbPublicEntryHint")}
+                    </p>
+                  </div>
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-700 flex-shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={formData.enable_pb_public_entry !== false}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          enable_pb_public_entry: e.target.checked,
+                        })
+                      }
+                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                    />
+                    <span className="font-medium">
+                      {formData.enable_pb_public_entry !== false
+                        ? t("admin.settingsPage.access.pbPublicEntryOn")
+                        : t("admin.settingsPage.access.pbPublicEntryOff")}
+                    </span>
+                  </label>
+                </div>
               </div>
             </div>
 

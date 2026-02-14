@@ -1,0 +1,20 @@
+[Unit]
+Description=PocketBase Admin Entry Gate
+After=network.target pocketbase.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/hololive.com.cn/backend/scripts
+ExecStart=/usr/bin/node pb_admin_gate.js
+Restart=always
+RestartSec=5
+Environment=PB_URL=http://127.0.0.1:8090
+Environment=PB_ADMIN_GATE_PORT=18092
+Environment=PB_ADMIN_GATE_SETTINGS_ID=1
+Environment=PB_ADMIN_GATE_CACHE_TTL_MS=5000
+Environment=PB_ADMIN_GATE_REQUEST_TIMEOUT_MS=5000
+Environment=PB_ADMIN_GATE_REDIRECT_PATH=/418
+
+[Install]
+WantedBy=multi-user.target

@@ -106,11 +106,18 @@ jobs:
           sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
           sudo /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
 
+          # Ensure pb-admin-gate service + nginx route are installed/updated
+          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh ]; then
+            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh
+            sudo /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh
+          fi
+
           # Restart PocketBase and Velocity Sync Service
           # Note: The runner user must have permission to run this (e.g. root or sudo w/o password)
           sudo systemctl restart pocketbase
           sudo systemctl restart velocity-sync
           sudo systemctl restart map-proxy
           sudo systemctl restart mcsm-proxy
+          sudo systemctl restart pb-admin-gate
           
           echo "Deployment successful."
