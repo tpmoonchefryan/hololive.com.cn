@@ -208,6 +208,34 @@ export async function cancelAdminTranslationJob(jobId) {
   );
 }
 
+export function cancelAdminTranslationJobKeepalive(jobId) {
+  const id = `${jobId || ""}`.trim();
+  if (!id) return;
+
+  let authHeader;
+  try {
+    authHeader = ensureAuthHeader();
+  } catch {
+    return;
+  }
+
+  try {
+    fetch(`${API_BASE}/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authHeader,
+      },
+      body: "{}",
+      keepalive: true,
+    }).catch(() => {
+      // page may already be unloading
+    });
+  } catch {
+    // ignore
+  }
+}
+
 export async function getAdminTranslationJobResult(jobId) {
   const id = `${jobId || ""}`.trim();
   if (!id) {

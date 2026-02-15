@@ -13,11 +13,22 @@ export default function TranslationProgressModal({ job, onCancel, onClose }) {
   const doneUnits = Number.isFinite(job?.doneUnits) ? job.doneUnits : 0;
   const totalUnits = Number.isFinite(job?.totalUnits) ? job.totalUnits : 0;
   const elapsedSeconds = Math.max(0, Math.floor((job?.elapsedMs || 0) / 1000));
+  const handleRequestClose = () => {
+    if (isTerminal) {
+      if (typeof onClose === "function") {
+        onClose();
+      }
+      return;
+    }
+    if (!job?.canceling && typeof onCancel === "function") {
+      onCancel();
+    }
+  };
 
   return (
     <Modal
       isOpen={Boolean(job?.visible)}
-      onClose={isTerminal ? onClose : () => {}}
+      onClose={handleRequestClose}
       title={t("admin.translationJob.title")}
       size="md"
     >

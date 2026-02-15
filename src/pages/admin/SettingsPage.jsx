@@ -29,7 +29,7 @@ const DEFAULT_TRANSLATION_CONFIG = {
   right_code_api_key: "",
   right_code_model: "gpt-5.2",
   right_code_endpoint: "responses",
-  request_timeout_ms: 120000,
+  request_timeout_ms: 0,
   max_input_chars: 120000,
   fill_policy: "fill_empty_only",
   enable_cache: true,
@@ -78,6 +78,14 @@ function normalizeTranslationConfigForSave(raw = {}) {
       Number.parseInt(`${normalized.max_input_chars || DEFAULT_TRANSLATION_CONFIG.max_input_chars}`, 10) || DEFAULT_TRANSLATION_CONFIG.max_input_chars
     )
   );
+  const parsedTimeout = Number.parseInt(
+    `${normalized.request_timeout_ms ?? DEFAULT_TRANSLATION_CONFIG.request_timeout_ms}`,
+    10
+  );
+  const normalizedTimeoutMs =
+    Number.isFinite(parsedTimeout) && parsedTimeout > 0
+      ? Math.min(600000, Math.max(1000, parsedTimeout))
+      : null;
   return {
     enabled: normalized.enabled !== false,
     engine: normalized.engine === "ai" ? "ai" : "free",
@@ -87,10 +95,7 @@ function normalizeTranslationConfigForSave(raw = {}) {
     right_code_model: `${normalized.right_code_model || DEFAULT_TRANSLATION_CONFIG.right_code_model}`.trim() || DEFAULT_TRANSLATION_CONFIG.right_code_model,
     right_code_endpoint:
       normalized.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses",
-    request_timeout_ms: Math.max(
-      1000,
-      Number.parseInt(`${normalized.request_timeout_ms || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms}`, 10) || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms
-    ),
+    request_timeout_ms: normalizedTimeoutMs,
     max_input_chars: normalizedMaxInputChars,
     fill_policy:
       normalized.fill_policy === "overwrite_target" ? "overwrite_target" : "fill_empty_only",
@@ -878,9 +883,9 @@ export default function SettingsPage() {
                       </ContentFieldLabel>
                       <ContentTextInput
                         type="number"
-                        min={1000}
+                        min={0}
                         step={1000}
-                        value={formData.translation_config.request_timeout_ms}
+                        value={formData.translation_config.request_timeout_ms ?? 0}
                         onChange={(e) =>
                           patchTranslationConfig({
                             request_timeout_ms: Number.parseInt(e.target.value || "0", 10) || 0,
@@ -888,6 +893,9 @@ export default function SettingsPage() {
                         }
                         className="px-4 py-2 border-slate-200"
                       />
+                      <p className="mt-1 text-xs text-slate-500">
+                        {t("admin.settingsPage.translation.timeoutHint")}
+                      </p>
                     </div>
 
                     <div>

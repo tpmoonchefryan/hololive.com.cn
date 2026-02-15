@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelAdminTranslationJob,
+  cancelAdminTranslationJobKeepalive,
   createAdminTranslationJob,
   detectSourceLanguage,
   getAdminTranslationRuntimeConfig,
@@ -177,9 +178,9 @@ export function useAdminContentTranslation() {
     }));
   }, []);
 
-  const cancelTranslationJob = useCallback(async () => {
+  const requestCancelForActiveJob = useCallback(() => {
     const jobId = activeJobRef.current.jobId;
-    if (!jobId) return;
+    if (!jobId || activeJobRef.current.cancelRequested) return "";
 
     activeJobRef.current.cancelRequested = true;
     setTranslationJob((prev) => ({
@@ -189,13 +190,41 @@ export function useAdminContentTranslation() {
       canceling: true,
       visible: true,
     }));
+    return jobId;
+  }, []);
+
+  const cancelTranslationJob = useCallback(async () => {
+    const jobId = requestCancelForActiveJob();
+    if (!jobId) return;
 
     try {
       await cancelAdminTranslationJob(jobId);
     } catch {
       // Polling will still resolve final state.
     }
-  }, []);
+  }, [requestCancelForActiveJob]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const jobId = requestCancelForActiveJob();
+      if (jobId) {
+        cancelAdminTranslationJobKeepalive(jobId);
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [requestCancelForActiveJob]);
+
+  useEffect(() => {
+    return () => {
+      const jobId = requestCancelForActiveJob();
+      if (jobId) {
+        cancelAdminTranslationJobKeepalive(jobId);
+      }
+    };
+  }, [requestCancelForActiveJob]);
 
   const pollTranslationJob = useCallback(async ({ jobId, groupIndex, groupTotal }) => {
     for (;;) {

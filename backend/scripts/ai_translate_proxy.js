@@ -13,7 +13,7 @@ const CONFIG_CACHE_TTL_MS = Number.parseInt(
   10
 );
 const DEFAULT_REQUEST_TIMEOUT_MS = Number.parseInt(
-  process.env.AI_TRANSLATE_DEFAULT_TIMEOUT_MS || "120000",
+  process.env.AI_TRANSLATE_DEFAULT_TIMEOUT_MS || "0",
   10
 );
 const DEFAULT_JOB_TIMEOUT_MS = Number.parseInt(
@@ -78,7 +78,7 @@ const DEFAULT_TRANSLATION_CONFIG = {
   right_code_api_key: "",
   right_code_model: "gpt-5.2",
   right_code_endpoint: "responses",
-  request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+  request_timeout_ms: 0,
   max_input_chars: 120000,
   fill_policy: "fill_empty_only",
   enable_cache: true,
@@ -206,6 +206,36 @@ function clampInt(raw, fallback, min, max) {
   return value;
 }
 
+function normalizeRequestTimeoutMs(raw, fallback = 0) {
+  if (raw === null || raw === undefined || raw === "") {
+    return fallback;
+  }
+  const value = Number.parseInt(`${raw}`, 10);
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  if (value <= 0) {
+    return 0;
+  }
+  if (value < 1000) {
+    return 1000;
+  }
+  if (value > 600000) {
+    return 600000;
+  }
+  return value;
+}
+
+function resolveRequestTimeoutMs(optionsTimeoutMs, configTimeoutMs) {
+  const candidate =
+    optionsTimeoutMs !== undefined && optionsTimeoutMs !== null
+      ? optionsTimeoutMs
+      : configTimeoutMs !== undefined && configTimeoutMs !== null
+        ? configTimeoutMs
+        : DEFAULT_REQUEST_TIMEOUT_MS;
+  return normalizeRequestTimeoutMs(candidate, 0);
+}
+
 function isTerminalJobStatus(status) {
   return [
     "succeeded",
@@ -304,11 +334,9 @@ function normalizeTranslationConfig(raw) {
   cfg.right_code_endpoint =
     cfg.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses";
 
-  cfg.request_timeout_ms = clampInt(
+  cfg.request_timeout_ms = normalizeRequestTimeoutMs(
     cfg.request_timeout_ms,
-    DEFAULT_TRANSLATION_CONFIG.request_timeout_ms,
-    5000,
-    600000
+    DEFAULT_TRANSLATION_CONFIG.request_timeout_ms
   );
 
   cfg.max_input_chars = clampInt(
@@ -832,9 +860,9 @@ async function withRetry(task, { maxRetries = 0, backoffMs = 600, signal, onRetr
 }
 
 async function rightCodeRequest(config, prompt, options = {}) {
-  const timeoutMs = Math.max(
-    5000,
-    options.timeoutMs || config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS
+  const timeoutMs = resolveRequestTimeoutMs(
+    options.timeoutMs,
+    config.request_timeout_ms
   );
   const { signal: parentSignal, activeControllers } = options;
   const requestScope = createFetchController({
@@ -997,9 +1025,9 @@ function buildTranslateCacheKey({
 }
 
 async function translateByConfig(config, { sourceLang, targets, text }, options = {}) {
-  const timeoutMs = Math.max(
-    5000,
-    options.timeoutMs || config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS
+  const timeoutMs = resolveRequestTimeoutMs(
+    options.timeoutMs,
+    config.request_timeout_ms
   );
 
   if (!text || !text.trim()) {
