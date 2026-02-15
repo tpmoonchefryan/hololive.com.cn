@@ -242,9 +242,10 @@ function validateMigrationTemplate(filePath, content) {
 function main() {
   const baseSha = `${process.env.MIGRATION_CHECK_BASE_SHA || ""}`.trim();
   const headSha = `${process.env.MIGRATION_CHECK_HEAD_SHA || ""}`.trim();
+  const usingShas = Boolean(baseSha && headSha && !isAllZerosSha(baseSha));
 
   let diffOutput = "";
-  if (baseSha && headSha && !isAllZerosSha(baseSha)) {
+  if (usingShas) {
     diffOutput = run(
       `git diff --name-status ${baseSha}..${headSha} -- ${MIGRATIONS_DIR}`,
       { allowFail: true }
@@ -257,6 +258,18 @@ function main() {
   }
 
   const entries = parseNameStatus(diffOutput);
+  if (!usingShas) {
+    // Include untracked files for local/dev usage (git diff doesn't show them).
+    const untracked = run(
+      `git ls-files --others --exclude-standard -- ${MIGRATIONS_DIR}`,
+      { allowFail: true }
+    );
+    for (const line of `${untracked || ""}`.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+      if (!entries.some((e) => e.path === line)) {
+        entries.push({ status: "A", path: line });
+      }
+    }
+  }
   if (entries.length === 0) {
     console.log("[check_pb_migrations] No migration changes detected.");
     return;
@@ -331,4 +344,3 @@ function main() {
 }
 
 main();
-
