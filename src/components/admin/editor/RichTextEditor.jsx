@@ -12,6 +12,7 @@ import { useUIFeedback } from "../../../hooks/useUIFeedback";
 import { createAppLogger } from "../../../lib/appLogger";
 import { useTranslation } from "react-i18next";
 import ContentFileInput from "../content/ContentFileInput";
+import ContentTextareaInput from "../content/ContentTextareaInput";
 
 const logger = createAppLogger("RichTextEditor");
 
@@ -23,6 +24,8 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
   const { t } = useTranslation("admin");
   const fileInputRef = useRef(null);
   const [isMediaLibraryOpen, setIsMediaLibraryOpen] = useState(false);
+  const [isSourceMode, setIsSourceMode] = useState(false);
+  const [sourceContent, setSourceContent] = useState(content || "");
   const { notify } = useUIFeedback();
 
   // 初始化编辑器
@@ -151,10 +154,40 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
 
   // 当外部 content 变化时更新编辑器内容
   useEffect(() => {
+    if (isSourceMode) {
+      setSourceContent(content || "");
+      return;
+    }
+
     if (editor && content !== editor.getHTML()) {
       editor.commands.setContent(content || "");
     }
-  }, [content, editor]);
+  }, [content, editor, isSourceMode]);
+
+  const handleToggleSourceMode = useCallback(() => {
+    if (!editor) return;
+
+    if (!isSourceMode) {
+      setSourceContent(editor.getHTML());
+      setIsSourceMode(true);
+      return;
+    }
+
+    const nextHtml = sourceContent || "";
+    if (nextHtml !== editor.getHTML()) {
+      editor.commands.setContent(nextHtml);
+    }
+    setIsSourceMode(false);
+  }, [editor, isSourceMode, sourceContent]);
+
+  const handleSourceContentChange = useCallback(
+    (event) => {
+      const nextHtml = event.target.value;
+      setSourceContent(nextHtml);
+      onChange?.(nextHtml);
+    },
+    [onChange]
+  );
 
   if (!editor) {
     return (
@@ -172,6 +205,8 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
           editor={editor}
           onImageUpload={handleImageButtonClick}
           onOpenMediaLibrary={handleOpenMediaLibrary}
+          sourceMode={isSourceMode}
+          onToggleSourceMode={handleToggleSourceMode}
         />
 
       {/* 隐藏的文件输入 */}
@@ -183,10 +218,22 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
       />
 
       {/* 编辑器内容区 */}
-      <EditorContent
-        editor={editor}
-        className="prose prose-slate prose-lg max-w-none prose-headings:font-bold prose-headings:text-slate-900 prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline prose-img:rounded-xl prose-img:w-full prose-img:max-w-full prose-blockquote:border-l-slate-300 prose-blockquote:text-slate-700 prose-strong:text-slate-900 focus-within:ring-2 focus-within:ring-[var(--color-brand-blue)]/30 rounded-lg"
-      />
+      {isSourceMode ? (
+        <div className="p-3">
+          <ContentTextareaInput
+            value={sourceContent}
+            onChange={handleSourceContentChange}
+            className="min-h-[320px] w-full rounded-lg border-slate-200 bg-slate-50/60 p-3 font-mono text-sm text-slate-900 focus:bg-white"
+            placeholder={t("menuBar.sourceModePlaceholder")}
+            spellCheck={false}
+          />
+        </div>
+      ) : (
+        <EditorContent
+          editor={editor}
+          className="prose prose-slate prose-lg max-w-none prose-headings:font-bold prose-headings:text-slate-900 prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline prose-img:rounded-xl prose-img:w-full prose-img:max-w-full prose-blockquote:border-l-slate-300 prose-blockquote:text-slate-700 prose-strong:text-slate-900 focus-within:ring-2 focus-within:ring-[var(--color-brand-blue)]/30 rounded-lg"
+        />
+      )}
 
       {/* 编辑器样式 */}
       <style>{`

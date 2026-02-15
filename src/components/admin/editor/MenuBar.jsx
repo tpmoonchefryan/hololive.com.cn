@@ -10,6 +10,7 @@ import {
   Link,
   Image,
   Images,
+  Code,
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -24,7 +25,13 @@ import ContentTextInput from "../content/ContentTextInput";
  * 富文本编辑器工具栏组件
  * 提供格式化按钮：加粗、斜体、标题、列表、引用、链接、图片等
  */
-export default function MenuBar({ editor, onImageUpload, onOpenMediaLibrary }) {
+export default function MenuBar({
+  editor,
+  onImageUpload,
+  onOpenMediaLibrary,
+  sourceMode = false,
+  onToggleSourceMode,
+}) {
   const { t } = useTranslation("admin");
   const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState("");
@@ -53,6 +60,26 @@ export default function MenuBar({ editor, onImageUpload, onOpenMediaLibrary }) {
   return (
     <>
       <div className="flex items-center gap-1 flex-wrap border-b border-slate-200 bg-slate-50/80 px-3 py-2">
+      {/* 源码模式切换 */}
+      <ContentIconActionButton
+        onClick={onToggleSourceMode}
+        tone="neutral"
+        size="sm"
+        icon={Code}
+        iconSize={16}
+        className={getToolbarButtonClass(sourceMode)}
+        title={sourceMode ? t("menuBar.wysiwygMode") : t("menuBar.sourceMode")}
+        aria-label={sourceMode ? t("menuBar.wysiwygMode") : t("menuBar.sourceMode")}
+      />
+
+      {sourceMode ? (
+        <span className="ml-1 text-xs text-slate-500">
+          {t("menuBar.sourceModeHint")}
+        </span>
+      ) : null}
+
+      {!sourceMode ? (
+        <>
       {/* 加粗 */}
       <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleBold().run()}
@@ -195,6 +222,8 @@ export default function MenuBar({ editor, onImageUpload, onOpenMediaLibrary }) {
         title={t("menuBar.selectFromLibrary")}
         aria-label={t("menuBar.selectFromLibrary")}
       />
+        </>
+      ) : null}
       </div>
 
       <Modal

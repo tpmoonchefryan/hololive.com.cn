@@ -1015,6 +1015,10 @@ const resources = {
       menuBar: {
         bold: "加粗 (Ctrl+B)",
         italic: "斜体 (Ctrl+I)",
+        sourceMode: "源码模式 (HTML)",
+        wysiwygMode: "富文本模式",
+        sourceModeHint: "当前为源码模式，可直接粘贴 HTML。",
+        sourceModePlaceholder: "在此粘贴或编辑 HTML 源码...",
         heading1: "标题 1",
         heading2: "标题 2",
         heading3: "标题 3",
@@ -2124,6 +2128,10 @@ const resources = {
         menuBar: {
           bold: "Bold (Ctrl+B)",
           italic: "Italic (Ctrl+I)",
+          sourceMode: "Source Mode (HTML)",
+          wysiwygMode: "Rich Text Mode",
+          sourceModeHint: "Source mode is enabled. You can paste HTML directly.",
+          sourceModePlaceholder: "Paste or edit HTML source here...",
           heading1: "Heading 1",
           heading2: "Heading 2",
           heading3: "Heading 3",
@@ -3256,6 +3264,10 @@ const resources = {
     menuBar: {
       bold: "太字 (Ctrl+B)",
       italic: "斜体 (Ctrl+I)",
+      sourceMode: "ソースモード (HTML)",
+      wysiwygMode: "リッチテキストモード",
+      sourceModeHint: "現在はソースモードです。HTML を直接貼り付けできます。",
+      sourceModePlaceholder: "ここに HTML ソースを貼り付け、または編集してください...",
       heading1: "見出し 1",
       heading2: "見出し 2",
       heading3: "見出し 3",
