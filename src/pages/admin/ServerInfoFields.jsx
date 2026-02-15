@@ -282,8 +282,6 @@ export default function ServerInfoFields() {
                 onClick={handleAutoTranslate}
                 translating={translating}
                 disabled={false}
-                label={t("admin.serverInfoFields.form.translate")}
-                translatingLabel={t("admin.serverInfoFields.form.translating")}
               />
             </div>
 

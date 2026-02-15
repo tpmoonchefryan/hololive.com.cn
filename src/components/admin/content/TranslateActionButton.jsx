@@ -1,4 +1,5 @@
 import { Languages, Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 export default function TranslateActionButton({
   onClick,
@@ -8,6 +9,11 @@ export default function TranslateActionButton({
   translatingLabel,
   className = "",
 }) {
+  const { t } = useTranslation();
+  const resolvedLabel = label || t("admin.translationAction.translate");
+  const resolvedTranslatingLabel =
+    translatingLabel || t("admin.translationAction.translating");
+
   return (
     <button
       type="button"
@@ -20,7 +26,7 @@ export default function TranslateActionButton({
       ) : (
         <Languages className="w-3.5 h-3.5" />
       )}
-      {translating ? translatingLabel : label}
+      {translating ? resolvedTranslatingLabel : resolvedLabel}
     </button>
   );
 }

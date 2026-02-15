@@ -346,8 +346,6 @@ export default function SectionEditor() {
               onClick={handleAutoTranslate}
               translating={translating}
               disabled={saving}
-              label={t("sectionEditor.buttons.translate")}
-              translatingLabel={t("sectionEditor.buttons.translating")}
             />
             <ContentPrimaryButton
               type="button"

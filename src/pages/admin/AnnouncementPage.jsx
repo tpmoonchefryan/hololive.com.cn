@@ -294,8 +294,6 @@ export default function AnnouncementPage() {
                 <TranslateActionButton
                   onClick={handleAutoTranslate}
                   translating={translating}
-                  label={t("admin.announcements.form.translate")}
-                  translatingLabel={t("admin.announcements.form.translating")}
                   className="px-3 py-1 text-xs"
                 />
               </div>

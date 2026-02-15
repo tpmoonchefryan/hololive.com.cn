@@ -191,6 +191,10 @@ const resources = {
         currentAdmin: "当前管理员",
         notLoggedIn: "未登录",
       },
+      translationAction: {
+        translate: "一键翻译",
+        translating: "翻译中...",
+      },
       dashboard: {
         welcome: "欢迎来到后台",
         title: "服务器控制中心总览",
@@ -1311,6 +1315,10 @@ const resources = {
         currentAdmin: "Current Admin",
         notLoggedIn: "Not Logged In",
       },
+      translationAction: {
+        translate: "Auto Translate",
+        translating: "Translating...",
+      },
       dashboard: {
         welcome: "Welcome to Dashboard",
         title: "Server Control Center Overview",
@@ -2416,6 +2424,10 @@ const resources = {
       header: {
         currentAdmin: "現在の管理者",
         notLoggedIn: "未ログイン",
+      },
+      translationAction: {
+        translate: "自動翻訳",
+        translating: "翻訳中...",
       },
       dashboard: {
         welcome: "管理画面へようこそ",

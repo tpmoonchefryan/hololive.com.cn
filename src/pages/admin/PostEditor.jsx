@@ -238,8 +238,6 @@ export default function PostEditor() {
                   <TranslateActionButton
                     onClick={handleAutoTranslate}
                     translating={translating}
-                    label={t("admin.postEditor.translate")}
-                    translatingLabel={t("admin.postEditor.translating")}
                   />
                   <ContentPrimaryButton
                     type="submit"
