@@ -1,9 +1,12 @@
 import { useState, useEffect } from "react";
-import { Search, Loader2, Image as ImageIcon } from "lucide-react";
+import { Search, Image as ImageIcon } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "./ui/Modal";
+import ContentTextInput from "./content/ContentTextInput";
+import ContentStateBlock from "./content/ContentStateBlock";
+import ContentTextButton from "./content/ContentTextButton";
 
 const logger = createAppLogger("MediaLibraryModal");
 
@@ -98,14 +101,14 @@ export default function MediaLibraryModal({ isOpen, onClose, onSelect }) {
       <div className="px-6 py-4 border-b border-slate-200">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
+          <ContentTextInput
             type="text"
             name="media_search"
             autoComplete="off"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t("admin.mediaLibraryModal.search")}
-            className="w-full pl-10 pr-4 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="pl-10 pr-4 py-2 border-slate-300"
           />
         </div>
       </div>
@@ -113,17 +116,17 @@ export default function MediaLibraryModal({ isOpen, onClose, onSelect }) {
       {/* Content */}
       <div className="p-6">
         {loading ? (
-          <div className="flex items-center justify-center py-20 gap-2 text-slate-500">
-            <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
-            <span className="text-sm">{t("admin.mediaLibraryModal.loading")}</span>
-          </div>
+          <ContentStateBlock
+            loading
+            loadingText={t("admin.mediaLibraryModal.loading")}
+            className="rounded-xl"
+          />
         ) : filteredMedia.length === 0 ? (
-          <div className="text-center py-20 text-slate-500">
-            <ImageIcon className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p className="text-sm">
-              {searchQuery ? t("admin.mediaLibraryModal.noResults") : t("admin.mediaLibraryModal.empty")}
-            </p>
-          </div>
+          <ContentStateBlock
+            icon={ImageIcon}
+            title={searchQuery ? t("admin.mediaLibraryModal.noResults") : t("admin.mediaLibraryModal.empty")}
+            className="rounded-xl"
+          />
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
             {filteredMedia.map((item) => {
@@ -131,9 +134,8 @@ export default function MediaLibraryModal({ isOpen, onClose, onSelect }) {
               const thumbUrl = getFileUrl(item, true);
 
               return (
-                <button
+                <ContentTextButton
                   key={item.id}
-                  type="button"
                   className="group relative aspect-square rounded-lg border border-slate-200 bg-slate-50 overflow-hidden hover:border-blue-500 hover:shadow-md transition-[border-color,box-shadow]"
                   onClick={() => handleSelect(item)}
                   aria-label={`${t("admin.mediaLibraryModal.clickToSelect")}: ${item.file || t("admin.mediaLibraryModal.unknown")}`}
@@ -159,7 +161,7 @@ export default function MediaLibraryModal({ isOpen, onClose, onSelect }) {
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
                     <p className="text-xs text-white truncate">{item.file || t("admin.mediaLibraryModal.unknown")}</p>
                   </div>
-                </button>
+                </ContentTextButton>
               );
             })}
           </div>

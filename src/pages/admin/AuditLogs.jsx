@@ -1,8 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
-import { Loader2, Filter, ClipboardList } from "lucide-react";
+import { Fragment, useState, useEffect, useCallback } from "react";
+import { Filter, ClipboardList } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentTableSurface from "../../components/admin/content/ContentTableSurface";
+import ContentTableHeader from "../../components/admin/content/ContentTableHeader";
+import ContentTableHeadCell from "../../components/admin/content/ContentTableHeadCell";
+import ContentTableCell from "../../components/admin/content/ContentTableCell";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
 
 /**
  * 操作日志审计页面
@@ -48,12 +56,13 @@ export default function AuditLogs() {
       // 获取日志列表（按时间倒序）
       const result = await pb.collection("audit_logs").getList(page, pageSize, {
         sort: "-created",
-        filter: filter,
+        filter,
         expand: "user", // 展开用户信息
       });
 
       setLogs(result.items);
       setTotalPages(result.totalPages);
+      setExpandedLogId(null);
     } catch (err) {
       logger.error("Failed to fetch audit logs:", err);
       setError(t("auditLogs.error.fetch"));
@@ -103,36 +112,29 @@ export default function AuditLogs() {
 
   return (
     <div className="space-y-4">
-      {/* 页面头部 */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-xl md:text-2xl font-bold text-slate-900">
-            {t("auditLogs.title")}
-          </h1>
-          <p className="text-xs md:text-sm text-slate-500">
-            {t("auditLogs.subtitle")}
-          </p>
-        </div>
-
-        {/* 筛选器 */}
-        <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-slate-500" />
-          <select
-            value={filterActionType}
-            onChange={(e) => {
-              setFilterActionType(e.target.value);
-              setPage(1); // 重置到第一页
-            }}
-            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs md:text-sm text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
-          >
-            {actionTypes.map((type) => (
-              <option key={type.value} value={type.value}>
-                {type.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      <ContentPageHeader
+        title={t("auditLogs.title")}
+        subtitle={t("auditLogs.subtitle")}
+        actions={(
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-slate-500" />
+            <ContentSelectInput
+              value={filterActionType}
+              onChange={(e) => {
+                setFilterActionType(e.target.value);
+                setPage(1); // 重置到第一页
+              }}
+              className="w-auto min-w-[170px] rounded-full border-slate-200 px-3 py-1.5 text-xs md:text-sm"
+            >
+              {actionTypes.map((type) => (
+                <option key={type.value} value={type.value}>
+                  {type.label}
+                </option>
+              ))}
+            </ContentSelectInput>
+          </div>
+        )}
+      />
 
       {/* 错误提示 */}
       {error && (
@@ -143,63 +145,58 @@ export default function AuditLogs() {
 
       {/* 日志列表 */}
       {loading ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <Loader2 className="w-7 h-7 animate-spin text-slate-400 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">{t("auditLogs.loading", "Loading...")}</p>
-        </div>
+        <ContentStateBlock
+          loading
+          loadingText={t("auditLogs.loading", "Loading...")}
+          className="rounded-2xl"
+        />
       ) : logs.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white/80 px-6 py-10 text-center shadow-sm flex flex-col items-center gap-3">
-          <ClipboardList className="w-12 h-12 text-slate-300" />
-          <p className="text-sm font-medium text-slate-700">
-            {filterActionType ? t("auditLogs.empty.filteredTitle") : t("auditLogs.empty.title")}
-          </p>
-          <p className="text-xs text-slate-500">
-            {filterActionType
-              ? t("auditLogs.empty.filteredDesc")
-              : t("auditLogs.empty.desc")}
-          </p>
-        </div>
+        <ContentStateBlock
+          icon={ClipboardList}
+          title={filterActionType ? t("auditLogs.empty.filteredTitle") : t("auditLogs.empty.title")}
+          description={filterActionType ? t("auditLogs.empty.filteredDesc") : t("auditLogs.empty.desc")}
+          className="rounded-2xl"
+        />
       ) : (
         <>
           {/* 日志表格 */}
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                      {t("auditLogs.table.time")}
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                      {t("auditLogs.table.user")}
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                      {t("auditLogs.table.type")}
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                      {t("auditLogs.table.module")}
-                    </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                      {t("auditLogs.table.details")}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-slate-200">
-                  {logs.map((log) => (
+          <ContentTableSurface>
+            <table className="w-full">
+              <ContentTableHeader className="bg-slate-50 border-slate-200">
+                <tr>
+                  <ContentTableHeadCell compact>
+                    {t("auditLogs.table.time")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell compact>
+                    {t("auditLogs.table.user")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell compact>
+                    {t("auditLogs.table.type")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell compact>
+                    {t("auditLogs.table.module")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell compact>
+                    {t("auditLogs.table.details")}
+                  </ContentTableHeadCell>
+                </tr>
+              </ContentTableHeader>
+              <tbody className="bg-white divide-y divide-slate-200">
+                {logs.map((log) => (
+                  <Fragment key={log.id}>
                     <tr
-                      key={log.id}
                       className="hover:bg-slate-50 transition-colors cursor-pointer"
                       onClick={() =>
                         setExpandedLogId(expandedLogId === log.id ? null : log.id)
                       }
                     >
-                      <td className="px-4 py-3 whitespace-nowrap text-xs md:text-sm text-slate-600">
+                      <ContentTableCell compact nowrap className="text-xs md:text-sm text-slate-600">
                         {formatDateTime(log.created)}
-                      </td>
-                      <td className="px-4 py-3 whitespace-nowrap text-xs md:text-sm text-slate-900">
+                      </ContentTableCell>
+                      <ContentTableCell compact nowrap className="text-xs md:text-sm text-slate-900">
                         {getUserEmail(log)}
-                      </td>
-                      <td className="px-4 py-3 whitespace-nowrap">
+                      </ContentTableCell>
+                      <ContentTableCell compact nowrap>
                         <span
                           className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium border ${getActionTypeColor(
                             log.action_type
@@ -207,42 +204,56 @@ export default function AuditLogs() {
                         >
                           {log.action_type}
                         </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs md:text-sm text-slate-700">
+                      </ContentTableCell>
+                      <ContentTableCell compact className="text-xs md:text-sm text-slate-700">
                         {log.target_module}
-                      </td>
-                      <td className="px-4 py-3 text-xs md:text-sm text-slate-600 max-w-xs truncate">
+                      </ContentTableCell>
+                      <ContentTableCell compact className="text-xs md:text-sm text-slate-600 max-w-xs truncate">
                         {log.details || "-"}
-                      </td>
+                      </ContentTableCell>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+                    {expandedLogId === log.id ? (
+                      <tr className="bg-slate-50/70">
+                        <ContentTableCell compact colSpan={5} className="text-xs text-slate-700">
+                          <div className="space-y-1">
+                            <p className="font-medium text-slate-800">
+                              {t("auditLogs.table.details")}
+                            </p>
+                            <p className="whitespace-pre-wrap break-words">
+                              {log.details || "-"}
+                            </p>
+                          </div>
+                        </ContentTableCell>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </ContentTableSurface>
 
           {/* 分页控件 */}
           {totalPages > 1 && (
             <div className="flex items-center justify-center gap-2">
-              <button
+              <ContentSecondaryButton
                 type="button"
+                variant="pill"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {t("auditLogs.pagination.prev")}
-              </button>
+              </ContentSecondaryButton>
               <span className="px-3 py-1.5 text-xs text-slate-600">
                 {t("auditLogs.pagination.info", { page, total: totalPages })}
               </span>
-              <button
+              <ContentSecondaryButton
                 type="button"
+                variant="pill"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {t("auditLogs.pagination.next")}
-              </button>
+              </ContentSecondaryButton>
             </div>
           )}
         </>

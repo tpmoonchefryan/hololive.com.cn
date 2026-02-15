@@ -14,6 +14,11 @@ import {
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import Modal from "../ui/Modal";
+import ContentFieldLabel from "../content/ContentFieldLabel";
+import ContentIconActionButton from "../content/ContentIconActionButton";
+import ContentPrimaryButton from "../content/ContentPrimaryButton";
+import ContentSecondaryButton from "../content/ContentSecondaryButton";
+import ContentTextInput from "../content/ContentTextInput";
 
 /**
  * 富文本编辑器工具栏组件
@@ -40,176 +45,156 @@ export default function MenuBar({ editor, onImageUpload, onOpenMediaLibrary }) {
     setLinkUrl("");
   };
 
+  const getToolbarButtonClass = (active) =>
+    active
+      ? "text-[var(--color-brand-blue)] bg-[var(--color-brand-blue)]/20 hover:bg-[var(--color-brand-blue)]/25 hover:text-[var(--color-brand-blue)]"
+      : "text-slate-600 hover:bg-slate-200";
+
   return (
     <>
       <div className="flex items-center gap-1 flex-wrap border-b border-slate-200 bg-slate-50/80 px-3 py-2">
       {/* 加粗 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleBold().run()}
         disabled={!editor.can().chain().focus().toggleBold().run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("bold")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Bold}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("bold"))}
         title={t("menuBar.bold")}
         aria-label={t("menuBar.bold")}
-      >
-        <Bold className="w-4 h-4" />
-      </button>
+      />
 
       {/* 斜体 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleItalic().run()}
         disabled={!editor.can().chain().focus().toggleItalic().run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("italic")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Italic}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("italic"))}
         title={t("menuBar.italic")}
         aria-label={t("menuBar.italic")}
-      >
-        <Italic className="w-4 h-4" />
-      </button>
+      />
 
       {/* 分隔线 */}
       <div className="w-px h-6 bg-slate-300 mx-1" />
 
       {/* H1 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("heading", { level: 1 })
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Heading1}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("heading", { level: 1 }))}
         title={t("menuBar.heading1")}
         aria-label={t("menuBar.heading1")}
-      >
-        <Heading1 className="w-4 h-4" />
-      </button>
+      />
 
       {/* H2 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("heading", { level: 2 })
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Heading2}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("heading", { level: 2 }))}
         title={t("menuBar.heading2")}
         aria-label={t("menuBar.heading2")}
-      >
-        <Heading2 className="w-4 h-4" />
-      </button>
+      />
 
       {/* H3 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("heading", { level: 3 })
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Heading3}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("heading", { level: 3 }))}
         title={t("menuBar.heading3")}
         aria-label={t("menuBar.heading3")}
-      >
-        <Heading3 className="w-4 h-4" />
-      </button>
+      />
 
       {/* 分隔线 */}
       <div className="w-px h-6 bg-slate-300 mx-1" />
 
       {/* 无序列表 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleBulletList().run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("bulletList")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={List}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("bulletList"))}
         title={t("menuBar.bulletList")}
         aria-label={t("menuBar.bulletList")}
-      >
-        <List className="w-4 h-4" />
-      </button>
+      />
 
       {/* 有序列表 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleOrderedList().run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("orderedList")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={ListOrdered}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("orderedList"))}
         title={t("menuBar.orderedList")}
         aria-label={t("menuBar.orderedList")}
-      >
-        <ListOrdered className="w-4 h-4" />
-      </button>
+      />
 
       {/* 引用 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => editor.chain().focus().toggleBlockquote().run()}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("blockquote")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Quote}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("blockquote"))}
         title={t("menuBar.quote")}
         aria-label={t("menuBar.quote")}
-      >
-        <Quote className="w-4 h-4" />
-      </button>
+      />
 
       {/* 分隔线 */}
       <div className="w-px h-6 bg-slate-300 mx-1" />
 
       {/* 链接 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={() => setIsLinkModalOpen(true)}
-        className={`p-1.5 rounded-md transition-colors ${
-          editor.isActive("link")
-            ? "bg-[var(--color-brand-blue)]/20 text-[var(--color-brand-blue)]"
-            : "text-slate-600 hover:bg-slate-200"
-        }`}
+        tone="neutral"
+        size="sm"
+        icon={Link}
+        iconSize={16}
+        className={getToolbarButtonClass(editor.isActive("link"))}
         title={t("menuBar.link")}
         aria-label={t("menuBar.link")}
-      >
-        <Link className="w-4 h-4" />
-      </button>
+      />
 
       {/* 图片上传 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={onImageUpload}
-        className="p-1.5 rounded-md transition-colors text-slate-600 hover:bg-slate-200"
+        tone="neutral"
+        size="sm"
+        icon={Image}
+        iconSize={16}
+        className="text-slate-600 hover:bg-slate-200"
         title={t("menuBar.uploadImage")}
         aria-label={t("menuBar.uploadImage")}
-      >
-        <Image className="w-4 h-4" />
-      </button>
+      />
 
       {/* 媒体库 */}
-      <button
-        type="button"
+      <ContentIconActionButton
         onClick={onOpenMediaLibrary}
-        className="p-1.5 rounded-md transition-colors text-slate-600 hover:bg-slate-200"
+        tone="neutral"
+        size="sm"
+        icon={Images}
+        iconSize={16}
+        className="text-slate-600 hover:bg-slate-200"
         title={t("menuBar.selectFromLibrary")}
         aria-label={t("menuBar.selectFromLibrary")}
-      >
-        <Images className="w-4 h-4" />
-      </button>
+      />
       </div>
 
       <Modal
@@ -229,40 +214,37 @@ export default function MenuBar({ editor, onImageUpload, onOpenMediaLibrary }) {
           }}
         >
           <div>
-            <label
-              htmlFor="editor-link-url"
-              className="block text-sm font-medium text-slate-700 mb-2"
-            >
+            <ContentFieldLabel htmlFor="editor-link-url" className="mb-2">
               {t("menuBar.linkDialog.label")}
-            </label>
-            <input
+            </ContentFieldLabel>
+            <ContentTextInput
               id="editor-link-url"
               type="url"
               value={linkUrl}
               onChange={(event) => setLinkUrl(event.target.value)}
               placeholder={t("menuBar.linkDialog.placeholder")}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--color-brand-blue)]/30 focus:border-[var(--color-brand-blue)]"
+              className="text-sm"
               inputMode="url"
               spellCheck={false}
             />
           </div>
           <div className="flex items-center justify-end gap-2">
-            <button
+            <ContentSecondaryButton
               type="button"
               onClick={() => {
                 setIsLinkModalOpen(false);
                 setLinkUrl("");
               }}
-              className="px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 text-sm hover:bg-slate-100 transition-colors"
+              className="px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 text-sm"
             >
               {t("menuBar.linkDialog.cancel")}
-            </button>
-            <button
+            </ContentSecondaryButton>
+            <ContentPrimaryButton
               type="submit"
-              className="px-3 py-2 rounded-lg bg-[var(--color-brand-blue)] text-slate-950 text-sm font-medium hover:bg-[var(--color-brand-blue)]/90 transition-colors"
+              className="px-3 py-2 rounded-lg text-sm font-medium"
             >
               {t("menuBar.linkDialog.confirm")}
-            </button>
+            </ContentPrimaryButton>
           </div>
         </form>
       </Modal>

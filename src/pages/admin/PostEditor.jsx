@@ -1,16 +1,25 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
-import { Save, ArrowLeft, Loader2, Pin, Languages } from "lucide-react";
+import { useParams, useNavigate } from "react-router-dom";
+import { Save, Pin } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import ImagePicker from "../../components/admin/ImagePicker";
 import { logCreate, logUpdate } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
-import {
-  detectSourceLanguage,
-  getTargetLangs,
-  requestAdminTranslation,
-} from "../../lib/adminTranslateApi";
+import { useAdminContentTranslation } from "../../hooks/useAdminContentTranslation";
+import TranslateActionButton from "../../components/admin/content/TranslateActionButton";
+import { useUIFeedback } from "../../hooks/useUIFeedback";
+import MultilangField from "../../components/admin/content/MultilangField";
+import MultilangTabs from "../../components/admin/content/MultilangTabs";
+import { useTriLanguageOptions } from "../../hooks/useTriLanguageOptions";
+import ContentEditorHeader from "../../components/admin/content/ContentEditorHeader";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentFormCard from "../../components/admin/content/ContentFormCard";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
+import ContentCheckboxInput from "../../components/admin/content/ContentCheckboxInput";
 
 /**
  * 文章编辑器组件（支持三语言）
@@ -23,14 +32,12 @@ export default function PostEditor() {
   const { adminKey, id } = useParams();
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const { notify } = useUIFeedback();
+  const { translating, translateFields } = useAdminContentTranslation();
   const isEditMode = !!id;
 
   // 语言选项
-  const languages = [
-    { code: "zh", label: t("common.languageNames.zh") },
-    { code: "en", label: t("common.languageNames.en") },
-    { code: "ja", label: t("common.languageNames.ja") },
-  ];
+  const languages = useTriLanguageOptions();
   const [activeLang, setActiveLang] = useState("zh");
 
   // 表单状态 - 多语言格式
@@ -49,8 +56,6 @@ export default function PostEditor() {
   const [loading, setLoading] = useState(isEditMode);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
-  const [translating, setTranslating] = useState(false);
 
   // 分类选项
   const categories = ["公告", "文档", "更新日志"];
@@ -134,76 +139,28 @@ export default function PostEditor() {
   // 一键智能翻译
   const handleAutoTranslate = async () => {
     try {
-      setTranslating(true);
-      setToast({ type: "info", message: t("admin.postEditor.toast.connectTranslate") });
+      notify(t("admin.postEditor.toast.connectTranslate"), "info");
+      const result = await translateFields({
+        scene: "post_editor",
+        fields: [
+          { key: "title", value: formData.title },
+          { key: "summary", value: formData.summary },
+          { key: "content", value: formData.content },
+        ],
+      });
 
-      const fieldsToTranslate = ["title", "summary", "content"];
-      const updatedFormData = { ...formData };
-      let translatedCount = 0;
-
-      for (let i = 0; i < fieldsToTranslate.length; i++) {
-        const fieldName = fieldsToTranslate[i];
-        const field = formData[fieldName];
-        if (!field) continue;
-
-        // 检测源语言
-        const sourceLang = detectSourceLanguage(field);
-        if (!sourceLang) continue;
-        const sourceText = field[sourceLang]?.trim();
-        if (!sourceText) continue;
-
-        // 确定目标语言
-        const targetLangs = getTargetLangs(sourceLang);
-        if (targetLangs.length === 0) continue;
-
-        // 添加延迟
-        if (i > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-
-        const response = await requestAdminTranslation({
-          scene: "post_editor",
-          sourceLang,
-          targets: targetLangs,
-          fields: {
-            [fieldName]: sourceText,
-          },
-        });
-        const translatedMap = response?.translations?.[fieldName] || {};
-
-        let hasAnyTarget = false;
-        const nextFieldValue = {
-          ...updatedFormData[fieldName],
-        };
-        for (const targetLang of targetLangs) {
-          if (typeof translatedMap[targetLang] === "string") {
-            nextFieldValue[targetLang] = translatedMap[targetLang];
-            hasAnyTarget = true;
-          }
-        }
-        if (hasAnyTarget) {
-          updatedFormData[fieldName] = nextFieldValue;
-          translatedCount++;
-        }
-      }
-
-      if (translatedCount === 0) {
-        setToast({
-          type: "warning",
-          message: t("admin.postEditor.toast.noContent"),
-        });
+      if (result.changedCount === 0) {
+        notify(t("admin.postEditor.toast.noContent"), "warning");
       } else {
-        setFormData(updatedFormData);
-        setToast({ type: "success", message: t("admin.postEditor.toast.translateSuccess") });
+        setFormData((prev) => ({
+          ...prev,
+          ...result.fields,
+        }));
+        notify(t("admin.postEditor.toast.translateSuccess"), "success");
       }
     } catch (err) {
       logger.error("Translation error:", err);
-      setToast({
-        type: "error",
-        message: t("admin.postEditor.toast.translateError"),
-      });
-    } finally {
-      setTranslating(false);
+      notify(t("admin.postEditor.toast.translateError"), "error");
     }
   };
 
@@ -242,175 +199,128 @@ export default function PostEditor() {
         await logCreate("Post Editor", `Created post: ${title}`);
       }
 
-      setToast({
-        type: "success",
-        message: isEditMode ? t("admin.postEditor.toast.updateSuccess") : t("admin.postEditor.toast.createSuccess"),
-      });
+      notify(
+        isEditMode ? t("admin.postEditor.toast.updateSuccess") : t("admin.postEditor.toast.createSuccess"),
+        "success"
+      );
       setTimeout(() => {
-        setToast(null);
         navigate(`/${adminKey}/webadmin/posts`);
       }, 900);
     } catch (err) {
       logger.error("Failed to save post:", err);
       const errorMsg = err?.response?.message || err?.message || t("admin.postEditor.toast.saveError");
       setError(errorMsg);
-      setToast({
-        type: "error",
-        message: t("admin.postEditor.toast.saveError"),
-      });
+      notify(t("admin.postEditor.toast.saveError"), "error");
     } finally {
       setSaving(false);
     }
   };
 
+  const activeLangLabel = languages.find((lang) => lang.code === activeLang)?.label || "";
+
   return (
     <div className="space-y-4">
-      {/* Toast 提示 */}
-      {toast && (
-        <div
-          className={`rounded-2xl px-4 py-2.5 text-xs md:text-sm flex items-center justify-between gap-3 shadow-sm ${toast.type === "success"
-              ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-              : toast.type === "info"
-                ? "bg-blue-50 text-blue-800 border border-blue-200"
-                : toast.type === "warning"
-                  ? "bg-yellow-50 text-yellow-800 border border-yellow-200"
-                  : "bg-red-50 text-red-800 border border-red-200"
-            }`}
-        >
-          <span>{toast.message}</span>
-          <button
-            type="button"
-            onClick={() => setToast(null)}
-            className="text-[11px] font-medium opacity-80 hover:opacity-100"
-          >
-            ×
-          </button>
-        </div>
-      )}
-
       {loading ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <Loader2 className="w-7 h-7 animate-spin text-slate-400 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">{t("admin.posts.loading")}</p>
-        </div>
+        <ContentStateBlock
+          loading
+          loadingText={t("admin.posts.loading")}
+          className="rounded-2xl"
+        />
       ) : (
         <div className="space-y-5">
           <form onSubmit={handleSave} className="space-y-4">
             {/* 页面头部 */}
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <div className="flex items-center gap-4">
-                <Link
-                  to={`/${adminKey}/webadmin/posts`}
-                  className="text-gray-600 hover:text-gray-900 transition-colors"
-                >
-                  <ArrowLeft className="w-5 h-5" />
-                </Link>
-                <div>
-                  <h1 className="text-xl md:text-2xl font-bold text-slate-900">
-                    {isEditMode ? t("admin.postEditor.editTitle") : t("admin.postEditor.createTitle")}
-                  </h1>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                {/* 一键翻译按钮 */}
-                <button
-                  type="button"
-                  onClick={handleAutoTranslate}
-                  disabled={translating}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-4 py-1.5 text-xs md:text-sm font-semibold text-slate-900 hover:bg-slate-200 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  <Languages className="w-3.5 h-3.5" />
-                  {translating ? t("admin.postEditor.translating") : t("admin.postEditor.translate")}
-                </button>
-                {/* 保存按钮 */}
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-brand-blue)] px-4 py-1.5 text-xs md:text-sm font-semibold text-slate-950 shadow-[0_0_18px_rgba(142,209,252,0.8)] hover:scale-[1.02] active:scale-[0.98] transition-transform disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {saving ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      {t("admin.postEditor.saving")}
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-3.5 h-3.5" />
-                      {t("admin.postEditor.save")}
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
+            <ContentEditorHeader
+              backTo={`/${adminKey}/webadmin/posts`}
+              title={isEditMode ? t("admin.postEditor.editTitle") : t("admin.postEditor.createTitle")}
+              actions={(
+                <>
+                  <TranslateActionButton
+                    onClick={handleAutoTranslate}
+                    translating={translating}
+                    label={t("admin.postEditor.translate")}
+                    translatingLabel={t("admin.postEditor.translating")}
+                  />
+                  <ContentPrimaryButton
+                    type="submit"
+                    disabled={saving}
+                    variant="pill"
+                    icon={Save}
+                    iconSize={14}
+                    loading={saving}
+                    loadingLabel={t("admin.postEditor.saving")}
+                  >
+                    {t("admin.postEditor.save")}
+                  </ContentPrimaryButton>
+                </>
+              )}
+            />
 
             {/* 语言标签切换器 */}
             <div className="bg-white rounded-xl border border-slate-200 p-2 shadow-sm">
-              <div className="flex gap-2">
-                {languages.map((lang) => (
-                  <button
-                    key={lang.code}
-                    type="button"
-                    onClick={() => setActiveLang(lang.code)}
-                    className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeLang === lang.code
-                        ? "bg-[var(--color-brand-blue)] text-slate-950 shadow-sm"
-                        : "bg-slate-50 text-slate-600 hover:bg-slate-100"
-                      }`}
-                  >
-                    {lang.label}
-                  </button>
-                ))}
-              </div>
+              <MultilangTabs
+                languages={languages}
+                activeLang={activeLang}
+                onChange={setActiveLang}
+                stretch
+                buttonBaseClassName="px-4 py-2 text-sm font-medium shadow-sm"
+                activeButtonClassName="bg-[var(--color-brand-blue)] text-slate-950"
+                inactiveButtonClassName="bg-slate-50 text-slate-600 hover:bg-slate-100"
+              />
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] gap-4">
               {/* 左侧：编辑区 */}
               <div className="space-y-4">
                 {/* 基本信息：标题、摘要、封面图 */}
-                <div className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm space-y-4">
-                  <h2 className="text-sm font-semibold text-slate-900 border-b border-slate-200 pb-2">
-                    {t("admin.postEditor.basicInfo")}
-                  </h2>
+                <ContentFormCard
+                  title={t("admin.postEditor.basicInfo")}
+                  className="space-y-4"
+                >
 
                   {/* 标题（多语言） */}
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">
-                      {t("admin.postEditor.titleLabel")} ({languages.find((l) => l.code === activeLang)?.label})
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.title[activeLang] || ""}
-                      onChange={(e) => handleTitleChange(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5 text-base md:text-lg font-semibold text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
-                      placeholder={t("admin.postEditor.titlePlaceholder")}
-                      required
-                    />
-                  </div>
+                  <MultilangField
+                    label={`${t("admin.postEditor.titleLabel")} (${activeLangLabel})`}
+                    type="text"
+                    value={formData.title}
+                    onChange={(_, value) => handleTitleChange(value)}
+                    activeLang={activeLang}
+                    showTabs={false}
+                    required
+                    placeholder={t("admin.postEditor.titlePlaceholder")}
+                    controlClassName="w-full rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5 text-base md:text-lg font-semibold text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
+                    labelClassName="block text-xs font-medium text-slate-500 uppercase tracking-wide"
+                    className="space-y-2"
+                  />
 
                   {/* 摘要（多语言） */}
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">
-                      {t("admin.postEditor.summaryLabel")} ({languages.find((l) => l.code === activeLang)?.label})
-                    </label>
-                    <textarea
-                      value={formData.summary[activeLang] || ""}
-                      onChange={(e) =>
-                        setFormData((prev) => ({
-                          ...prev,
-                          summary: {
-                            ...prev.summary,
-                            [activeLang]: e.target.value,
-                          },
-                        }))
-                      }
-                      rows={3}
-                      maxLength={500}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5 text-sm text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30 resize-none"
-                      placeholder={t("admin.postEditor.summaryPlaceholder")}
-                    />
-                    <p className="text-[11px] text-slate-500">
-                      {(formData.summary[activeLang] || "").length}/500
-                    </p>
-                  </div>
+                  <MultilangField
+                    label={`${t("admin.postEditor.summaryLabel")} (${activeLangLabel})`}
+                    type="textarea"
+                    value={formData.summary}
+                    onChange={(lang, value) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        summary: {
+                          ...prev.summary,
+                          [lang]: value,
+                        },
+                      }))
+                    }
+                    activeLang={activeLang}
+                    showTabs={false}
+                    rows={3}
+                    maxLength={500}
+                    placeholder={t("admin.postEditor.summaryPlaceholder")}
+                    controlClassName="w-full rounded-xl border border-slate-200 bg-slate-50/60 px-3.5 py-2.5 text-sm text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30 resize-none"
+                    labelClassName="block text-xs font-medium text-slate-500 uppercase tracking-wide"
+                    className="space-y-2"
+                    afterControl={(
+                      <p className="text-[11px] text-slate-500">
+                        {(formData.summary[activeLang] || "").length}/500
+                      </p>
+                    )}
+                  />
 
                   {/* 封面图 */}
                   <div className="space-y-2">
@@ -429,8 +339,7 @@ export default function PostEditor() {
                   {/* 置顶开关 */}
                   <div className="space-y-2 pt-2 border-t border-slate-200">
                     <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2 cursor-pointer">
-                      <input
-                        type="checkbox"
+                      <ContentCheckboxInput
                         checked={formData.is_pinned}
                         onChange={(e) =>
                           setFormData((prev) => ({
@@ -438,7 +347,7 @@ export default function PostEditor() {
                             is_pinned: e.target.checked,
                           }))
                         }
-                        className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                        className="h-4 w-4"
                       />
                       <div className="flex items-center gap-2 flex-1">
                         <Pin className="w-4 h-4 text-slate-600" />
@@ -458,10 +367,10 @@ export default function PostEditor() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
                     <div className="space-y-1.5">
-                      <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">
+                      <ContentFieldLabel className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1.5">
                         {t("admin.postEditor.categoryLabel")}
-                      </label>
-                      <select
+                      </ContentFieldLabel>
+                      <ContentSelectInput
                         value={formData.category}
                         onChange={(e) =>
                           setFormData((prev) => ({
@@ -469,22 +378,21 @@ export default function PostEditor() {
                             category: e.target.value,
                           }))
                         }
-                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
+                        className="rounded-xl border-slate-200 px-3 py-2 text-sm text-slate-900"
                       >
                         {categories.map((cat) => (
                           <option key={cat} value={cat}>
                             {t(`admin.posts.categories.${cat === "公告" ? "announcement" : (cat === "文档" ? "docs" : "changelog")}`)}
                           </option>
                         ))}
-                      </select>
+                      </ContentSelectInput>
                     </div>
                     <div className="space-y-1.5">
                       <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">
                         {t("admin.postEditor.publicStatus")}
                       </label>
                       <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2 cursor-pointer">
-                        <input
-                          type="checkbox"
+                        <ContentCheckboxInput
                           checked={formData.is_public}
                           onChange={(e) =>
                             setFormData((prev) => ({
@@ -492,7 +400,7 @@ export default function PostEditor() {
                               is_public: e.target.checked,
                             }))
                           }
-                          className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                          className="h-4 w-4"
                         />
                         <div className="flex flex-col">
                           <span className="text-xs font-medium text-slate-800">
@@ -507,7 +415,7 @@ export default function PostEditor() {
                       </label>
                     </div>
                   </div>
-                </div>
+                </ContentFormCard>
 
                 {/* 富文本编辑区（多语言） */}
                 <div className="space-y-2">
@@ -541,11 +449,11 @@ export default function PostEditor() {
 
               {/* 右侧：元数据 & Slug */}
               <div className="space-y-4">
-                <div className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm space-y-2.5">
-                  <label className="block text-xs font-medium text-slate-500 uppercase tracking-wide">
+                <ContentFormCard className="space-y-2.5">
+                  <ContentFieldLabel className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-0">
                     {t("admin.postEditor.slugLabel")}
-                  </label>
-                  <input
+                  </ContentFieldLabel>
+                  <ContentTextInput
                     type="text"
                     value={formData.slug}
                     onChange={(e) =>
@@ -554,13 +462,13 @@ export default function PostEditor() {
                         slug: e.target.value,
                       }))
                     }
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs md:text-sm font-mono text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
+                    className="rounded-xl border-slate-200 bg-slate-50 px-3 py-2 text-xs md:text-sm font-mono text-slate-900"
                     placeholder="article-slug"
                   />
                   <p className="text-[11px] text-slate-500">
                     {t("admin.postEditor.slugHint")}
                   </p>
-                </div>
+                </ContentFormCard>
               </div>
             </div>
           </form>

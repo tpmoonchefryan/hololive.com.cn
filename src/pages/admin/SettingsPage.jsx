@@ -1,6 +1,6 @@
 import { useCallback, useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { Save, Loader2, Settings, AlertTriangle } from "lucide-react";
+import { Save, Settings, AlertTriangle } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { logSystemSettings } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
@@ -8,6 +8,16 @@ import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "../../components/admin/ui/Modal";
 import { testAdminTranslationConfig } from "../../lib/adminTranslateApi";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
+import ContentCheckboxInput from "../../components/admin/content/ContentCheckboxInput";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
+import ContentTextareaInput from "../../components/admin/content/ContentTextareaInput";
 
 const SETTINGS_ID = "1"; // 单例模式，固定 ID
 const DEFAULT_TRANSLATION_TEST_TEXT = "这是配置测试文本，请翻译。";
@@ -445,51 +455,46 @@ export default function SettingsPage() {
             </div>
           </div>
           <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
+            <ContentSecondaryButton
+              variant="pill"
               onClick={() => {
                 setShowKeyWarning(false);
                 setPendingUpdate(null);
                 setPendingTranslationUpdate(null);
               }}
-              className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 transition-colors"
+              className="px-3 py-1.5 text-xs"
             >
               {t("admin.settingsPage.modal.cancel")}
-            </button>
-            <button
+            </ContentSecondaryButton>
+            <ContentPrimaryButton
               type="button"
+              variant="solid"
               disabled={saving}
+              loading={saving}
               onClick={() =>
                 pendingUpdate &&
                 saveSettings(pendingUpdate, pendingTranslationUpdate, true)
               }
-              className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              className="rounded-full bg-red-600 text-white hover:bg-red-700 px-3.5 py-1.5 text-xs font-semibold"
             >
-              {saving && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              )}
               {t("admin.settingsPage.modal.confirm")}
-            </button>
+            </ContentPrimaryButton>
           </div>
         </div>
       </Modal>
 
       {loading ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <Loader2 className="w-7 h-7 animate-spin text-slate-400 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">{t("admin.settingsPage.loading")}</p>
-        </div>
+        <ContentStateBlock
+          loading
+          loadingText={t("admin.settingsPage.loading")}
+          className="rounded-2xl"
+        />
       ) : (
         <div className="max-w-4xl">
-          {/* 页面头部 */}
-          <div className="mb-4">
-            <h1 className="text-xl md:text-2xl font-bold text-slate-900 mb-1">
-              {t("admin.settingsPage.title")}
-            </h1>
-            <p className="text-xs md:text-sm text-slate-500">
-              {t("admin.settingsPage.description")}
-            </p>
-          </div>
+          <ContentPageHeader
+            title={t("admin.settingsPage.title")}
+            subtitle={t("admin.settingsPage.description")}
+          />
 
           {/* 错误提示 */}
           {error && (
@@ -500,7 +505,7 @@ export default function SettingsPage() {
 
           <form onSubmit={handleSave} className="space-y-5">
             {/* Section 1: 接口设置 */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+            <ContentCardSurface className="p-6">
               <div className="flex items-center gap-2 mb-6">
                 <Settings className="w-5 h-5 text-slate-600" />
                 <h2 className="text-lg md:text-xl font-semibold text-slate-900">
@@ -510,9 +515,9 @@ export default function SettingsPage() {
 
               {/* SSO 配置展示 */}
               <div className="mb-6">
-                <label className="block text-sm font-medium text-slate-700 mb-2">
+                <ContentFieldLabel>
                   {t("admin.settingsPage.interface.sso")}
-                </label>
+                </ContentFieldLabel>
                 <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
                   <p className="text-sm text-slate-600 mb-2">
                     {t("admin.settingsPage.interface.ssoDesc")}
@@ -526,10 +531,10 @@ export default function SettingsPage() {
               {/* Analytics 配置 */}
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.interface.googleId")}
-                  </label>
-                  <input
+                  </ContentFieldLabel>
+                  <ContentTextInput
                     type="text"
                     value={formData.analytics_config.google || ""}
                     onChange={(e) =>
@@ -541,7 +546,7 @@ export default function SettingsPage() {
                         },
                       })
                     }
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                    className="px-4 py-2 border-slate-200"
                     placeholder={t("admin.settingsPage.interface.googlePlaceholder")}
                   />
                   <p className="mt-1 text-xs text-slate-500">
@@ -550,10 +555,10 @@ export default function SettingsPage() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.interface.baiduId")}
-                  </label>
-                  <input
+                  </ContentFieldLabel>
+                  <ContentTextInput
                     type="text"
                     value={formData.analytics_config.baidu || ""}
                     onChange={(e) => {
@@ -586,7 +591,7 @@ export default function SettingsPage() {
                         });
                       }
                     }}
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                    className="px-4 py-2 border-slate-200"
                     placeholder={t("admin.settingsPage.interface.baiduPlaceholder")}
                   />
                   <p className="mt-1 text-xs text-slate-500">
@@ -599,10 +604,10 @@ export default function SettingsPage() {
                   )}
                 </div>
               </div>
-            </div>
+            </ContentCardSurface>
 
             {/* Section 2: 后台入口设置 */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+            <ContentCardSurface className="p-6">
               <div className="flex items-center gap-2 mb-6">
                 <Settings className="w-5 h-5 text-slate-600" />
                 <h2 className="text-lg md:text-xl font-semibold text-slate-900">
@@ -626,10 +631,10 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
+                <ContentFieldLabel>
                   {t("admin.settingsPage.access.keyLabel")}
-                </label>
-                <input
+                </ContentFieldLabel>
+                <ContentTextInput
                   type="text"
                   value={formData.admin_entrance_key}
                   onChange={(e) =>
@@ -638,7 +643,7 @@ export default function SettingsPage() {
                       admin_entrance_key: e.target.value,
                     })
                   }
-                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent font-mono"
+                  className="px-4 py-2 border-slate-200 font-mono"
                   placeholder={t("admin.settingsPage.access.keyPlaceholder")}
                   required
                 />
@@ -664,8 +669,7 @@ export default function SettingsPage() {
                     </p>
                   </div>
                   <label className="inline-flex items-center gap-2 text-xs text-slate-700 flex-shrink-0">
-                    <input
-                      type="checkbox"
+                    <ContentCheckboxInput
                       checked={formData.enable_pb_public_entry !== false}
                       onChange={(e) =>
                         setFormData({
@@ -673,7 +677,7 @@ export default function SettingsPage() {
                           enable_pb_public_entry: e.target.checked,
                         })
                       }
-                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                      className="h-4 w-4"
                     />
                     <span className="font-medium">
                       {formData.enable_pb_public_entry !== false
@@ -683,10 +687,10 @@ export default function SettingsPage() {
                   </label>
                 </div>
               </div>
-            </div>
+            </ContentCardSurface>
 
             {/* Section 3: 翻译管理 */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+            <ContentCardSurface className="p-6">
               <div className="flex items-center gap-2 mb-3">
                 <Settings className="w-5 h-5 text-slate-600" />
                 <h2 className="text-lg md:text-xl font-semibold text-slate-900">
@@ -699,17 +703,16 @@ export default function SettingsPage() {
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.translation.enabled")}
-                  </label>
+                  </ContentFieldLabel>
                   <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                    <input
-                      type="checkbox"
+                    <ContentCheckboxInput
                       checked={formData.translation_config.enabled !== false}
                       onChange={(e) =>
                         patchTranslationConfig({ enabled: e.target.checked })
                       }
-                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                      className="h-4 w-4"
                     />
                     <span className="font-medium">
                       {formData.translation_config.enabled !== false
@@ -720,15 +723,15 @@ export default function SettingsPage() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.translation.engineLabel")}
-                  </label>
-                  <select
+                  </ContentFieldLabel>
+                  <ContentSelectInput
                     value={formData.translation_config.engine}
                     onChange={(e) =>
                       patchTranslationConfig({ engine: e.target.value })
                     }
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                    className="px-4 py-2 border-slate-200"
                   >
                     <option value="free">
                       {t("admin.settingsPage.translation.engineFree")}
@@ -736,19 +739,19 @@ export default function SettingsPage() {
                     <option value="ai">
                       {t("admin.settingsPage.translation.engineAi")}
                     </option>
-                  </select>
+                  </ContentSelectInput>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.translation.fillPolicyLabel")}
-                  </label>
-                  <select
+                  </ContentFieldLabel>
+                  <ContentSelectInput
                     value={formData.translation_config.fill_policy}
                     onChange={(e) =>
                       patchTranslationConfig({ fill_policy: e.target.value })
                     }
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                    className="px-4 py-2 border-slate-200"
                   >
                     <option value="fill_empty_only">
                       {t("admin.settingsPage.translation.fillPolicyFillEmpty")}
@@ -756,21 +759,20 @@ export default function SettingsPage() {
                     <option value="overwrite_target">
                       {t("admin.settingsPage.translation.fillPolicyOverwrite")}
                     </option>
-                  </select>
+                  </ContentSelectInput>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <ContentFieldLabel>
                     {t("admin.settingsPage.translation.cacheLabel")}
-                  </label>
+                  </ContentFieldLabel>
                   <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                    <input
-                      type="checkbox"
+                    <ContentCheckboxInput
                       checked={formData.translation_config.enable_cache !== false}
                       onChange={(e) =>
                         patchTranslationConfig({ enable_cache: e.target.checked })
                       }
-                      className="h-4 w-4 rounded border-slate-300 text-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/40"
+                      className="h-4 w-4"
                     />
                     <span className="font-medium">
                       {formData.translation_config.enable_cache !== false
@@ -783,43 +785,43 @@ export default function SettingsPage() {
                 {formData.translation_config.engine === "ai" && (
                   <>
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.providerLabel")}
-                      </label>
-                      <select
+                      </ContentFieldLabel>
+                      <ContentSelectInput
                         value={formData.translation_config.ai_provider}
                         onChange={(e) =>
                           patchTranslationConfig({ ai_provider: e.target.value })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                       >
                         <option value="right_code">Right Code</option>
-                      </select>
+                      </ContentSelectInput>
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.endpointLabel")}
-                      </label>
-                      <select
+                      </ContentFieldLabel>
+                      <ContentSelectInput
                         value={formData.translation_config.right_code_endpoint}
                         onChange={(e) =>
                           patchTranslationConfig({
                             right_code_endpoint: e.target.value,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                       >
                         <option value="responses">responses</option>
                         <option value="chat_completions">chat/completions</option>
-                      </select>
+                      </ContentSelectInput>
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.baseUrlLabel")}
-                      </label>
-                      <input
+                      </ContentFieldLabel>
+                      <ContentTextInput
                         type="text"
                         value={formData.translation_config.right_code_base_url}
                         onChange={(e) =>
@@ -827,16 +829,16 @@ export default function SettingsPage() {
                             right_code_base_url: e.target.value,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                         placeholder="https://www.right.codes/codex/v1"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.modelLabel")}
-                      </label>
-                      <input
+                      </ContentFieldLabel>
+                      <ContentTextInput
                         type="text"
                         value={formData.translation_config.right_code_model}
                         onChange={(e) =>
@@ -844,16 +846,16 @@ export default function SettingsPage() {
                             right_code_model: e.target.value,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                         placeholder="gpt-5.2"
                       />
                     </div>
 
                     <div className="md:col-span-2">
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.apiKeyLabel")}
-                      </label>
-                      <input
+                      </ContentFieldLabel>
+                      <ContentTextInput
                         type="password"
                         value={formData.translation_config.right_code_api_key}
                         onChange={(e) =>
@@ -861,16 +863,16 @@ export default function SettingsPage() {
                             right_code_api_key: e.target.value,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent font-mono"
+                        className="px-4 py-2 border-slate-200 font-mono"
                         placeholder={t("admin.settingsPage.translation.apiKeyPlaceholder")}
                       />
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.timeoutLabel")}
-                      </label>
-                      <input
+                      </ContentFieldLabel>
+                      <ContentTextInput
                         type="number"
                         min={1000}
                         step={1000}
@@ -880,15 +882,15 @@ export default function SettingsPage() {
                             request_timeout_ms: Number.parseInt(e.target.value || "0", 10) || 0,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-2">
+                      <ContentFieldLabel>
                         {t("admin.settingsPage.translation.maxInputLabel")}
-                      </label>
-                      <input
+                      </ContentFieldLabel>
+                      <ContentTextInput
                         type="number"
                         min={100}
                         step={100}
@@ -898,7 +900,7 @@ export default function SettingsPage() {
                             max_input_chars: Number.parseInt(e.target.value || "0", 10) || 0,
                           })
                         }
-                        className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                        className="px-4 py-2 border-slate-200"
                       />
                     </div>
                   </>
@@ -914,27 +916,24 @@ export default function SettingsPage() {
                     {t("admin.settingsPage.translation.test.desc")}
                   </p>
                 </div>
-                <textarea
+                <ContentTextareaInput
                   rows={3}
                   value={translationTestText}
                   onChange={(e) => setTranslationTestText(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent text-sm"
+                  className="text-sm border-slate-200"
                   placeholder={t("admin.settingsPage.translation.test.placeholder")}
                 />
                 <div className="flex items-center gap-2">
-                  <button
+                  <ContentPrimaryButton
                     type="button"
                     disabled={testingTranslation}
+                    loading={testingTranslation}
+                    loadingLabel={t("admin.settingsPage.translation.test.testing")}
                     onClick={handleTestTranslation}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="rounded-full bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
                   >
-                    {testingTranslation && (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    )}
-                    {testingTranslation
-                      ? t("admin.settingsPage.translation.test.testing")
-                      : t("admin.settingsPage.translation.test.button")}
-                  </button>
+                    {t("admin.settingsPage.translation.test.button")}
+                  </ContentPrimaryButton>
                   <span className="text-xs text-slate-500">
                     {t("admin.settingsPage.translation.onlyTwoTargetsHint")}
                   </span>
@@ -977,27 +976,22 @@ export default function SettingsPage() {
                   </div>
                 )}
               </div>
-            </div>
+            </ContentCardSurface>
 
             {/* 保存按钮 */}
             <div className="flex items-center justify-end">
-              <button
+              <ContentPrimaryButton
                 type="submit"
                 disabled={saving}
-                className="inline-flex items-center gap-2 rounded-full bg-[var(--color-brand-blue)] px-5 py-2 text-xs md:text-sm font-semibold text-slate-950 shadow-[0_0_18px_rgba(142,209,252,0.8)] hover:scale-[1.02] active:scale-[0.98] transition-transform disabled:opacity-60 disabled:cursor-not-allowed"
+                variant="pill"
+                icon={Save}
+                iconSize={16}
+                loading={saving}
+                loadingLabel={t("admin.settingsPage.saving")}
+                className="px-5 py-2"
               >
-                {saving ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    {t("admin.settingsPage.saving")}
-                  </>
-                ) : (
-                  <>
-                    <Save className="w-4 h-4" />
-                    {t("admin.settingsPage.save")}
-                  </>
-                )}
-              </button>
+                {t("admin.settingsPage.save")}
+              </ContentPrimaryButton>
             </div>
           </form>
         </div>

@@ -1,11 +1,22 @@
 import { useCallback, useState, useEffect } from "react";
-import { Plus, Edit, Trash2, Loader2, Mail, Save } from "lucide-react";
+import { Plus, Mail, Save } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { logCreate, logUpdate, logDelete } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "../../components/admin/ui/Modal";
 import { formatLocalizedDate } from "../../utils/localeFormat";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentTableSurface from "../../components/admin/content/ContentTableSurface";
+import ContentTableHeader from "../../components/admin/content/ContentTableHeader";
+import ContentTableHeadCell from "../../components/admin/content/ContentTableHeadCell";
+import ContentTableCell from "../../components/admin/content/ContentTableCell";
+import ContentEditDeleteActions from "../../components/admin/content/ContentEditDeleteActions";
 
 /**
  * SSO 白名单管理页面
@@ -183,49 +194,43 @@ export default function WhitelistPage() {
             }`}
         >
           <span>{toast.message}</span>
-          <button
-            type="button"
+          <ContentSecondaryButton
             onClick={() => setToast(null)}
-            className="text-[11px] font-medium opacity-80 hover:opacity-100"
+            className="px-2 py-1 text-[11px] font-medium opacity-80 hover:opacity-100 bg-white/40 hover:bg-white/60"
           >
             {t("whitelist.buttons.close")}
-          </button>
+          </ContentSecondaryButton>
         </div>
       )}
 
       <div className="space-y-4">
-        {/* 页面头部 */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl md:text-2xl font-bold text-slate-900 mb-1">
-              {t("whitelist.title")}
-            </h1>
-            <p className="text-xs md:text-sm text-slate-500">
-              {t("whitelist.subtitle")}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={handleNew}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full bg-[var(--color-brand-blue)] text-xs md:text-sm font-semibold text-slate-950 shadow-[0_0_18px_rgba(142,209,252,0.8)] hover:scale-[1.02] active:scale-[0.98] transition-transform"
-          >
-            <Plus className="w-5 h-5" />
-            {t("whitelist.buttons.add")}
-          </button>
-        </div>
+        <ContentPageHeader
+          title={t("whitelist.title")}
+          subtitle={t("whitelist.subtitle")}
+          actions={(
+            <ContentPrimaryButton
+              type="button"
+              onClick={handleNew}
+              variant="pill"
+              icon={Plus}
+              iconSize={20}
+            >
+              {t("whitelist.buttons.add")}
+            </ContentPrimaryButton>
+          )}
+        />
 
         {/* 错误提示 */}
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-xs md:text-sm">
             <p className="font-semibold mb-1">{t("whitelist.error.title")}</p>
             <p>{error}</p>
-            <button
-              type="button"
+            <ContentSecondaryButton
               onClick={fetchWhitelists}
-              className="mt-2 text-sm underline hover:no-underline"
+              className="mt-2 px-0 py-0 text-sm underline hover:no-underline bg-transparent hover:bg-transparent"
             >
               {t("whitelist.buttons.retry")}
-            </button>
+            </ContentSecondaryButton>
           </div>
         )}
 
@@ -238,10 +243,11 @@ export default function WhitelistPage() {
         >
           <form onSubmit={handleSave} className="space-y-4 px-6 py-5">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <ContentFieldLabel htmlFor="whitelist-email">
                 {t("whitelist.form.email")} *
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
+                id="whitelist-email"
                 type="email"
                 name="email"
                 autoComplete="off"
@@ -250,10 +256,10 @@ export default function WhitelistPage() {
                 onChange={(e) =>
                   setFormData({ ...formData, email: e.target.value })
                 }
-                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                className="px-4 py-2 border-slate-200"
                 placeholder={t("whitelist.form.emailPlaceholder")}
                 required
-                disabled={!!editingId}
+                disabled={Boolean(editingId)}
               />
               {editingId && (
                 <p className="mt-1 text-xs text-slate-500">
@@ -262,10 +268,11 @@ export default function WhitelistPage() {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <ContentFieldLabel htmlFor="whitelist-description">
                 {t("whitelist.form.desc")}
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
+                id="whitelist-description"
                 type="text"
                 name="description"
                 autoComplete="off"
@@ -273,121 +280,103 @@ export default function WhitelistPage() {
                 onChange={(e) =>
                   setFormData({ ...formData, description: e.target.value })
                 }
-                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-transparent"
+                className="px-4 py-2 border-slate-200"
                 placeholder={t("whitelist.form.descPlaceholder")}
               />
             </div>
             <div className="flex items-center justify-end gap-3 pt-4">
-              <button
-                type="button"
-                onClick={closeForm}
-                className="px-4 py-2 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors"
-              >
+              <ContentSecondaryButton onClick={closeForm}>
                 {t("whitelist.buttons.cancel")}
-              </button>
-              <button
+              </ContentSecondaryButton>
+              <ContentPrimaryButton
                 type="submit"
-                className="flex items-center gap-2 px-4 py-2 bg-[var(--color-brand-blue)] hover:bg-sky-400 text-slate-950 rounded-lg font-medium transition-colors"
+                icon={Save}
+                iconSize={16}
               >
-                <Save className="w-4 h-4" />
                 {editingId ? t("auditLogs.actions.update") : t("auditLogs.actions.create")}
-              </button>
+              </ContentPrimaryButton>
             </div>
           </form>
         </Modal>
 
         {/* 白名单列表 */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-          {loading ? (
-            <div className="p-12 text-center">
-              <Loader2 className="w-8 h-8 animate-spin text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-500">{t("whitelist.loading")}</p>
-            </div>
-          ) : whitelists.length === 0 ? (
-            <div className="p-12 text-center">
-              <Mail className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-500 text-lg mb-2">{t("whitelist.empty.title")}</p>
-              <p className="text-gray-400 text-sm mb-6">
-                {t("whitelist.empty.desc")}
-              </p>
-              <button
+        {loading ? (
+          <ContentStateBlock
+            loading
+            loadingText={t("whitelist.loading")}
+            className="rounded-2xl"
+          />
+        ) : whitelists.length === 0 ? (
+          <ContentStateBlock
+            icon={Mail}
+            title={t("whitelist.empty.title")}
+            description={t("whitelist.empty.desc")}
+            action={(
+              <ContentPrimaryButton
                 type="button"
                 onClick={handleNew}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                icon={Plus}
+                iconSize={20}
               >
-                <Plus className="w-5 h-5" />
                 {t("whitelist.buttons.add")}
-              </button>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("whitelist.table.email")}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("whitelist.table.desc")}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("whitelist.table.time")}
-                    </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("whitelist.table.actions")}
-                    </th>
+              </ContentPrimaryButton>
+            )}
+            className="rounded-2xl"
+          />
+        ) : (
+          <ContentTableSurface>
+            <table className="w-full">
+              <ContentTableHeader>
+                <tr>
+                  <ContentTableHeadCell>
+                    {t("whitelist.table.email")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell>
+                    {t("whitelist.table.desc")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell>
+                    {t("whitelist.table.time")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell align="right">
+                    {t("whitelist.table.actions")}
+                  </ContentTableHeadCell>
+                </tr>
+              </ContentTableHeader>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {whitelists.map((item) => (
+                  <tr key={item.id} className="hover:bg-gray-50 transition-colors">
+                    <ContentTableCell nowrap>
+                      <div className="text-sm font-medium text-gray-900">
+                        {item.email}
+                      </div>
+                    </ContentTableCell>
+                    <ContentTableCell>
+                      <div className="text-sm text-gray-500">
+                        {item.description || "-"}
+                      </div>
+                    </ContentTableCell>
+                    <ContentTableCell nowrap className="text-sm text-gray-500">
+                      {formatDate(item.created)}
+                    </ContentTableCell>
+                    <ContentTableCell nowrap align="right" className="text-sm font-medium">
+                      <div className="flex items-center justify-end gap-2">
+                        <ContentEditDeleteActions
+                          onEdit={() => handleEdit(item)}
+                          onDelete={() => setDeleteConfirmId(item.id)}
+                          editTitle={t("whitelist.buttons.edit")}
+                          deleteTitle={t("whitelist.buttons.delete")}
+                          deleting={deletingId === item.id}
+                          iconSize={16}
+                          size="sm"
+                        />
+                      </div>
+                    </ContentTableCell>
                   </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {whitelists.map((item) => (
-                    <tr key={item.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">
-                          {item.email}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="text-sm text-gray-500">
-                          {item.description || "-"}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {formatDate(item.created)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleEdit(item)}
-                            className="text-blue-600 hover:text-blue-900 transition-colors"
-                            title={t("whitelist.buttons.edit")}
-                            aria-label={t("whitelist.buttons.edit")}
-                          >
-                            <Edit className="w-4 h-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setDeleteConfirmId(item.id)}
-                            className="text-red-600 hover:text-red-900 transition-colors"
-                            disabled={deletingId === item.id}
-                            title={t("whitelist.buttons.delete")}
-                            aria-label={t("whitelist.buttons.delete")}
-                          >
-                            {deletingId === item.id ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <Trash2 className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </ContentTableSurface>
+        )}
       </div>
 
       {/* 删除确认弹窗 */}
@@ -402,24 +391,18 @@ export default function WhitelistPage() {
             {t("whitelist.delete.desc")}
           </p>
           <div className="flex items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={() => setDeleteConfirmId(null)}
-              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg font-medium transition-colors"
-            >
+            <ContentSecondaryButton onClick={() => setDeleteConfirmId(null)}>
               {t("whitelist.buttons.cancel")}
-            </button>
-            <button
+            </ContentSecondaryButton>
+            <ContentPrimaryButton
               type="button"
               onClick={() => handleDelete(deleteConfirmId)}
               disabled={deletingId === deleteConfirmId}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              loading={deletingId === deleteConfirmId}
+              className="bg-red-600 text-white hover:bg-red-700"
             >
-              {deletingId === deleteConfirmId && (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              )}
               {t("whitelist.buttons.confirmDelete")}
-            </button>
+            </ContentPrimaryButton>
           </div>
         </div>
       </Modal>

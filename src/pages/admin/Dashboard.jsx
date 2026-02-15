@@ -3,6 +3,7 @@ import { Calendar, Clock, FileText, Bell, Activity } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { createAppLogger } from "../../lib/appLogger";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
 
 /**
  * 后台仪表板页面
@@ -109,13 +110,14 @@ export default function Dashboard() {
             <p className="font-semibold mb-0.5">{t("admin.dashboard.error.loadFailed")}</p>
             <p className="text-xs opacity-90">{error}</p>
           </div>
-          <button
+          <ContentSecondaryButton
             type="button"
             onClick={fetchStats}
-            className="shrink-0 rounded-full border border-red-300 bg-white/60 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100 transition-colors"
+            variant="pill"
+            className="shrink-0 border border-red-300 bg-white/60 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100"
           >
             {t("admin.dashboard.retry")}
-          </button>
+          </ContentSecondaryButton>
         </div>
       )}
 

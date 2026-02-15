@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Languages } from "lucide-react";
+import ContentSecondaryButton from "./content/ContentSecondaryButton";
 
 export default function LanguageSwitcher() {
     const { t, i18n } = useTranslation("common");
@@ -44,19 +45,20 @@ export default function LanguageSwitcher() {
 
   return (
     <div ref={containerRef} className="relative">
-      <button
+      <ContentSecondaryButton
         type="button"
+        variant="solid"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand-blue)]/30"
+        className="flex items-center gap-2 px-3 py-2 bg-transparent text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand-blue)]/30"
       >
         <Languages className="w-4 h-4" aria-hidden="true" />
         <span className="hidden sm:inline">
           {languages.find((l) => l.code === activeLanguageCode)?.label || t("languageNames.en")}
         </span>
-      </button>
+      </ContentSecondaryButton>
 
       <div
         id={menuId}
@@ -65,16 +67,21 @@ export default function LanguageSwitcher() {
         className={`absolute right-0 mt-2 w-32 bg-white rounded-lg shadow-lg border border-slate-100 py-1 z-50 transition-[opacity,visibility,transform] duration-200 ${open ? "opacity-100 visible translate-y-0" : "opacity-0 invisible -translate-y-1"}`}
       >
         {languages.map((lang) => (
-          <button
+          <ContentSecondaryButton
             key={lang.code}
             type="button"
+            variant="solid"
             role="menuitemradio"
             aria-checked={activeLanguageCode === lang.code}
             onClick={() => changeLanguage(lang.code)}
-            className={`w-full text-left px-4 py-2 text-sm hover:bg-slate-50 transition-colors ${activeLanguageCode === lang.code ? "text-indigo-600 font-medium bg-indigo-50" : "text-slate-600"}`}
+            className={`w-full rounded-none bg-transparent text-left px-4 py-2 text-sm transition-colors ${
+              activeLanguageCode === lang.code
+                ? "text-[var(--color-brand-blue)] font-semibold bg-[var(--color-brand-blue)]/10 hover:bg-[var(--color-brand-blue)]/15"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
           >
             {lang.label}
-          </button>
+          </ContentSecondaryButton>
         ))}
       </div>
     </div>

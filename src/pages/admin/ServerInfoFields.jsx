@@ -2,9 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { createAppLogger } from "../../lib/appLogger";
 import {
   Plus,
-  Edit,
-  Trash2,
-  Loader2,
   Server,
   GripVertical,
   X,
@@ -13,6 +10,23 @@ import {
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { getServerInfoIcon, SERVER_INFO_ICON_NAMES } from "../../lib/serverInfoIcons";
+import { useUIFeedback } from "../../hooks/useUIFeedback";
+import { useAdminContentTranslation } from "../../hooks/useAdminContentTranslation";
+import TranslateActionButton from "../../components/admin/content/TranslateActionButton";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import MultilangField from "../../components/admin/content/MultilangField";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import { useTriLanguageOptions } from "../../hooks/useTriLanguageOptions";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentEditDeleteActions from "../../components/admin/content/ContentEditDeleteActions";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentListSurface from "../../components/admin/content/ContentListSurface";
+import ContentDraggableRow from "../../components/admin/content/ContentDraggableRow";
+import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
+import ContentIconActionButton from "../../components/admin/content/ContentIconActionButton";
 
 /**
  * Server Info Fields Management Page
@@ -22,16 +36,17 @@ const logger = createAppLogger("ServerInfoFields");
 
 export default function ServerInfoFields() {
   const { t } = useTranslation();
+  const { notify, confirm } = useUIFeedback();
+  const { translating, translateFields } = useAdminContentTranslation();
+  const languageOptions = useTriLanguageOptions();
+
   const [fields, setFields] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [isCreating, setIsCreating] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState(null);
-  const [toast, setToast] = useState(null);
 
-  // Form state
   const [formData, setFormData] = useState({
     icon: "Server",
     label: { zh: "", en: "", ja: "" },
@@ -39,7 +54,6 @@ export default function ServerInfoFields() {
     sort_order: 0,
   });
 
-  // Fetch fields
   const fetchFields = useCallback(async () => {
     try {
       setLoading(true);
@@ -49,22 +63,16 @@ export default function ServerInfoFields() {
       setFields(result.items);
     } catch (error) {
       logger.error("Failed to fetch fields:", error);
-      showToast("error", t("admin.serverInfoFields.toast.saveError")); // Reuse error
+      notify(t("admin.serverInfoFields.toast.saveError"), "error");
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [notify, t]);
 
   useEffect(() => {
     fetchFields();
   }, [fetchFields]);
 
-  const showToast = (type, message) => {
-    setToast({ type, message });
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  // Reset form
   const resetForm = () => {
     setFormData({
       icon: "Server",
@@ -76,50 +84,81 @@ export default function ServerInfoFields() {
     setIsCreating(false);
   };
 
-  // Handle create/edit
-  const handleSave = async (e) => {
-    e.preventDefault();
+  const handleSave = async (event) => {
+    event.preventDefault();
+
     try {
       if (editingId) {
         await pb.collection("server_info_details").update(editingId, formData);
-        showToast("success", t("admin.serverInfoFields.toast.updateSuccess"));
+        notify(t("admin.serverInfoFields.toast.updateSuccess"), "success");
       } else {
-        // Set sort_order to max + 1 if not provided
         const maxSort =
-          fields.length > 0
-            ? Math.max(...fields.map((f) => f.sort_order || 0))
-            : 0;
+          fields.length > 0 ? Math.max(...fields.map((item) => item.sort_order || 0)) : 0;
         await pb.collection("server_info_details").create({
           ...formData,
           sort_order: formData.sort_order || maxSort + 1,
         });
-        showToast("success", t("admin.serverInfoFields.toast.createSuccess"));
+        notify(t("admin.serverInfoFields.toast.createSuccess"), "success");
       }
+
       resetForm();
       await fetchFields();
     } catch (error) {
       logger.error("Failed to save field:", error);
-      showToast("error", t("admin.serverInfoFields.toast.saveError"));
+      notify(t("admin.serverInfoFields.toast.saveError"), "error");
     }
   };
 
-  // Handle delete
   const handleDelete = async (fieldId) => {
+    const accepted = await confirm({
+      title: t("admin.serverInfoFields.delete.title"),
+      message: t("admin.serverInfoFields.delete.desc"),
+      confirmText: t("admin.serverInfoFields.delete.confirm"),
+      cancelText: t("admin.serverInfoFields.delete.cancel"),
+      danger: true,
+    });
+
+    if (!accepted) return;
+
     try {
       setDeletingId(fieldId);
       await pb.collection("server_info_details").delete(fieldId);
-      setDeleteConfirmId(null);
-      showToast("success", t("admin.serverInfoFields.toast.deleteSuccess"));
+      notify(t("admin.serverInfoFields.toast.deleteSuccess"), "success");
       await fetchFields();
     } catch (error) {
       logger.error("Failed to delete field:", error);
-      showToast("error", t("admin.serverInfoFields.toast.saveError")); // Reuse error
+      notify(t("admin.serverInfoFields.toast.saveError"), "error");
     } finally {
       setDeletingId(null);
     }
   };
 
-  // Start editing
+  const handleAutoTranslate = async () => {
+    try {
+      const result = await translateFields({
+        scene: "server_info_fields",
+        fields: [
+          { key: "label", value: formData.label },
+          { key: "value", value: formData.value },
+        ],
+      });
+
+      if (result.changedCount === 0) {
+        notify(t("admin.serverInfoFields.toast.noContent"), "warning");
+        return;
+      }
+
+      setFormData((prev) => ({
+        ...prev,
+        ...result.fields,
+      }));
+      notify(t("admin.serverInfoFields.toast.translateSuccess"), "success");
+    } catch (error) {
+      logger.error("Failed to translate server info field:", error);
+      notify(error?.message || t("admin.serverInfoFields.toast.translateError"), "error");
+    }
+  };
+
   const startEdit = (field) => {
     setFormData({
       icon: field.icon || "Server",
@@ -131,14 +170,12 @@ export default function ServerInfoFields() {
     setIsCreating(false);
   };
 
-  // Handle drag start
   const handleDragStart = (index) => {
     setDraggedIndex(index);
   };
 
-  // Handle drag over
-  const handleDragOver = (e, index) => {
-    e.preventDefault();
+  const handleDragOver = (event, index) => {
+    event.preventDefault();
     if (draggedIndex === null || draggedIndex === index) return;
 
     const newFields = [...fields];
@@ -149,366 +186,237 @@ export default function ServerInfoFields() {
     setDraggedIndex(index);
   };
 
-  // Handle drag end - update sort_order
   const handleDragEnd = async () => {
     if (draggedIndex === null) return;
 
     try {
-      // Update sort_order for all fields
       const updates = fields.map((field, index) => ({
         id: field.id,
         sort_order: index + 1,
       }));
 
-      // Update all fields
       await Promise.all(
         updates.map((update) =>
-          pb
-            .collection("server_info_details")
-            .update(update.id, { sort_order: update.sort_order })
+          pb.collection("server_info_details").update(update.id, {
+            sort_order: update.sort_order,
+          })
         )
       );
 
-      showToast("success", t("admin.homeManager.toast.orderSuccess")); // Reuse
+      notify(t("admin.homeManager.toast.orderSuccess"), "success");
       await fetchFields();
     } catch (error) {
       logger.error("Failed to update sort order:", error);
-      showToast("error", t("admin.homeManager.toast.orderError")); // Reuse
-      await fetchFields(); // Revert to server state
+      notify(t("admin.homeManager.toast.orderError"), "error");
+      await fetchFields();
     } finally {
       setDraggedIndex(null);
     }
   };
 
-  // Get icon component by name
-  const getIconComponent = (iconName) => {
-    return getServerInfoIcon(iconName);
-  };
-
+  const getIconComponent = (iconName) => getServerInfoIcon(iconName);
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">
-            {t("admin.serverInfoFields.title")}
-          </h1>
-          <p className="text-sm text-slate-500 mt-1">
-            {t("admin.serverInfoFields.subtitle")}
-          </p>
-        </div>
-        <button
-          onClick={() => {
-            resetForm();
-            setIsCreating(true);
-          }}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-brand-blue)] text-slate-950 rounded-lg font-medium hover:bg-[var(--color-brand-blue)]/90 transition-colors"
-        >
-          <Plus size={18} />
-          {t("admin.serverInfoFields.new")}
-        </button>
-      </div>
+      <ContentPageHeader
+        title={t("admin.serverInfoFields.title")}
+        subtitle={t("admin.serverInfoFields.subtitle")}
+        actions={(
+          <ContentPrimaryButton
+            type="button"
+            onClick={() => {
+              resetForm();
+              setIsCreating(true);
+            }}
+            icon={Plus}
+            iconSize={18}
+          >
+            {t("admin.serverInfoFields.new")}
+          </ContentPrimaryButton>
+        )}
+      />
 
-      {/* Toast */}
-      {toast && (
-        <div
-          className={`fixed top-4 right-4 px-4 py-3 rounded-lg shadow-lg z-50 ${toast.type === "success"
-              ? "bg-emerald-500 text-white"
-              : "bg-red-500 text-white"
-            }`}
-        >
-          {toast.message}
-        </div>
-      )}
-
-      {/* Create/Edit Form */}
       {(isCreating || editingId) && (
-        <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+        <ContentCardSurface className="rounded-xl p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-slate-900">
-              {editingId ? t("admin.serverInfoFields.form.editTitle") : t("admin.serverInfoFields.form.createTitle")}
+              {editingId
+                ? t("admin.serverInfoFields.form.editTitle")
+                : t("admin.serverInfoFields.form.createTitle")}
             </h2>
-            <button
+            <ContentIconActionButton
               onClick={resetForm}
-              className="p-1 hover:bg-slate-100 rounded"
-            >
-              <X size={20} className="text-slate-500" />
-            </button>
+              tone="neutral"
+              icon={X}
+              size="sm"
+              iconSize={20}
+              title={t("actions.close", { ns: "common" })}
+              aria-label={t("actions.close", { ns: "common" })}
+            />
           </div>
+
           <form onSubmit={handleSave} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <ContentFieldLabel>
                 {t("admin.serverInfoFields.form.icon")}
-              </label>
-              <select
+              </ContentFieldLabel>
+              <ContentSelectInput
                 required
                 value={formData.icon}
-                onChange={(e) =>
-                  setFormData({ ...formData, icon: e.target.value })
+                onChange={(event) =>
+                  setFormData((prev) => ({ ...prev, icon: event.target.value }))
                 }
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
               >
-                {SERVER_INFO_ICON_NAMES.map((iconName) => {
-                  return (
-                    <option key={iconName} value={iconName}>
-                      {iconName}
-                    </option>
-                  );
-                })}
-              </select>
+                {SERVER_INFO_ICON_NAMES.map((iconName) => (
+                  <option key={iconName} value={iconName}>
+                    {iconName}
+                  </option>
+                ))}
+              </ContentSelectInput>
               <p className="text-xs text-slate-500 mt-1">
                 {t("admin.serverInfoFields.form.iconHint")}
               </p>
             </div>
-            {/* Multi-language Label Inputs */}
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                {t("admin.serverInfoFields.form.label")}
-              </label>
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.zh")}
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.label.zh || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        label: { ...formData.label, zh: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：服务器地址"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.en")}
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.label.en || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        label: { ...formData.label, en: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：Server Address"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.ja")}
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.label.ja || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        label: { ...formData.label, ja: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：サーバーアドレス"
-                  />
-                </div>
-              </div>
+
+            <div className="flex items-center justify-end">
+              <TranslateActionButton
+                onClick={handleAutoTranslate}
+                translating={translating}
+                disabled={false}
+                label={t("admin.serverInfoFields.form.translate")}
+                translatingLabel={t("admin.serverInfoFields.form.translating")}
+              />
             </div>
-            {/* Multi-language Value Inputs */}
+
+            <MultilangField
+              label={t("admin.serverInfoFields.form.label")}
+              type="text"
+              value={formData.label}
+              onChange={(lang, value) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  label: { ...prev.label, [lang]: value },
+                }))
+              }
+              languages={languageOptions}
+              showAllLanguages
+              requiredLangs={["zh"]}
+              placeholders={{
+                zh: "例如：服务器地址",
+                en: "e.g. Server Address",
+                ja: "例：サーバーアドレス",
+              }}
+              controlClassName="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-[var(--color-brand-blue)]"
+            />
+
+            <MultilangField
+              label={t("admin.serverInfoFields.form.value")}
+              type="text"
+              value={formData.value}
+              onChange={(lang, value) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  value: { ...prev.value, [lang]: value },
+                }))
+              }
+              languages={languageOptions}
+              showAllLanguages
+              requiredLangs={["zh"]}
+              placeholders={{
+                zh: "例如：play.hololive.com.cn",
+                en: "e.g. play.hololive.com.cn",
+                ja: "例：play.hololive.com.cn",
+              }}
+              controlClassName="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]/40 focus:border-[var(--color-brand-blue)]"
+            />
+
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                {t("admin.serverInfoFields.form.value")}
-              </label>
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.zh")}
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.value.zh || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        value: { ...formData.value, zh: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：play.hololive.com.cn"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.en")}
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.value.en || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        value: { ...formData.value, en: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：play.hololive.com.cn"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {t("admin.announcements.form.ja")}
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.value.ja || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        value: { ...formData.value, ja: e.target.value },
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
-                    placeholder="例如：play.hololive.com.cn"
-                  />
-                </div>
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <ContentFieldLabel>
                 {t("admin.serverInfoFields.form.sort")}
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
                 type="number"
                 value={formData.sort_order}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    sort_order: parseInt(e.target.value) || 0,
-                  })
+                onChange={(event) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    sort_order: parseInt(event.target.value, 10) || 0,
+                  }))
                 }
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
                 placeholder="0"
               />
             </div>
+
             <div className="flex gap-2">
-              <button
+              <ContentPrimaryButton
                 type="submit"
-                className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-brand-blue)] text-slate-950 rounded-lg font-medium hover:bg-[var(--color-brand-blue)]/90 transition-colors"
+                icon={Save}
+                iconSize={18}
               >
-                <Save size={18} />
                 {t("admin.serverInfoFields.form.save")}
-              </button>
-              <button
-                type="button"
-                onClick={resetForm}
-                className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg font-medium hover:bg-slate-200 transition-colors"
-              >
+              </ContentPrimaryButton>
+              <ContentSecondaryButton onClick={resetForm}>
                 {t("admin.serverInfoFields.form.cancel")}
-              </button>
+              </ContentSecondaryButton>
             </div>
           </form>
-        </div>
+        </ContentCardSurface>
       )}
 
-      {/* Fields List */}
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-slate-200">
-          <Loader2 className="w-8 h-8 animate-spin text-slate-400 mb-4" />
-          <p className="text-sm text-slate-500">Loading...</p>
-        </div>
-      ) : fields.length === 0 ? (
-        <div className="bg-white rounded-xl border border-dashed border-slate-300 p-10 text-center">
-          <Server className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <p className="text-sm font-medium text-slate-700">
-            {t("admin.serverInfoFields.empty")}
-          </p>
-          <p className="text-xs text-slate-500 mt-1">
-            {t("admin.serverInfoFields.emptyDesc")}
-          </p>
-        </div>
+      {loading || fields.length === 0 ? (
+        <ContentStateBlock
+          loading={loading}
+          loadingText={t("routeLoading", { ns: "common" })}
+          icon={Server}
+          title={t("admin.serverInfoFields.empty")}
+          description={t("admin.serverInfoFields.emptyDesc")}
+        />
       ) : (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="divide-y divide-slate-200">
-            {fields.map((field, index) => {
-              const IconComponent = getIconComponent(field.icon);
-              return (
-                <div
-                  key={field.id}
-                  draggable
-                  onDragStart={() => handleDragStart(index)}
-                  onDragOver={(e) => handleDragOver(e, index)}
-                  onDragEnd={handleDragEnd}
-                  className={`p-4 hover:bg-slate-50 transition-colors ${draggedIndex === index ? "opacity-50" : ""
-                    }`}
-                >
-                  <div className="flex items-center gap-4">
-                    <GripVertical className="w-5 h-5 text-slate-400 cursor-move" />
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <IconComponent
-                        size={20}
-                        className="text-slate-600 flex-shrink-0"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-base font-semibold text-slate-900">
-                          {field.label?.zh || field.label?.en || field.label?.ja || t("admin.serverInfoFields.unnamed")}
-                        </h3>
-                        <p className="text-sm text-slate-500 truncate">
-                          {typeof field.value === "object"
-                            ? (field.value?.zh || field.value?.en || field.value?.ja || "")
-                            : field.value || ""}
-                        </p>
-                        <p className="text-xs text-slate-400 mt-1">
-                          {t("admin.serverInfoFields.icon")}: {field.icon} | {t("admin.serverInfoFields.sort")}: {field.sort_order || 0}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => startEdit(field)}
-                        className="p-2 hover:bg-blue-50 rounded-lg transition-colors"
-                        title={t("admin.serverInfoFields.form.editTitle")}
-                      >
-                        <Edit size={18} className="text-blue-600" />
-                      </button>
-                      {deleteConfirmId === field.id ? (
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleDelete(field.id)}
-                            disabled={deletingId === field.id}
-                            className="px-3 py-1 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition-colors disabled:opacity-50"
-                          >
-                            {deletingId === field.id ? t("admin.serverInfoFields.delete.deleting") : t("admin.serverInfoFields.delete.confirm")}
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirmId(null)}
-                            className="px-3 py-1 text-xs bg-slate-100 text-slate-700 rounded hover:bg-slate-200 transition-colors"
-                          >
-                            {t("admin.serverInfoFields.delete.cancel")}
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setDeleteConfirmId(field.id)}
-                          className="p-2 hover:bg-red-50 rounded-lg transition-colors"
-                          title={t("admin.serverMaps.delete.title")}
-                        >
-                          <Trash2 size={18} className="text-red-600" />
-                        </button>
-                      )}
+        <ContentListSurface>
+          {fields.map((field, index) => {
+            const IconComponent = getIconComponent(field.icon);
+            return (
+              <ContentDraggableRow
+                key={field.id}
+                onDragStart={() => handleDragStart(index)}
+                onDragOver={(event) => handleDragOver(event, index)}
+                onDragEnd={handleDragEnd}
+                dragged={draggedIndex === index}
+              >
+                <div className="flex items-center gap-4">
+                  <GripVertical className="w-5 h-5 text-slate-400 cursor-move" />
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <IconComponent size={20} className="text-slate-600 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <h3 className="text-base font-semibold text-slate-900">
+                        {field.label?.zh ||
+                          field.label?.en ||
+                          field.label?.ja ||
+                          t("admin.serverInfoFields.unnamed")}
+                      </h3>
+                      <p className="text-sm text-slate-500 truncate">
+                        {typeof field.value === "object"
+                          ? field.value?.zh || field.value?.en || field.value?.ja || ""
+                          : field.value || ""}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {t("admin.serverInfoFields.icon")}: {field.icon} | {t("admin.serverInfoFields.sort")}: {field.sort_order || 0}
+                      </p>
                     </div>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <ContentEditDeleteActions
+                      onEdit={() => startEdit(field)}
+                      onDelete={() => handleDelete(field.id)}
+                      editTitle={t("admin.serverInfoFields.form.editTitle")}
+                      deleteTitle={t("admin.serverInfoFields.delete.confirm")}
+                      deleting={deletingId === field.id}
+                    />
+                  </div>
                 </div>
-              );
-            })}
-          </div>
-        </div>
+              </ContentDraggableRow>
+            );
+          })}
+        </ContentListSurface>
       )}
     </div>
   );

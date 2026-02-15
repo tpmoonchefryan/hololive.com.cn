@@ -30,6 +30,7 @@ import { useTranslation } from "react-i18next";
 import pb from "../../lib/pocketbase";
 import GlobalBanner from "../announcement/GlobalBanner";
 import LanguageSwitcher from "./LanguageSwitcher";
+import ContentTextButton from "./content/ContentTextButton";
 
 /**
  * 后台管理系统主布局组件
@@ -208,8 +209,7 @@ export default function AdminLayout() {
               if (hasChildren) {
                 return (
                   <div key={item.key} className="space-y-1">
-                    <button
-                      type="button"
+                    <ContentTextButton
                       onClick={() => toggleMenu(item.label)}
                       className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl text-sm transition-colors ${menuActive
                         ? "bg-[var(--color-brand-blue)]/15 text-white border border-[var(--color-brand-blue)]/60"
@@ -225,7 +225,7 @@ export default function AdminLayout() {
                       ) : (
                         <ChevronRight className="w-4 h-4" />
                       )}
-                    </button>
+                    </ContentTextButton>
                     {isExpanded && (
                       <div className="ml-3 mt-1 space-y-0.5 border-l border-slate-800/60 pl-3">
                         {item.children.map((child) => {
@@ -296,15 +296,14 @@ export default function AdminLayout() {
               <span>{t("admin.sidebar.backHome")}</span>
             </Link>
 
-            <button
-              type="button"
+            <ContentTextButton
               onClick={handleLogout}
               disabled={loggingOut}
               className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-200 bg-slate-900/80 hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <LogOut className="w-4.5 h-4.5" />
               <span>{loggingOut ? t("admin.sidebar.loggingOut") : t("admin.sidebar.logout")}</span>
-            </button>
+            </ContentTextButton>
           </div>
         </aside>
 

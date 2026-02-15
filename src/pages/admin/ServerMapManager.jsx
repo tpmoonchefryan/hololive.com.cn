@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Edit, Trash2, Loader2, Map, GripVertical, Save } from "lucide-react";
+import { Plus, Map, GripVertical, Save } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "../../components/admin/ui/Modal";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentEditDeleteActions from "../../components/admin/content/ContentEditDeleteActions";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentListSurface from "../../components/admin/content/ContentListSurface";
+import ContentDraggableRow from "../../components/admin/content/ContentDraggableRow";
 
 /**
  * Server Map Manager Page
@@ -14,11 +23,10 @@ const logger = createAppLogger("ServerMapManager");
 
 export default function ServerMapManager() {
   const { t } = useTranslation();
-  const { notify } = useUIFeedback();
+  const { notify, confirm } = useUIFeedback();
   const [maps, setMaps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [isCreating, setIsCreating] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState(null);
@@ -114,11 +122,19 @@ export default function ServerMapManager() {
     }
   };
 
-  const handleDelete = async (mapId) => {
+  const handleDelete = async (mapId, mapName = "") => {
+    const accepted = await confirm({
+      title: t("admin.serverMaps.delete.title"),
+      message: t("admin.serverMaps.delete.confirmHint", { name: mapName }),
+      confirmText: t("admin.serverMaps.delete.confirm"),
+      cancelText: t("admin.serverMaps.delete.cancel"),
+      danger: true,
+    });
+    if (!accepted) return;
+
     try {
       setDeletingId(mapId);
       await pb.collection("server_maps").delete(mapId);
-      setDeleteTarget(null);
       showToast("success", t("admin.serverMaps.toast.deleteSuccess"));
       await fetchMaps();
     } catch (error) {
@@ -183,22 +199,22 @@ export default function ServerMapManager() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">{t("admin.serverMaps.title")}</h1>
-          <p className="text-sm text-slate-500 mt-1">{t("admin.serverMaps.subtitle")}</p>
-        </div>
-        <button
-          onClick={() => {
-            resetForm();
-            setIsCreating(true);
-          }}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-brand-blue)] text-slate-950 rounded-lg font-medium hover:bg-[var(--color-brand-blue)]/90 transition-colors"
-        >
-          <Plus size={18} />
-          {t("admin.serverMaps.new")}
-        </button>
-      </div>
+      <ContentPageHeader
+        title={t("admin.serverMaps.title")}
+        subtitle={t("admin.serverMaps.subtitle")}
+        actions={(
+          <ContentPrimaryButton
+            onClick={() => {
+              resetForm();
+              setIsCreating(true);
+            }}
+            icon={Plus}
+            iconSize={18}
+          >
+            {t("admin.serverMaps.new")}
+          </ContentPrimaryButton>
+        )}
+      />
 
       <Modal
         isOpen={isCreating || Boolean(editingId)}
@@ -208,28 +224,26 @@ export default function ServerMapManager() {
       >
         <form onSubmit={handleSave} className="space-y-4 p-6">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
+            <ContentFieldLabel>
               {t("admin.serverMaps.form.name")}
-            </label>
-            <input
+            </ContentFieldLabel>
+            <ContentTextInput
               type="text"
               required
               value={formData.name}
               onChange={(event) => setFormData({ ...formData, name: event.target.value })}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
               placeholder={t("admin.serverMaps.form.namePlaceholder")}
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
+            <ContentFieldLabel>
               {t("admin.serverMaps.form.url")}
-            </label>
-            <input
+            </ContentFieldLabel>
+            <ContentTextInput
               type="text"
               required
               value={formData.url}
               onChange={(event) => setFormData({ ...formData, url: event.target.value })}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
               placeholder={t("admin.serverMaps.form.urlPlaceholder")}
               inputMode="url"
               spellCheck={false}
@@ -239,125 +253,71 @@ export default function ServerMapManager() {
             </p>
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
+            <ContentFieldLabel>
               {t("admin.serverMaps.form.sort")}
-            </label>
-            <input
+            </ContentFieldLabel>
+            <ContentTextInput
               type="number"
               value={formData.sort_order}
               onChange={(event) =>
                 setFormData({ ...formData, sort_order: parseInt(event.target.value, 10) || 0 })
               }
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-brand-blue)]"
               placeholder={t("admin.serverMaps.form.sortPlaceholder")}
             />
           </div>
           <div className="flex gap-2 justify-end">
-            <button
-              type="button"
-              onClick={resetForm}
-              className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg font-medium hover:bg-slate-200 transition-colors"
-            >
+            <ContentSecondaryButton onClick={resetForm}>
               {t("admin.serverMaps.form.cancel")}
-            </button>
-            <button
+            </ContentSecondaryButton>
+            <ContentPrimaryButton
               type="submit"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-[var(--color-brand-blue)] text-slate-950 rounded-lg font-medium hover:bg-[var(--color-brand-blue)]/90 transition-colors"
+              icon={Save}
+              iconSize={18}
             >
-              <Save size={18} />
               {t("admin.serverMaps.form.save")}
-            </button>
+            </ContentPrimaryButton>
           </div>
         </form>
       </Modal>
 
-      <Modal
-        isOpen={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
-        title={t("admin.serverMaps.delete.title")}
-        size="sm"
-      >
-        <div className="p-6 space-y-4">
-          <p className="text-sm text-slate-600">
-            {t("admin.serverMaps.delete.confirmHint", {
-              name: deleteTarget?.name || "",
-            })}
-          </p>
-          <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setDeleteTarget(null)}
-              className="px-3 py-2 text-xs bg-slate-100 text-slate-700 rounded hover:bg-slate-200 transition-colors"
-            >
-              {t("admin.serverMaps.delete.cancel")}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (deleteTarget?.id) handleDelete(deleteTarget.id);
-              }}
-              disabled={deletingId === deleteTarget?.id}
-              className="px-3 py-2 text-xs bg-red-500 text-white rounded hover:bg-red-600 transition-colors disabled:opacity-50"
-            >
-              {deletingId === deleteTarget?.id
-                ? t("admin.serverInfoFields.delete.deleting")
-                : t("admin.serverMaps.delete.confirm")}
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-slate-200">
-          <Loader2 className="w-8 h-8 animate-spin text-slate-400 mb-4" />
-          <p className="text-sm text-slate-500">{t("admin.serverMaps.loading")}</p>
-        </div>
-      ) : maps.length === 0 ? (
-        <div className="bg-white rounded-xl border border-dashed border-slate-300 p-10 text-center">
-          <Map className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-          <p className="text-sm font-medium text-slate-700">{t("admin.serverMaps.empty")}</p>
-          <p className="text-xs text-slate-500 mt-1">{t("admin.serverMaps.emptyDesc")}</p>
-        </div>
+      {loading || maps.length === 0 ? (
+        <ContentStateBlock
+          loading={loading}
+          loadingText={t("admin.serverMaps.loading")}
+          icon={Map}
+          title={t("admin.serverMaps.empty")}
+          description={t("admin.serverMaps.emptyDesc")}
+        />
       ) : (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="divide-y divide-slate-200">
-            {maps.map((map, index) => (
-              <div
-                key={map.id}
-                draggable
-                onDragStart={() => handleDragStart(index)}
-                onDragOver={(event) => handleDragOver(event, index)}
-                onDragEnd={handleDragEnd}
-                className={`p-4 hover:bg-slate-50 transition-colors ${draggedIndex === index ? "opacity-50" : ""}`}
-              >
-                <div className="flex items-center gap-4">
-                  <GripVertical className="w-5 h-5 text-slate-400 cursor-move" />
-                  <div className="flex-1 min-w-0">
-                    <h3 className="text-base font-semibold text-slate-900">{map.name}</h3>
-                    <p className="text-sm text-slate-500 truncate">{map.url}</p>
-                    <p className="text-xs text-slate-400 mt-1">{t("admin.serverMaps.sort")}: {map.sort_order || 0}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => startEdit(map)}
-                      className="p-2 hover:bg-blue-50 rounded-lg transition-colors"
-                      title={t("admin.serverMaps.form.editTitle")}
-                    >
-                      <Edit size={18} className="text-blue-600" />
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget(map)}
-                      className="p-2 hover:bg-red-50 rounded-lg transition-colors"
-                      title={t("admin.serverMaps.delete.title")}
-                    >
-                      <Trash2 size={18} className="text-red-600" />
-                    </button>
-                  </div>
+        <ContentListSurface>
+          {maps.map((map, index) => (
+            <ContentDraggableRow
+              key={map.id}
+              onDragStart={() => handleDragStart(index)}
+              onDragOver={(event) => handleDragOver(event, index)}
+              onDragEnd={handleDragEnd}
+              dragged={draggedIndex === index}
+            >
+              <div className="flex items-center gap-4">
+                <GripVertical className="w-5 h-5 text-slate-400 cursor-move" />
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-base font-semibold text-slate-900">{map.name}</h3>
+                  <p className="text-sm text-slate-500 truncate">{map.url}</p>
+                  <p className="text-xs text-slate-400 mt-1">{t("admin.serverMaps.sort")}: {map.sort_order || 0}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <ContentEditDeleteActions
+                    onEdit={() => startEdit(map)}
+                    onDelete={() => handleDelete(map.id, map.name || "")}
+                    editTitle={t("admin.serverMaps.form.editTitle")}
+                    deleteTitle={t("admin.serverMaps.delete.title")}
+                    deleting={deletingId === map.id}
+                  />
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
+            </ContentDraggableRow>
+          ))}
+        </ContentListSurface>
       )}
     </div>
   );

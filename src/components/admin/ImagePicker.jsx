@@ -1,10 +1,15 @@
 import { useState, useRef, useEffect } from "react";
-import { Upload, Image as ImageIcon, X, Loader2 } from "lucide-react";
+import { Upload, Image as ImageIcon, X } from "lucide-react";
 import pb from "../../lib/pocketbase";
 import MediaLibraryModal from "./MediaLibraryModal";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
+import ContentFieldLabel from "./content/ContentFieldLabel";
+import ContentPrimaryButton from "./content/ContentPrimaryButton";
+import ContentSecondaryButton from "./content/ContentSecondaryButton";
+import ContentIconActionButton from "./content/ContentIconActionButton";
+import ContentFileInput from "./content/ContentFileInput";
 
 const logger = createAppLogger("ImagePicker");
 
@@ -110,9 +115,9 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
 
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-2">
+      <ContentFieldLabel>
         {displayLabel}
-      </label>
+      </ContentFieldLabel>
 
       {preview ? (
         <div className="relative inline-block">
@@ -127,50 +132,48 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
               }
             }}
           />
-          <button
-            type="button"
+          <ContentIconActionButton
             onClick={handleRemove}
-            className="absolute top-2 right-2 p-1 bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+            tone="danger"
+            icon={X}
+            size="sm"
+            iconSize={16}
+            className="absolute top-2 right-2 bg-red-600 text-white rounded-full hover:bg-red-700 hover:text-white"
+            title={t("admin.media.manager.actions.deleteFile")}
+            aria-label={t("admin.media.manager.actions.deleteFile")}
+          />
         </div>
       ) : (
         <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center space-y-3">
           <Upload className="w-8 h-8 text-slate-400 mx-auto" />
           <p className="text-sm text-slate-600">{t("admin.imagePicker.uploadOrSelect")}</p>
           <div className="flex gap-3 justify-center">
-            <button
+            <ContentPrimaryButton
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              loading={uploading}
+              loadingLabel={t("admin.imagePicker.uploading")}
+              icon={Upload}
+              iconSize={16}
             >
-              {uploading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
-                  {t("admin.imagePicker.uploading")}
-                </>
-              ) : (
-                t("admin.imagePicker.upload")
-              )}
-            </button>
-            <button
+              {t("admin.imagePicker.upload")}
+            </ContentPrimaryButton>
+            <ContentSecondaryButton
               type="button"
               onClick={() => setShowMediaLibrary(true)}
               disabled={uploading}
-              className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors inline-flex items-center gap-2"
+              className="inline-flex items-center gap-2"
             >
               <ImageIcon className="w-4 h-4" />
               {t("admin.imagePicker.selectFromLib")}
-            </button>
+            </ContentSecondaryButton>
           </div>
         </div>
       )}
 
-      <input
+      <ContentFileInput
         ref={fileInputRef}
-        type="file"
         accept="image/jpeg,image/png,image/gif,image/webp"
         className="hidden"
         onChange={handleFileSelect}

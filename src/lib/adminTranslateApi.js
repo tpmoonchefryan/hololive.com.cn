@@ -4,6 +4,13 @@ import { createAppLogger } from "./appLogger";
 const logger = createAppLogger("AdminTranslateAPI");
 const API_BASE = "/ai-api/admin/translate";
 const SUPPORTED_LANGS = ["zh", "en", "ja"];
+const DEFAULT_FILL_POLICY = "fill_empty_only";
+const TRANSLATION_CONFIG_CACHE_TTL_MS = 15000;
+
+let translationConfigCache = {
+  fillPolicy: DEFAULT_FILL_POLICY,
+  expiresAt: 0,
+};
 
 function normalizeLang(lang) {
   const value = `${lang || ""}`.trim().toLowerCase();
@@ -31,6 +38,12 @@ function ensureAuthHeader() {
     throw new Error("Not authenticated");
   }
   return `Bearer ${token}`;
+}
+
+function normalizeFillPolicy(fillPolicy) {
+  return fillPolicy === "overwrite_target"
+    ? "overwrite_target"
+    : DEFAULT_FILL_POLICY;
 }
 
 async function callTranslateApi(path, payload) {
@@ -80,6 +93,33 @@ export async function requestAdminTranslation({
     targets: finalTargets,
     fields,
   });
+}
+
+export async function getAdminTranslationFillPolicy({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now < translationConfigCache.expiresAt) {
+    return translationConfigCache.fillPolicy;
+  }
+
+  try {
+    const result = await pb.collection("translation_config").getList(1, 1, {
+      sort: "-updated",
+    });
+    const record = result?.items?.[0];
+    const fillPolicy = normalizeFillPolicy(record?.fill_policy);
+    translationConfigCache = {
+      fillPolicy,
+      expiresAt: now + TRANSLATION_CONFIG_CACHE_TTL_MS,
+    };
+    return fillPolicy;
+  } catch {
+    logger.warn("Failed to load translation fill_policy, fallback to fill_empty_only.");
+    translationConfigCache = {
+      fillPolicy: DEFAULT_FILL_POLICY,
+      expiresAt: now + TRANSLATION_CONFIG_CACHE_TTL_MS,
+    };
+    return DEFAULT_FILL_POLICY;
+  }
 }
 
 export async function testAdminTranslationConfig({

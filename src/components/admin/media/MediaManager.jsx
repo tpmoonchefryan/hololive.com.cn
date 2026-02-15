@@ -6,7 +6,6 @@ import {
   Video,
   File,
   Trash2,
-  Loader2,
 } from "lucide-react";
 import pb from "../../../lib/pocketbase";
 import { useUIFeedback } from "../../../hooks/useUIFeedback";
@@ -14,6 +13,13 @@ import { createAppLogger } from "../../../lib/appLogger";
 import { useTranslation } from "react-i18next";
 import Modal from "../ui/Modal";
 import { formatLocalizedDate } from "../../../utils/localeFormat";
+import ContentStateBlock from "../content/ContentStateBlock";
+import ContentTextInput from "../content/ContentTextInput";
+import ContentPrimaryButton from "../content/ContentPrimaryButton";
+import ContentSecondaryButton from "../content/ContentSecondaryButton";
+import ContentIconActionButton from "../content/ContentIconActionButton";
+import ContentFileInput from "../content/ContentFileInput";
+import ContentTextButton from "../content/ContentTextButton";
 
 const logger = createAppLogger("MediaManager");
 
@@ -199,14 +205,14 @@ export default function MediaManager({ onSelect, closeModal }) {
         {/* 搜索框 */}
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
+          <ContentTextInput
             type="text"
             name="search"
             autoComplete="off"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t("admin.media.manager.searchPlaceholder")}
-            className="w-full pl-10 pr-4 py-2 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
+            className="pl-10 pr-4 py-2 rounded-xl border-slate-200 bg-white text-sm text-slate-900"
           />
         </div>
 
@@ -219,27 +225,27 @@ export default function MediaManager({ onSelect, closeModal }) {
               { key: "videos", label: t("admin.media.manager.tabs.videos") },
               { key: "files", label: t("admin.media.manager.tabs.files") },
             ].map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setCategory(tab.key)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                category === tab.key
-                  ? "bg-[var(--color-brand-blue)] text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-              }`}
-            >
-              {tab.label}
-            </button>
+              <ContentSecondaryButton
+                key={tab.key}
+                type="button"
+                variant="pill"
+                onClick={() => setCategory(tab.key)}
+                className={`px-3 py-1.5 text-xs ${
+                  category === tab.key
+                    ? "bg-[var(--color-brand-blue)] text-white hover:bg-[var(--color-brand-blue)]/90"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                {tab.label}
+              </ContentSecondaryButton>
             ))}
           </div>
         )}
 
         {/* 上传按钮 */}
         <div className="relative">
-          <input
+          <ContentFileInput
             ref={fileInputRef}
-            type="file"
             accept="image/*,video/*"
             onChange={(e) => {
               const file = e.target.files?.[0];
@@ -247,41 +253,38 @@ export default function MediaManager({ onSelect, closeModal }) {
             }}
             className="hidden"
           />
-          <button
+          <ContentPrimaryButton
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[var(--color-brand-blue)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
+            loading={uploading}
+            loadingLabel={t("admin.media.manager.uploading")}
+            icon={Upload}
+            iconSize={16}
+            className="rounded-xl text-white"
           >
-            {uploading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                {t("admin.media.manager.uploading")}
-              </>
-            ) : (
-              <>
-                <Upload className="w-4 h-4" />
-                {t("admin.media.manager.upload")}
-              </>
-            )}
-          </button>
+            {t("admin.media.manager.upload")}
+          </ContentPrimaryButton>
         </div>
       </div>
 
       {/* 文件网格 */}
       {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
-        </div>
+        <ContentStateBlock
+          loading
+          loadingText={t("routeLoading", { ns: "common" })}
+          className="rounded-2xl"
+        />
       ) : filteredMedia.length === 0 ? (
-        <div className="text-center py-20 text-slate-500">
-          <File className="w-12 h-12 mx-auto mb-3 opacity-50" />
-          <p className="text-sm">
-            {searchQuery || category !== "all"
+        <ContentStateBlock
+          icon={File}
+          title={
+            searchQuery || category !== "all"
               ? t("admin.media.manager.empty.noResults")
-              : t("admin.media.manager.empty.default")}
-          </p>
-        </div>
+              : t("admin.media.manager.empty.default")
+          }
+          className="rounded-2xl"
+        />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {filteredMedia.map((item) => {
@@ -292,18 +295,10 @@ export default function MediaManager({ onSelect, closeModal }) {
             const thumbUrl = getFileUrl(item, true);
 
             return (
-              <div
+              <ContentTextButton
                 key={item.id}
                 className="group relative aspect-square rounded-xl border border-slate-200 bg-slate-50 overflow-hidden cursor-pointer hover:border-[var(--color-brand-blue)] hover:shadow-md transition-[border-color,box-shadow]"
                 onClick={() => handleFileClick(item)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    handleFileClick(item);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
                 aria-label={`${t("admin.media.manager.details.title")}: ${fileName || t("admin.media.manager.details.unknown")}`}
               >
                 {fileType === "image" ? (
@@ -324,17 +319,18 @@ export default function MediaManager({ onSelect, closeModal }) {
                 {/* 悬停遮罩 */}
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
                   {!onSelect && (
-                    <button
-                      type="button"
+                    <ContentIconActionButton
                       onClick={(e) => {
                         e.stopPropagation();
                         handleDelete(item.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 p-2 rounded-full bg-red-500 text-white hover:bg-red-600 transition-[background-color,opacity]"
+                      tone="danger"
+                      icon={Trash2}
+                      size="sm"
+                      iconSize={16}
+                      className="opacity-0 group-hover:opacity-100 rounded-full bg-red-500 text-white hover:bg-red-600 hover:text-white transition-[background-color,opacity]"
                       aria-label={t("admin.media.manager.delete.confirm")}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    />
                   )}
                 </div>
 
@@ -342,7 +338,7 @@ export default function MediaManager({ onSelect, closeModal }) {
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
                   <p className="text-xs text-white truncate">{fileName}</p>
                 </div>
-              </div>
+              </ContentTextButton>
             );
           })}
         </div>
@@ -394,7 +390,7 @@ export default function MediaManager({ onSelect, closeModal }) {
 
             {/* 操作按钮 */}
             <div className="mt-6 flex items-center justify-end gap-3">
-              <button
+              <ContentSecondaryButton
                 type="button"
                 onClick={async () => {
                   try {
@@ -405,17 +401,17 @@ export default function MediaManager({ onSelect, closeModal }) {
                     notify(t("admin.media.manager.toast.copyError"), "error");
                   }
                 }}
-                className="px-4 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors text-sm font-medium"
+                className="rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm font-medium"
               >
                 {t("admin.media.manager.actions.copyUrl")}
-              </button>
-              <button
+              </ContentSecondaryButton>
+              <ContentPrimaryButton
                 type="button"
                 onClick={() => handleDelete(selectedMedia.id)}
-                className="px-4 py-2 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-colors text-sm font-medium"
+                className="rounded-xl bg-red-500 text-white hover:bg-red-600 text-sm font-medium"
               >
                 {t("admin.media.manager.actions.deleteFile")}
-              </button>
+              </ContentPrimaryButton>
             </div>
           </div>
         )}

@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Plus, Edit, Trash2, Loader2, FileText, Search } from "lucide-react";
+import { Plus, FileText, Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import pb from "../../lib/pocketbase";
 import { getLocalizedContent } from "../../utils/postHelpers";
 import { logDelete } from "../../lib/logger";
 import { createAppLogger } from "../../lib/appLogger";
-import Modal from "../../components/admin/ui/Modal";
 import { formatLocalizedDate } from "../../utils/localeFormat";
+import { useUIFeedback } from "../../hooks/useUIFeedback";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentEditDeleteActions from "../../components/admin/content/ContentEditDeleteActions";
+import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
 
 /**
  * 文章管理列表页面
@@ -19,12 +25,11 @@ export default function Posts() {
   const { adminKey } = useParams();
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
+  const { notify, confirm } = useUIFeedback();
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [search, setSearch] = useState("");
-  const [toast, setToast] = useState(null);
 
   // 获取文章列表
   const fetchPosts = useCallback(async () => {
@@ -36,14 +41,11 @@ export default function Posts() {
       setPosts(result.items);
     } catch (error) {
       logger.error("Failed to fetch posts:", error);
-      setToast({
-        type: "error",
-        message: t("admin.posts.toast.fetchError"),
-      });
+      notify(t("admin.posts.toast.fetchError"), "error");
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [notify, t]);
 
   useEffect(() => {
     fetchPosts();
@@ -92,6 +94,15 @@ export default function Posts() {
 
   // 删除文章
   const handleDelete = async (postId) => {
+    const accepted = await confirm({
+      title: t("admin.posts.delete.title"),
+      message: t("admin.posts.delete.desc"),
+      confirmText: t("admin.posts.delete.confirm"),
+      cancelText: t("admin.posts.delete.cancel"),
+      danger: true,
+    });
+    if (!accepted) return;
+
     try {
       setDeletingId(postId);
 
@@ -116,14 +127,10 @@ export default function Posts() {
       await logDelete("Posts Manager", `Deleted post: ${postTitle}`);
 
       await fetchPosts();
-      setDeleteConfirmId(null);
-      setToast({ type: "success", message: t("admin.posts.toast.deleteSuccess") });
+      notify(t("admin.posts.toast.deleteSuccess"), "success");
     } catch (error) {
       logger.error("Failed to delete post:", error);
-      setToast({
-        type: "error",
-        message: t("admin.posts.toast.deleteError"),
-      });
+      notify(t("admin.posts.toast.deleteError"), "error");
     } finally {
       setDeletingId(null);
     }
@@ -141,87 +148,70 @@ export default function Posts() {
 
   return (
     <div className="space-y-4">
-      {/* Toast */}
-      {toast && (
-        <div
-          className={`rounded-2xl px-4 py-2.5 text-xs md:text-sm flex items-center justify-between gap-3 shadow-sm ${toast.type === "success"
-              ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-              : "bg-red-50 text-red-800 border border-red-200"
-            }`}
-        >
-          <span>{toast.message}</span>
-          <button
-            type="button"
-            onClick={() => setToast(null)}
-            className="text-[11px] font-medium opacity-80 hover:opacity-100"
-          >
-            ×
-          </button>
-        </div>
-      )}
-
       {/* 头部：标题 + 搜索 + 新建 */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-xl md:text-2xl font-bold text-slate-900">
-            {t("admin.posts.title")}
-          </h1>
-          <p className="text-xs md:text-sm text-slate-500">
-            {t("admin.posts.subtitle")}
-          </p>
-        </div>
-        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+      <ContentPageHeader
+        title={t("admin.posts.title")}
+        subtitle={t("admin.posts.subtitle")}
+        actions={(
+          <>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
+            <ContentTextInput
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("admin.posts.searchPlaceholder")}
-              className="w-full sm:w-60 rounded-full border border-slate-200 bg-white pl-8 pr-3 py-1.5 text-xs md:text-sm text-slate-900 placeholder:text-slate-400 focus:border-[var(--color-brand-blue)] focus:ring-2 focus:ring-[var(--color-brand-blue)]/30"
+              className="w-full sm:w-60 rounded-full border-slate-200 bg-white pl-8 pr-3 py-1.5 text-xs md:text-sm text-slate-900 placeholder:text-slate-400 focus:ring-[var(--color-brand-blue)]/30"
             />
           </div>
-          <Link
+          <ContentPrimaryButton
+            as={Link}
+            variant="pill"
             to={`/${adminKey}/webadmin/posts/new`}
-            className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[var(--color-brand-blue)] px-4 py-1.5 text-xs md:text-sm font-semibold text-slate-950 shadow-[0_0_18px_rgba(142,209,252,0.8)] hover:scale-[1.02] active:scale-[0.98] transition-transform"
+            icon={Plus}
+            iconSize={16}
           >
-            <Plus className="w-4 h-4" />
             {t("admin.posts.new")}
-          </Link>
-        </div>
-      </div>
+          </ContentPrimaryButton>
+          </>
+        )}
+      />
 
       {/* 列表内容 */}
       {loading ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-sm">
-          <Loader2 className="w-7 h-7 animate-spin text-slate-400 mx-auto mb-3" />
-          <p className="text-sm text-slate-500">{t("admin.posts.loading")}</p>
-        </div>
+        <ContentStateBlock
+          loading
+          loadingText={t("admin.posts.loading")}
+          className="rounded-2xl"
+        />
       ) : filteredPosts.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white/80 px-6 py-10 text-center shadow-sm flex flex-col items-center gap-3">
-          <FileText className="w-12 h-12 text-slate-300" />
-          <p className="text-sm font-medium text-slate-700">
-            {posts.length === 0 ? t("admin.posts.empty") : t("admin.posts.noResults")}
-          </p>
-          <p className="text-xs text-slate-500">
-            {posts.length === 0
-              ? t("admin.posts.emptyDesc")
-              : t("admin.posts.noResultsDesc")}
-          </p>
-          <Link
-            to={`/${adminKey}/webadmin/posts/new`}
-            className="mt-1 inline-flex items-center justify-center gap-1.5 rounded-full bg-[var(--color-brand-blue)] px-4 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_0_18px_rgba(142,209,252,0.8)] hover:scale-[1.02] active:scale-[0.98] transition-transform"
-          >
-            <Plus className="w-4 h-4" />
-            {t("admin.posts.new")}
-          </Link>
-        </div>
+        <ContentStateBlock
+          icon={FileText}
+          title={posts.length === 0 ? t("admin.posts.empty") : t("admin.posts.noResults")}
+          description={
+            posts.length === 0 ? t("admin.posts.emptyDesc") : t("admin.posts.noResultsDesc")
+          }
+          action={posts.length === 0 ? (
+            <ContentPrimaryButton
+              as={Link}
+              variant="pill"
+              to={`/${adminKey}/webadmin/posts/new`}
+              icon={Plus}
+              iconSize={16}
+              className="mt-1"
+            >
+              {t("admin.posts.new")}
+            </ContentPrimaryButton>
+          ) : null}
+          className="rounded-2xl bg-white/80"
+        />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {filteredPosts.map((post) => (
-            <article
+            <ContentCardSurface
+              as="article"
               key={post.id}
-              className="group rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 shadow-sm flex flex-col gap-2 hover:border-[var(--color-brand-blue)]/70 hover:shadow-[0_10px_35px_rgba(15,23,42,0.14)] transition-[border-color,box-shadow]"
+              className="group bg-white/90 px-4 py-3 flex flex-col gap-2 hover:border-[var(--color-brand-blue)]/70 hover:shadow-[0_10px_35px_rgba(15,23,42,0.14)] transition-[border-color,box-shadow]"
             >
               <header className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0 space-y-1">
@@ -258,75 +248,26 @@ export default function Posts() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      navigate(`/${adminKey}/webadmin/posts/${post.id}`)
-                    }
-                    className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white p-1.5 text-slate-500 hover:text-[var(--color-brand-blue)] hover:border-[var(--color-brand-blue)]/60 transition-colors"
-                    title={t("admin.homeManager.actions.edit")}
-                    aria-label={t("admin.homeManager.actions.edit")}
-                  >
-                    <Edit className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDeleteConfirmId(post.id)}
-                    disabled={deletingId === post.id}
-                    className="inline-flex items-center justify-center rounded-full border border-red-200 bg-white p-1.5 text-red-500 hover:bg-red-50 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-                    title={t("admin.homeManager.actions.delete")}
-                    aria-label={t("admin.homeManager.actions.delete")}
-                  >
-                    {deletingId === post.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="w-3.5 h-3.5" />
-                    )}
-                  </button>
+                  <ContentEditDeleteActions
+                    onEdit={() => navigate(`/${adminKey}/webadmin/posts/${post.id}`)}
+                    onDelete={() => handleDelete(post.id)}
+                    editTitle={t("admin.homeManager.actions.edit")}
+                    deleteTitle={t("admin.homeManager.actions.delete")}
+                    deleting={deletingId === post.id}
+                    size="sm"
+                    iconSize={14}
+                    className="gap-1.5"
+                  />
                 </div>
               </header>
 
               <p className="text-xs text-slate-500">
                 {t("admin.posts.lastUpdated")} {formatDate(post.updated || post.created)}
               </p>
-            </article>
+            </ContentCardSurface>
           ))}
         </div>
       )}
-
-      {/* 删除确认弹窗 */}
-      <Modal
-        isOpen={Boolean(deleteConfirmId)}
-        onClose={() => setDeleteConfirmId(null)}
-        title={t("admin.posts.delete.title")}
-        size="sm"
-      >
-        <div className="space-y-5 px-6 py-5">
-          <p className="text-xs md:text-sm text-slate-600">
-            {t("admin.posts.delete.desc")}
-          </p>
-          <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setDeleteConfirmId(null)}
-              className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 transition-colors"
-            >
-              {t("admin.posts.delete.cancel")}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleDelete(deleteConfirmId)}
-              disabled={deletingId === deleteConfirmId}
-              className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-            >
-              {deletingId === deleteConfirmId && (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              )}
-              {t("admin.posts.delete.confirm")}
-            </button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import MediaManager from "../../components/admin/media/MediaManager";
 import { useTranslation } from "react-i18next";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
 
 /**
  * 资源库页面
@@ -10,14 +11,10 @@ export default function MediaPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">{t("admin.media.title")}</h1>
-          <p className="text-sm text-slate-500 mt-1">
-            {t("admin.media.subtitle")}
-          </p>
-        </div>
-      </div>
+      <ContentPageHeader
+        title={t("admin.media.title")}
+        subtitle={t("admin.media.subtitle")}
+      />
 
       <MediaManager />
     </div>

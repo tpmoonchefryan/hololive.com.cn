@@ -1,11 +1,33 @@
 import { useState, useEffect } from "react";
-import { Plus, Trash2, Loader2, User, UserX, Save, AlertTriangle } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  Loader2,
+  User,
+  UserX,
+  Save,
+  AlertTriangle,
+} from "lucide-react";
 import pb from "../../lib/pocketbase";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
 import Modal from "../../components/admin/ui/Modal";
 import { formatLocalizedDate } from "../../utils/localeFormat";
+import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentSecondaryButton from "../../components/admin/content/ContentSecondaryButton";
+import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
+import ContentCheckboxInput from "../../components/admin/content/ContentCheckboxInput";
+import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
+import ContentTableSurface from "../../components/admin/content/ContentTableSurface";
+import ContentTableHeader from "../../components/admin/content/ContentTableHeader";
+import ContentTableHeadCell from "../../components/admin/content/ContentTableHeadCell";
+import ContentTableCell from "../../components/admin/content/ContentTableCell";
+import ContentStatusPill from "../../components/admin/content/ContentStatusPill";
+import ContentIconActionButton from "../../components/admin/content/ContentIconActionButton";
+import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
 
 /**
  * 本地管理员账号管理页面
@@ -19,6 +41,7 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
+  const [disablingId, setDisablingId] = useState(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
@@ -154,6 +177,7 @@ export default function AdminUsersPage() {
   // 禁用账号（将 verified 设为 false）
   const handleDisable = async (userId) => {
     try {
+      setDisablingId(userId);
       await pb.collection("users").update(userId, {
         verified: false,
       });
@@ -168,6 +192,8 @@ export default function AdminUsersPage() {
         error?.message ||
         error;
       notify(`${t("admin.users.error.disableUser")} ${JSON.stringify(detail)}`, "error");
+    } finally {
+      setDisablingId(null);
     }
   };
 
@@ -193,28 +219,26 @@ export default function AdminUsersPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* 页面头部 */}
-        <div className="mb-8 flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">
-              {t("admin.users.title")}
-            </h1>
-            <p className="text-gray-600">{t("admin.users.subtitle")}</p>
-          </div>
-          <button
-            type="button"
-            onClick={handleNew}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            {t("admin.users.add")}
-          </button>
-        </div>
+    <div className="space-y-4">
+      <div className="space-y-4">
+        <ContentPageHeader
+          title={t("admin.users.title")}
+          subtitle={t("admin.users.subtitle")}
+          actions={(
+            <ContentPrimaryButton
+              type="button"
+              onClick={handleNew}
+              variant="pill"
+              icon={Plus}
+              iconSize={20}
+            >
+              {t("admin.users.add")}
+            </ContentPrimaryButton>
+          )}
+        />
 
         {/* 本地登录开关设置区域 */}
-        <div className="mb-6 rounded-2xl border-2 border-amber-200 bg-amber-50/50 p-5 shadow-sm">
+        <ContentCardSurface className="border-2 border-amber-200 bg-amber-50/50 p-5">
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-2">
@@ -231,12 +255,11 @@ export default function AdminUsersPage() {
               </p>
             </div>
             <label className="flex items-center gap-3 cursor-pointer flex-shrink-0">
-              <input
-                type="checkbox"
+              <ContentCheckboxInput
                 checked={enableLocalLogin}
                 onChange={(e) => handleToggleLocalLogin(e.target.checked)}
                 disabled={updatingLoginSetting}
-                className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="disabled:opacity-50 disabled:cursor-not-allowed"
               />
               <span className="text-sm font-medium text-amber-900">
                 {enableLocalLogin ? t("admin.users.toggle.on") : t("admin.users.toggle.off")}
@@ -246,7 +269,7 @@ export default function AdminUsersPage() {
               )}
             </label>
           </div>
-        </div>
+        </ContentCardSurface>
 
         {/* 新建表单弹窗 */}
         <Modal
@@ -257,10 +280,11 @@ export default function AdminUsersPage() {
         >
           <form onSubmit={handleCreate} className="space-y-4 px-6 py-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <ContentFieldLabel htmlFor="admin-user-email">
                 {t("admin.users.modal.email")}
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
+                id="admin-user-email"
                 type="email"
                 name="email"
                 autoComplete="off"
@@ -269,16 +293,17 @@ export default function AdminUsersPage() {
                 onChange={(e) =>
                   setFormData({ ...formData, email: e.target.value })
                 }
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="px-4 py-2"
                 placeholder={t("admin.users.modal.emailPlaceholder")}
                 required
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <ContentFieldLabel htmlFor="admin-user-password">
                 {t("admin.users.modal.password")}
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
+                id="admin-user-password"
                 type="password"
                 name="password"
                 autoComplete="new-password"
@@ -286,17 +311,18 @@ export default function AdminUsersPage() {
                 onChange={(e) =>
                   setFormData({ ...formData, password: e.target.value })
                 }
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="px-4 py-2"
                 placeholder={t("admin.users.modal.passwordHint")}
                 required
                 minLength={8}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <ContentFieldLabel htmlFor="admin-user-password-confirm">
                 {t("admin.users.modal.confirmPassword")}
-              </label>
-              <input
+              </ContentFieldLabel>
+              <ContentTextInput
+                id="admin-user-password-confirm"
                 type="password"
                 name="passwordConfirm"
                 autoComplete="new-password"
@@ -307,139 +333,128 @@ export default function AdminUsersPage() {
                     passwordConfirm: e.target.value,
                   })
                 }
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="px-4 py-2"
                 placeholder={t("admin.users.modal.confirmPasswordHint")}
                 required
                 minLength={8}
               />
             </div>
             <div className="flex items-center justify-end gap-3 pt-4">
-              <button
-                type="button"
-                onClick={closeForm}
-                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg font-medium transition-colors"
-              >
+              <ContentSecondaryButton onClick={closeForm}>
                 {t("admin.users.modal.cancel")}
-              </button>
-              <button
+              </ContentSecondaryButton>
+              <ContentPrimaryButton
                 type="submit"
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                icon={Save}
+                iconSize={16}
               >
-                <Save className="w-4 h-4" />
                 {t("admin.users.modal.create")}
-              </button>
+              </ContentPrimaryButton>
             </div>
           </form>
         </Modal>
 
         {/* 用户列表 */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-          {loading ? (
-            <div className="p-12 text-center">
-              <Loader2 className="w-8 h-8 animate-spin text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-500">{t("admin.users.loading")}</p>
-            </div>
-          ) : users.length === 0 ? (
-            <div className="p-12 text-center">
-              <User className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-500 text-lg mb-2">{t("admin.users.table.empty")}</p>
-              <p className="text-gray-400 text-sm mb-6">
-                {t("admin.users.table.emptyDesc")}
-              </p>
-              <button
+        {loading ? (
+          <ContentStateBlock
+            loading
+            loadingText={t("admin.users.loading")}
+            className="rounded-2xl"
+          />
+        ) : users.length === 0 ? (
+          <ContentStateBlock
+            icon={User}
+            title={t("admin.users.table.empty")}
+            description={t("admin.users.table.emptyDesc")}
+            action={(
+              <ContentPrimaryButton
                 type="button"
                 onClick={handleNew}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                icon={Plus}
+                iconSize={20}
               >
-                <Plus className="w-5 h-5" />
                 {t("admin.users.add")}
-              </button>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("admin.users.table.avatar")}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("admin.users.table.email")}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("admin.users.table.status")}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("admin.users.table.created")}
-                    </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {t("admin.users.table.actions")}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {users.map((user) => (
-                    <tr key={user.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center">
-                          <User className="w-5 h-5 text-white" />
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">
-                          {user.email}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {user.verified ? (
-                          <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">
-                            {t("admin.users.table.active")}
-                          </span>
-                        ) : (
-                          <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">
-                            {t("admin.users.table.disabled")}
-                          </span>
+              </ContentPrimaryButton>
+            )}
+            className="rounded-2xl"
+          />
+        ) : (
+          <ContentTableSurface>
+            <table className="w-full">
+              <ContentTableHeader>
+                <tr>
+                  <ContentTableHeadCell>
+                    {t("admin.users.table.avatar")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell>
+                    {t("admin.users.table.email")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell>
+                    {t("admin.users.table.status")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell>
+                    {t("admin.users.table.created")}
+                  </ContentTableHeadCell>
+                  <ContentTableHeadCell align="right">
+                    {t("admin.users.table.actions")}
+                  </ContentTableHeadCell>
+                </tr>
+              </ContentTableHeader>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {users.map((user) => (
+                  <tr key={user.id} className="hover:bg-gray-50 transition-colors">
+                    <ContentTableCell nowrap>
+                      <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center">
+                        <User className="w-5 h-5 text-white" />
+                      </div>
+                    </ContentTableCell>
+                    <ContentTableCell nowrap>
+                      <div className="text-sm font-medium text-gray-900">
+                        {user.email}
+                      </div>
+                    </ContentTableCell>
+                    <ContentTableCell nowrap>
+                      <ContentStatusPill
+                        active={Boolean(user.verified)}
+                        activeLabel={t("admin.users.table.active")}
+                        inactiveLabel={t("admin.users.table.disabled")}
+                      />
+                    </ContentTableCell>
+                    <ContentTableCell nowrap className="text-sm text-gray-500">
+                      {formatDate(user.created)}
+                    </ContentTableCell>
+                    <ContentTableCell nowrap align="right" className="text-sm font-medium">
+                      <div className="flex items-center justify-end gap-2">
+                        {user.verified && (
+                          <ContentIconActionButton
+                            onClick={() => handleDisable(user.id)}
+                            tone="neutral"
+                            icon={UserX}
+                            size="sm"
+                            iconSize={16}
+                            loading={disablingId === user.id}
+                            title={t("admin.users.actions.disable")}
+                            aria-label={t("admin.users.actions.disable")}
+                          />
                         )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {formatDate(user.created)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <div className="flex items-center justify-end gap-2">
-                          {user.verified && (
-                            <button
-                              type="button"
-                              onClick={() => handleDisable(user.id)}
-                              className="text-orange-600 hover:text-orange-900 transition-colors"
-                              title={t("admin.users.actions.disable")}
-                              aria-label={t("admin.users.actions.disable")}
-                            >
-                              <UserX className="w-4 h-4" />
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => setDeleteConfirmId(user.id)}
-                            className="text-red-600 hover:text-red-900 transition-colors"
-                            disabled={deletingId === user.id}
-                            title={t("admin.users.actions.delete")}
-                            aria-label={t("admin.users.actions.delete")}
-                          >
-                            {deletingId === user.id ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <Trash2 className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                        <ContentIconActionButton
+                          onClick={() => setDeleteConfirmId(user.id)}
+                          tone="danger"
+                          icon={Trash2}
+                          size="sm"
+                          iconSize={16}
+                          loading={deletingId === user.id}
+                          title={t("admin.users.actions.delete")}
+                          aria-label={t("admin.users.actions.delete")}
+                        />
+                      </div>
+                    </ContentTableCell>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ContentTableSurface>
+        )}
       </div>
 
       {/* 删除确认弹窗 */}
@@ -454,24 +469,18 @@ export default function AdminUsersPage() {
             {t("admin.users.delete.desc")}
           </p>
           <div className="flex items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={() => setDeleteConfirmId(null)}
-              className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg font-medium transition-colors"
-            >
+            <ContentSecondaryButton onClick={() => setDeleteConfirmId(null)}>
               {t("admin.users.delete.cancel")}
-            </button>
-            <button
+            </ContentSecondaryButton>
+            <ContentPrimaryButton
               type="button"
               onClick={() => handleDelete(deleteConfirmId)}
               disabled={deletingId === deleteConfirmId}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              loading={deletingId === deleteConfirmId}
+              className="bg-red-600 text-white hover:bg-red-700"
             >
-              {deletingId === deleteConfirmId && (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              )}
               {t("admin.users.delete.confirm")}
-            </button>
+            </ContentPrimaryButton>
           </div>
         </div>
       </Modal>

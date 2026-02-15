@@ -11,6 +11,7 @@ import MediaManager from "../media/MediaManager";
 import { useUIFeedback } from "../../../hooks/useUIFeedback";
 import { createAppLogger } from "../../../lib/appLogger";
 import { useTranslation } from "react-i18next";
+import ContentFileInput from "../content/ContentFileInput";
 
 const logger = createAppLogger("RichTextEditor");
 
@@ -174,9 +175,8 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
         />
 
       {/* 隐藏的文件输入 */}
-      <input
+      <ContentFileInput
         ref={fileInputRef}
-        type="file"
         accept="image/jpeg,image/png,image/gif,image/webp"
         className="hidden"
         onChange={handleFileSelect}

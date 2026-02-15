@@ -7,16 +7,19 @@ import { ALLOWED_ADMINS } from "../../config/auth_whitelist";
 import { logLogin } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
+import ContentPrimaryButton from "../../components/admin/content/ContentPrimaryButton";
+import ContentTextInput from "../../components/admin/content/ContentTextInput";
 
 /**
  * Microsoft 四色方块 Logo SVG 组件
  */
-const MicrosoftLogo = ({ className = "w-5 h-5" }) => (
+const MicrosoftLogo = ({ className, size = 20 }) => (
   <svg
     viewBox="0 0 21 21"
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
     className={className}
+    style={className ? undefined : { width: size, height: size }}
   >
     <rect x="0" y="0" width="10" height="10" fill="#F25022" />
     <rect x="11" y="0" width="10" height="10" fill="#7FBA00" />
@@ -279,42 +282,18 @@ export default function AdminLogin() {
 
         {/* Microsoft 登录按钮 */}
         {!loadingSettings && (
-          <button
+          <ContentPrimaryButton
+            type="button"
             onClick={handleMicrosoftLogin}
             disabled={isLoading}
+            loading={microsoftLoading}
+            loadingLabel={t("admin.login.loading")}
+            icon={MicrosoftLogo}
+            iconSize={20}
             className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-white hover:bg-gray-50 text-gray-900 rounded-lg font-medium transition-[transform,background-color,color,border-color,box-shadow] duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] shadow-lg border border-gray-200"
           >
-            {microsoftLoading ? (
-              <>
-                <svg
-                  className="animate-spin h-5 w-5 text-gray-900"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
-                <span>{t("admin.login.loading")}</span>
-              </>
-            ) : (
-              <>
-                <MicrosoftLogo className="w-5 h-5" />
-                <span>{t("admin.login.microsoftBtn")}</span>
-              </>
-            )}
-          </button>
+            {t("admin.login.microsoftBtn")}
+          </ContentPrimaryButton>
         )}
 
         {/* 本地登录部分 - 根据数据库配置显示/隐藏 */}
@@ -341,13 +320,13 @@ export default function AdminLogin() {
                 >
                   {t("admin.login.email")}
                 </label>
-                <input
+                <ContentTextInput
                   id="email"
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   disabled={isLoading}
-                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-2 bg-white/5 border-white/10 rounded-lg text-white placeholder-gray-500 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
                   placeholder={t("admin.login.emailPlaceholder")}
                   required
                 />
@@ -360,51 +339,27 @@ export default function AdminLogin() {
                 >
                   {t("admin.login.password")}
                 </label>
-                <input
+                <ContentTextInput
                   id="password"
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   disabled={isLoading}
-                  className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-2 bg-white/5 border-white/10 rounded-lg text-white placeholder-gray-500 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed"
                   placeholder={t("admin.login.passwordPlaceholder")}
                   required
                 />
               </div>
 
-              <button
+              <ContentPrimaryButton
                 type="submit"
                 disabled={isLoading}
+                loading={localLoading}
+                loadingLabel={t("admin.login.verifying")}
                 className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-[transform,background-color,color,border-color,box-shadow] duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.02] active:scale-[0.98] shadow-lg"
               >
-                {localLoading ? (
-                  <>
-                    <svg
-                      className="animate-spin h-5 w-5 text-white"
-                      xmlns="http://www.w3.org/2000/svg"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                    >
-                      <circle
-                        className="opacity-25"
-                        cx="12"
-                        cy="12"
-                        r="10"
-                        stroke="currentColor"
-                        strokeWidth="4"
-                      ></circle>
-                      <path
-                        className="opacity-75"
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                      ></path>
-                    </svg>
-                    <span>{t("admin.login.verifying")}</span>
-                  </>
-                ) : (
-                  <span>{t("admin.login.passwordBtn")}</span>
-                )}
-              </button>
+                {t("admin.login.passwordBtn")}
+              </ContentPrimaryButton>
             </form>
           </>
         )}
