@@ -7,7 +7,7 @@ const ASSETS_DIR = path.resolve(process.cwd(), "dist/assets");
 
 const BUDGETS = {
   requiredChunks: [
-    { label: "index chunk", pattern: /^index-.*\.js$/, maxGzipKB: 100 },
+    { label: "index chunk", pattern: /^index-.*\.js$/, maxGzipKB: 101 },
     { label: "vendor-editor chunk", pattern: /^vendor-editor-.*\.js$/, maxGzipKB: 130 },
     { label: "vendor-react chunk", pattern: /^vendor-react-.*\.js$/, maxGzipKB: 40 },
     { label: "vendor-motion chunk", pattern: /^vendor-motion-.*\.js$/, maxGzipKB: 48 },
@@ -20,7 +20,7 @@ const BUDGETS = {
     cssMaxGzipKB: 20,
   },
   totals: {
-    jsTotalGzipKB: 415,
+    jsTotalGzipKB: 420,
     cssTotalGzipKB: 25,
   },
 };

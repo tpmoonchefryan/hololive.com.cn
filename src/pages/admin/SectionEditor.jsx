@@ -21,6 +21,7 @@ import ContentTextInput from "../../components/admin/content/ContentTextInput";
 import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
 import ContentInlineActionButton from "../../components/admin/content/ContentInlineActionButton";
 import ContentSubItemCard from "../../components/admin/content/ContentSubItemCard";
+import TranslationProgressModal from "../../components/admin/content/TranslationProgressModal";
 
 /**
  * 首页分段编辑器组件
@@ -35,7 +36,13 @@ export default function SectionEditor() {
   const navigate = useNavigate();
   const { t } = useTranslation("admin");
   const { notify } = useUIFeedback();
-  const { translating, translateFields, translateField } = useAdminContentTranslation();
+  const {
+    translating,
+    translationJob,
+    translateFields,
+    cancelTranslationJob,
+    closeTranslationProgress,
+  } = useAdminContentTranslation();
   const languages = useTriLanguageOptions();
   const isEditMode = !!id;
 
@@ -198,52 +205,57 @@ export default function SectionEditor() {
 
   const handleAutoTranslate = async () => {
     try {
-      notify(t("sectionEditor.buttons.translating"), "info");
-
       const fieldsToTranslate = ["title", "subtitle", "content", "announcement"].map((key) => ({
         key,
         value: formData[key],
       }));
+      formData.buttons.forEach((button, index) => {
+        fieldsToTranslate.push({
+          key: `button_label_${index}`,
+          value: button?.label || emptyI18nMap(),
+        });
+      });
 
-      const translatedFieldResult = await translateFields({
+      const translatedResult = await translateFields({
         scene: "section_editor",
         fields: fieldsToTranslate,
       });
 
       let nextButtons = [...formData.buttons];
-      let translatedButtonCount = 0;
       for (let index = 0; index < formData.buttons.length; index += 1) {
-        const button = formData.buttons[index];
-        const translatedButtonLabel = await translateField({
-          scene: "section_editor_button",
-          fieldName: "label",
-          value: button?.label || emptyI18nMap(),
-        });
-
-        if (translatedButtonLabel.changed) {
-          translatedButtonCount += 1;
+        const translatedButtonLabel = translatedResult?.fields?.[`button_label_${index}`];
+        if (translatedButtonLabel) {
           nextButtons[index] = {
-            ...button,
-            label: translatedButtonLabel.value,
+            ...nextButtons[index],
+            label: translatedButtonLabel,
           };
         }
       }
 
-      const translatedCount =
-        translatedFieldResult.changedCount + translatedButtonCount;
-
-      if (translatedCount === 0) {
+      if (translatedResult.changedCount === 0) {
         notify(t("sectionEditor.toast.noContent"), "warning");
         return;
       }
 
       setFormData((prev) => ({
         ...prev,
-        ...translatedFieldResult.fields,
+        title: translatedResult?.fields?.title || prev.title,
+        subtitle: translatedResult?.fields?.subtitle || prev.subtitle,
+        content: translatedResult?.fields?.content || prev.content,
+        announcement: translatedResult?.fields?.announcement || prev.announcement,
         buttons: nextButtons,
       }));
-      notify(t("sectionEditor.toast.translateSuccess"), "success");
+      notify(
+        translatedResult.partial
+          ? t("translationJob.toast.partial")
+          : t("sectionEditor.toast.translateSuccess"),
+        translatedResult.partial ? "warning" : "success"
+      );
     } catch (err) {
+      if (err?.code === "TRANSLATION_CANCELED") {
+        notify(t("translationJob.toast.canceled"), "warning");
+        return;
+      }
       logger.error("Translation error:", err);
       notify(err?.message || t("sectionEditor.toast.translateError"), "error");
     }
@@ -508,6 +520,11 @@ export default function SectionEditor() {
           )}
         </ContentFormCard>
       </form>
+      <TranslationProgressModal
+        job={translationJob}
+        onCancel={cancelTranslationJob}
+        onClose={closeTranslationProgress}
+      />
     </div>
   );
 }

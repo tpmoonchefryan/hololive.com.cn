@@ -46,15 +46,15 @@ function normalizeFillPolicy(fillPolicy) {
     : DEFAULT_FILL_POLICY;
 }
 
-async function callTranslateApi(path, payload) {
+async function callTranslateApiWithMethod(method, path, payload = null, { allowFailedOk = false } = {}) {
   const authHeader = ensureAuthHeader();
   const response = await fetch(path, {
-    method: "POST",
+    method,
     headers: {
       "Content-Type": "application/json",
       Authorization: authHeader,
     },
-    body: JSON.stringify(payload),
+    body: payload == null ? undefined : JSON.stringify(payload),
   });
 
   const data = await response.json().catch(() => null);
@@ -62,37 +62,14 @@ async function callTranslateApi(path, payload) {
     const msg = data?.error || data?.message || `HTTP ${response.status}`;
     throw new Error(msg);
   }
-  if (!data?.ok) {
+  if (!allowFailedOk && data && data.ok === false) {
     const msg = data?.error || "Translation API returned failed status";
     throw new Error(msg);
   }
+  if (!data) {
+    throw new Error("Invalid translation API response");
+  }
   return data;
-}
-
-export async function requestAdminTranslation({
-  scene = "admin",
-  sourceLang,
-  targets,
-  fields,
-}) {
-  const source = normalizeLang(sourceLang);
-  if (!source) {
-    throw new Error("invalid source language");
-  }
-  if (!fields || typeof fields !== "object") {
-    throw new Error("invalid fields");
-  }
-
-  const finalTargets = Array.isArray(targets) && targets.length
-    ? targets.map((lang) => normalizeLang(lang)).filter(Boolean)
-    : getTargetLangs(source);
-
-  return callTranslateApi(API_BASE, {
-    scene,
-    source_lang: source,
-    targets: finalTargets,
-    fields,
-  });
 }
 
 export async function getAdminTranslationFillPolicy({ force = false } = {}) {
@@ -133,33 +110,86 @@ export async function testAdminTranslationConfig({
     ? targets.map((lang) => normalizeLang(lang)).filter(Boolean)
     : getTargetLangs(source);
 
-  const authHeader = ensureAuthHeader();
-  const response = await fetch(`${API_BASE}/test`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: authHeader,
-    },
-    body: JSON.stringify({
+  const data = await callTranslateApiWithMethod(
+    "POST",
+    `${API_BASE}/test`,
+    {
       source_lang: source,
       targets: finalTargets,
       sample_text: sampleText,
       override_config: overrideConfig || null,
       dry_run: true,
-    }),
-  });
-
-  const data = await response.json().catch(() => null);
-  if (!response.ok) {
-    const msg = data?.error || data?.message || `HTTP ${response.status}`;
-    throw new Error(msg);
-  }
-  if (!data) {
-    throw new Error("Invalid test response");
-  }
+    },
+    { allowFailedOk: true }
+  );
   if (!data.ok) {
     const message = data.error || "Translation configuration test failed";
     logger.warn("Translation config test failed:", message);
   }
   return data;
+}
+
+export async function createAdminTranslationJob({
+  scene = "admin",
+  sourceLang,
+  targets,
+  fields,
+}) {
+  const source = normalizeLang(sourceLang);
+  if (!source) {
+    throw new Error("invalid source language");
+  }
+  if (!fields || typeof fields !== "object") {
+    throw new Error("invalid fields");
+  }
+
+  const finalTargets = Array.isArray(targets) && targets.length
+    ? targets.map((lang) => normalizeLang(lang)).filter(Boolean)
+    : getTargetLangs(source);
+
+  return callTranslateApiWithMethod("POST", `${API_BASE}/jobs`, {
+    scene,
+    source_lang: source,
+    targets: finalTargets,
+    fields,
+  });
+}
+
+export async function getAdminTranslationJob(jobId) {
+  const id = `${jobId || ""}`.trim();
+  if (!id) {
+    throw new Error("invalid job id");
+  }
+  return callTranslateApiWithMethod(
+    "GET",
+    `${API_BASE}/jobs/${encodeURIComponent(id)}`,
+    null,
+    { allowFailedOk: true }
+  );
+}
+
+export async function cancelAdminTranslationJob(jobId) {
+  const id = `${jobId || ""}`.trim();
+  if (!id) {
+    throw new Error("invalid job id");
+  }
+  return callTranslateApiWithMethod(
+    "POST",
+    `${API_BASE}/jobs/${encodeURIComponent(id)}/cancel`,
+    {},
+    { allowFailedOk: true }
+  );
+}
+
+export async function getAdminTranslationJobResult(jobId) {
+  const id = `${jobId || ""}`.trim();
+  if (!id) {
+    throw new Error("invalid job id");
+  }
+  return callTranslateApiWithMethod(
+    "GET",
+    `${API_BASE}/jobs/${encodeURIComponent(id)}/result`,
+    null,
+    { allowFailedOk: true }
+  );
 }

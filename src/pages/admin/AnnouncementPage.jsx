@@ -32,6 +32,7 @@ import ContentOptionalLink from "../../components/admin/content/ContentOptionalL
 import ContentTableHeader from "../../components/admin/content/ContentTableHeader";
 import ContentTableHeadCell from "../../components/admin/content/ContentTableHeadCell";
 import ContentTableCell from "../../components/admin/content/ContentTableCell";
+import TranslationProgressModal from "../../components/admin/content/TranslationProgressModal";
 
 /**
  * Announcement Management Page
@@ -42,7 +43,13 @@ const logger = createAppLogger("AnnouncementPage");
 export default function AnnouncementPage() {
   const { t, i18n } = useTranslation();
   const { notify, confirm } = useUIFeedback();
-  const { translating, translateFields } = useAdminContentTranslation();
+  const {
+    translating,
+    translationJob,
+    translateFields,
+    cancelTranslationJob,
+    closeTranslationProgress,
+  } = useAdminContentTranslation();
   const languageOptions = useTriLanguageOptions();
   const [announcements, setAnnouncements] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -210,8 +217,17 @@ export default function AnnouncementPage() {
         ...result.fields,
       }));
 
-      notify(t("admin.announcements.toast.translateSuccess"), "success");
+      notify(
+        result.partial
+          ? t("admin.translationJob.toast.partial")
+          : t("admin.announcements.toast.translateSuccess"),
+        result.partial ? "warning" : "success"
+      );
     } catch (error) {
+      if (error?.code === "TRANSLATION_CANCELED") {
+        notify(t("admin.translationJob.toast.canceled"), "warning");
+        return;
+      }
       logger.error("Failed to auto-translate announcement:", error);
       const errorMsg =
         error?.response?.message ||
@@ -549,6 +565,11 @@ export default function AnnouncementPage() {
         )}
       </div>
 
+      <TranslationProgressModal
+        job={translationJob}
+        onCancel={cancelTranslationJob}
+        onClose={closeTranslationProgress}
+      />
     </div>
   );
 }

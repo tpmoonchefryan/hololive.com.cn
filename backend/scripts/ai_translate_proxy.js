@@ -13,7 +13,35 @@ const CONFIG_CACHE_TTL_MS = Number.parseInt(
   10
 );
 const DEFAULT_REQUEST_TIMEOUT_MS = Number.parseInt(
-  process.env.AI_TRANSLATE_DEFAULT_TIMEOUT_MS || "20000",
+  process.env.AI_TRANSLATE_DEFAULT_TIMEOUT_MS || "120000",
+  10
+);
+const DEFAULT_JOB_TIMEOUT_MS = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_JOB_TIMEOUT_MS || "600000",
+  10
+);
+const DEFAULT_MAX_RETRIES = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_MAX_RETRIES || "2",
+  10
+);
+const DEFAULT_RETRY_BACKOFF_MS = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_RETRY_BACKOFF_MS || "600",
+  10
+);
+const DEFAULT_JOB_CHUNK_CONCURRENCY = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_JOB_CHUNK_CONCURRENCY || "2",
+  10
+);
+const DEFAULT_GLOBAL_JOB_CONCURRENCY = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_GLOBAL_JOB_CONCURRENCY || "2",
+  10
+);
+const DEFAULT_CHUNK_SOFT_LIMIT = Number.parseInt(
+  process.env.AI_TRANSLATE_DEFAULT_CHUNK_SOFT_LIMIT || "12000",
+  10
+);
+const JOB_RESULT_TTL_MS = Number.parseInt(
+  process.env.AI_TRANSLATE_JOB_RESULT_TTL_MS || "3600000",
   10
 );
 const MAX_BODY_BYTES = Number.parseInt(
@@ -42,11 +70,17 @@ const DEFAULT_TRANSLATION_CONFIG = {
   right_code_api_key: "",
   right_code_model: "gpt-5.2",
   right_code_endpoint: "responses",
-  request_timeout_ms: 20000,
+  request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
   max_input_chars: 30000,
   fill_policy: "fill_empty_only",
   enable_cache: true,
   cache_ttl_ms: 1800000,
+  job_timeout_ms: DEFAULT_JOB_TIMEOUT_MS,
+  max_retries: DEFAULT_MAX_RETRIES,
+  retry_backoff_ms: DEFAULT_RETRY_BACKOFF_MS,
+  job_chunk_concurrency: DEFAULT_JOB_CHUNK_CONCURRENCY,
+  global_job_concurrency: DEFAULT_GLOBAL_JOB_CONCURRENCY,
+  chunk_soft_limit_chars: DEFAULT_CHUNK_SOFT_LIMIT,
 };
 
 function createAppError(code, message, extra = {}) {
@@ -81,6 +115,10 @@ let configRecordId = null;
 
 const translateCache = new Map();
 const rateBuckets = new Map();
+const translationJobs = new Map();
+const queuedJobIds = [];
+let activeJobCount = 0;
+let jobSequence = 0;
 
 setInterval(() => {
   const now = Date.now();
@@ -96,6 +134,17 @@ setInterval(() => {
       translateCache.delete(key);
     }
   }
+
+  // Cleanup completed jobs
+  for (const [jobId, job] of translationJobs) {
+    const shouldKeep =
+      !job ||
+      !job.finished_at ||
+      now - new Date(job.finished_at).getTime() <= JOB_RESULT_TTL_MS;
+    if (!shouldKeep) {
+      translationJobs.delete(jobId);
+    }
+  }
 }, 300000);
 
 function rateLimit(ip) {
@@ -107,6 +156,34 @@ function rateLimit(ip) {
   }
   bucket.count += 1;
   return bucket.count > RATE_LIMIT_MAX;
+}
+
+function createTranslationJobId() {
+  jobSequence = (jobSequence + 1) % 1679616; // 36^4
+  return `tr_job_${Date.now().toString(36)}_${jobSequence.toString(36).padStart(4, "0")}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function clampInt(raw, fallback, min, max) {
+  const value = Number.parseInt(`${raw || ""}`, 10);
+  if (!Number.isFinite(value)) return fallback;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function isTerminalJobStatus(status) {
+  return [
+    "succeeded",
+    "partial_success",
+    "failed",
+    "canceled",
+  ].includes(`${status || ""}`);
 }
 
 function sendJSON(res, status, data) {
@@ -198,27 +275,72 @@ function normalizeTranslationConfig(raw) {
   cfg.right_code_endpoint =
     cfg.right_code_endpoint === "chat_completions" ? "chat_completions" : "responses";
 
-  const timeout = Number.parseInt(`${cfg.request_timeout_ms || ""}`, 10);
-  cfg.request_timeout_ms =
-    Number.isFinite(timeout) && timeout >= 1000
-      ? timeout
-      : DEFAULT_TRANSLATION_CONFIG.request_timeout_ms;
+  cfg.request_timeout_ms = clampInt(
+    cfg.request_timeout_ms,
+    DEFAULT_TRANSLATION_CONFIG.request_timeout_ms,
+    5000,
+    600000
+  );
 
-  const maxInputChars = Number.parseInt(`${cfg.max_input_chars || ""}`, 10);
-  cfg.max_input_chars =
-    Number.isFinite(maxInputChars) && maxInputChars >= 100
-      ? maxInputChars
-      : DEFAULT_TRANSLATION_CONFIG.max_input_chars;
+  cfg.max_input_chars = clampInt(
+    cfg.max_input_chars,
+    DEFAULT_TRANSLATION_CONFIG.max_input_chars,
+    100,
+    300000
+  );
 
   cfg.fill_policy =
     cfg.fill_policy === "overwrite_target" ? "overwrite_target" : "fill_empty_only";
   cfg.enable_cache = cfg.enable_cache !== false;
 
-  const cacheTtl = Number.parseInt(`${cfg.cache_ttl_ms || ""}`, 10);
-  cfg.cache_ttl_ms =
-    Number.isFinite(cacheTtl) && cacheTtl >= 1000
-      ? cacheTtl
-      : DEFAULT_TRANSLATION_CONFIG.cache_ttl_ms;
+  cfg.cache_ttl_ms = clampInt(
+    cfg.cache_ttl_ms,
+    DEFAULT_TRANSLATION_CONFIG.cache_ttl_ms,
+    1000,
+    24 * 60 * 60 * 1000
+  );
+
+  cfg.job_timeout_ms = clampInt(
+    cfg.job_timeout_ms,
+    DEFAULT_TRANSLATION_CONFIG.job_timeout_ms,
+    10000,
+    30 * 60 * 1000
+  );
+
+  cfg.max_retries = clampInt(
+    cfg.max_retries,
+    DEFAULT_TRANSLATION_CONFIG.max_retries,
+    0,
+    5
+  );
+
+  cfg.retry_backoff_ms = clampInt(
+    cfg.retry_backoff_ms,
+    DEFAULT_TRANSLATION_CONFIG.retry_backoff_ms,
+    100,
+    10000
+  );
+
+  cfg.job_chunk_concurrency = clampInt(
+    cfg.job_chunk_concurrency,
+    DEFAULT_TRANSLATION_CONFIG.job_chunk_concurrency,
+    1,
+    6
+  );
+
+  cfg.global_job_concurrency = clampInt(
+    cfg.global_job_concurrency,
+    DEFAULT_TRANSLATION_CONFIG.global_job_concurrency,
+    1,
+    6
+  );
+
+  cfg.chunk_soft_limit_chars = clampInt(
+    cfg.chunk_soft_limit_chars,
+    DEFAULT_TRANSLATION_CONFIG.chunk_soft_limit_chars,
+    200,
+    cfg.max_input_chars
+  );
 
   return cfg;
 }
@@ -596,10 +718,101 @@ function buildTranslationPrompt({ sourceLang, targets, text }) {
   ].join("\n");
 }
 
-async function rightCodeRequest(config, prompt) {
-  const timeoutMs = config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS;
+function createFetchController({ timeoutMs, parentSignal, activeControllers }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutHandle = null;
+
+  const onAbort = () => {
+    controller.abort(parentSignal?.reason || createAppError("JOB_CANCELED", "translation job canceled"));
+  };
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      onAbort();
+    } else {
+      parentSignal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+
+  if (timeoutMs > 0) {
+    timeoutHandle = setTimeout(() => {
+      controller.abort(
+        createAppError("REQUEST_TIMEOUT", `translation request timeout (${timeoutMs}ms)`)
+      );
+    }, timeoutMs);
+  }
+
+  if (activeControllers) {
+    activeControllers.add(controller);
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (parentSignal) parentSignal.removeEventListener("abort", onAbort);
+      if (activeControllers) activeControllers.delete(controller);
+    },
+  };
+}
+
+function shouldRetryTranslationError(error) {
+  if (!error) return false;
+  if (error?.code === "JOB_CANCELED" || error?.code === "MODEL_STRUCTURE_ERROR") {
+    return false;
+  }
+  if (error?.code === "REQUEST_TIMEOUT") {
+    return true;
+  }
+  if (Number.isFinite(error?.http_status)) {
+    return error.http_status === 429 || error.http_status >= 500;
+  }
+  const message = `${error?.message || ""}`.toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("network") ||
+    message.includes("econnreset") ||
+    message.includes("socket hang up")
+  );
+}
+
+async function withRetry(task, { maxRetries = 0, backoffMs = 600, signal, onRetry } = {}) {
+  let attempt = 0;
+  while (true) {
+    if (signal?.aborted) {
+      throw signal.reason || createAppError("JOB_CANCELED", "translation job canceled");
+    }
+
+    try {
+      return await task(attempt);
+    } catch (error) {
+      if (signal?.aborted) {
+        throw signal.reason || createAppError("JOB_CANCELED", "translation job canceled");
+      }
+      if (attempt >= maxRetries || !shouldRetryTranslationError(error)) {
+        throw error;
+      }
+      attempt += 1;
+      if (typeof onRetry === "function") {
+        onRetry({ attempt, error });
+      }
+      const delay = Math.max(100, backoffMs) * attempt;
+      await sleep(delay);
+    }
+  }
+}
+
+async function rightCodeRequest(config, prompt, options = {}) {
+  const timeoutMs = Math.max(
+    5000,
+    options.timeoutMs || config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS
+  );
+  const { signal: parentSignal, activeControllers } = options;
+  const requestScope = createFetchController({
+    timeoutMs,
+    parentSignal,
+    activeControllers,
+  });
 
   try {
     if (!config.right_code_api_key) {
@@ -644,12 +857,24 @@ async function rightCodeRequest(config, prompt) {
         headers["x-api-key"] = config.right_code_api_key;
       }
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        signal: controller.signal,
-        headers,
-        body: JSON.stringify(body),
-      });
+      let res;
+      try {
+        res = await fetch(endpoint, {
+          method: "POST",
+          signal: requestScope.signal,
+          headers,
+          body: JSON.stringify(body),
+        });
+      } catch (error) {
+        if (requestScope.signal.aborted) {
+          const reason = requestScope.signal.reason;
+          if (reason?.code === "REQUEST_TIMEOUT") {
+            throw reason;
+          }
+          throw createAppError("JOB_CANCELED", "translation job canceled");
+        }
+        throw error;
+      }
 
       const rawText = await res.text();
       const payload = parseJSON(rawText);
@@ -685,20 +910,25 @@ async function rightCodeRequest(config, prompt) {
 
     throw lastError || createAppError("RIGHT_CODE_UNKNOWN_ERROR", "Right Code request failed");
   } finally {
-    clearTimeout(timeout);
+    requestScope.cleanup();
   }
 }
 
-async function freeTranslateOne(sourceLang, targetLang, text, timeoutMs) {
+async function freeTranslateOne(sourceLang, targetLang, text, timeoutMs, options = {}) {
   const langPair = `${encodeURIComponent(sourceLang)}|${encodeURIComponent(targetLang)}`;
   const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${langPair}`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const requestScope = createFetchController({
+    timeoutMs,
+    parentSignal: options.signal,
+    activeControllers: options.activeControllers,
+  });
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: requestScope.signal });
     if (!res.ok) {
-      throw new Error(`free translate failed: HTTP ${res.status}`);
+      throw createAppError("FREE_TRANSLATE_HTTP_ERROR", `free translate failed: HTTP ${res.status}`, {
+        http_status: res.status,
+      });
     }
     const data = await res.json();
     const translated = data?.responseData?.translatedText;
@@ -706,8 +936,17 @@ async function freeTranslateOne(sourceLang, targetLang, text, timeoutMs) {
       return translated;
     }
     return "";
+  } catch (error) {
+    if (requestScope.signal.aborted) {
+      const reason = requestScope.signal.reason;
+      if (reason?.code === "REQUEST_TIMEOUT") {
+        throw reason;
+      }
+      throw createAppError("JOB_CANCELED", "translation job canceled");
+    }
+    throw error;
   } finally {
-    clearTimeout(timeout);
+    requestScope.cleanup();
   }
 }
 
@@ -728,8 +967,11 @@ function buildTranslateCacheKey({
   ].join(CACHE_KEY_SEPARATOR);
 }
 
-async function translateByConfig(config, { sourceLang, targets, text }) {
-  const timeoutMs = config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS;
+async function translateByConfig(config, { sourceLang, targets, text }, options = {}) {
+  const timeoutMs = Math.max(
+    5000,
+    options.timeoutMs || config.request_timeout_ms || DEFAULT_REQUEST_TIMEOUT_MS
+  );
 
   if (!text || !text.trim()) {
     const empty = {};
@@ -773,7 +1015,7 @@ async function translateByConfig(config, { sourceLang, targets, text }) {
 
   if (config.engine === "free") {
     for (const target of targets) {
-      translations[target] = await freeTranslateOne(sourceLang, target, text, timeoutMs);
+      translations[target] = await freeTranslateOne(sourceLang, target, text, timeoutMs, options);
     }
   } else {
     if (config.ai_provider !== "right_code") {
@@ -781,7 +1023,7 @@ async function translateByConfig(config, { sourceLang, targets, text }) {
     }
 
     const prompt = buildTranslationPrompt({ sourceLang, targets, text });
-    const modelPayload = await rightCodeRequest(config, prompt);
+    const modelPayload = await rightCodeRequest(config, prompt, options);
     const modelText = extractResponseText(modelPayload);
     if (!modelText) {
       throw createAppError("MODEL_EMPTY_OUTPUT", "empty model output");
@@ -825,6 +1067,172 @@ async function translateByConfig(config, { sourceLang, targets, text }) {
   };
 }
 
+function splitLongToken(token, maxChars) {
+  if (!token || token.length <= maxChars) return [token];
+  const result = [];
+  let start = 0;
+  while (start < token.length) {
+    result.push(token.slice(start, start + maxChars));
+    start += maxChars;
+  }
+  return result;
+}
+
+function splitTextIntoChunks(text, maxChars, softLimitChars) {
+  if (!text || text.length <= maxChars) return [text];
+
+  const chunkLimit = Math.max(200, Math.min(maxChars, softLimitChars || maxChars));
+  const rawTokens = text
+    .split(/(\n{2,})/)
+    .filter((token) => token !== "");
+  const tokens = rawTokens.flatMap((token) => splitLongToken(token, maxChars));
+  const chunks = [];
+  let current = "";
+
+  const flushCurrent = () => {
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+  };
+
+  for (const token of tokens) {
+    if (!current) {
+      current = token;
+      continue;
+    }
+    const candidate = `${current}${token}`;
+    if (candidate.length <= chunkLimit || current.length < 200) {
+      current = candidate;
+      continue;
+    }
+    flushCurrent();
+    current = token;
+  }
+  flushCurrent();
+
+  return chunks.length > 0 ? chunks : [text];
+}
+
+function countFieldUnits(fields, targets, config) {
+  let totalUnits = 0;
+  for (const [, text] of fields) {
+    const normalized = typeof text === "string" ? text : `${text ?? ""}`;
+    if (!normalized.trim()) continue;
+    const chunks = splitTextIntoChunks(
+      normalized,
+      config.max_input_chars,
+      config.chunk_soft_limit_chars
+    );
+    totalUnits += chunks.length * targets.length;
+  }
+  return totalUnits;
+}
+
+async function runAsyncPool(total, concurrency, worker) {
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(total, concurrency || 1));
+  const runners = Array.from({ length: workerCount }).map(async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= total) return;
+      await worker(index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+async function translateFieldWithChunking(
+  config,
+  { sourceLang, targets, text, fieldName },
+  options = {}
+) {
+  const normalizedText = typeof text === "string" ? text : `${text ?? ""}`;
+  const chunks = splitTextIntoChunks(
+    normalizedText,
+    config.max_input_chars,
+    config.chunk_soft_limit_chars
+  );
+
+  const merged = {};
+  for (const target of targets) merged[target] = "";
+  let checks = {
+    json_parse: true,
+    has_all_targets: true,
+    no_source_lang: true,
+  };
+  let anyCached = false;
+  const chunkResults = new Array(chunks.length).fill(null);
+  const chunkConcurrency = Math.max(
+    1,
+    Math.min(chunks.length, config.job_chunk_concurrency || 1)
+  );
+  await runAsyncPool(chunks.length, chunkConcurrency, async (index) => {
+    if (options.signal?.aborted) {
+      throw options.signal.reason || createAppError("JOB_CANCELED", "translation job canceled");
+    }
+
+    const chunk = chunks[index];
+    const result = await withRetry(
+      () =>
+        translateByConfig(
+          config,
+          { sourceLang, targets, text: chunk },
+          {
+            signal: options.signal,
+            activeControllers: options.activeControllers,
+            timeoutMs: options.timeoutMs,
+          }
+        ),
+      {
+        maxRetries: config.max_retries,
+        backoffMs: config.retry_backoff_ms,
+        signal: options.signal,
+        onRetry: ({ attempt, error }) => {
+          if (typeof options.onRetry === "function") {
+            options.onRetry({ attempt, error, fieldName, chunkIndex: index });
+          }
+        },
+      }
+    );
+
+    anyCached = anyCached || result.cached;
+    checks = {
+      json_parse: checks.json_parse && result.checks?.json_parse !== false,
+      has_all_targets:
+        checks.has_all_targets && result.checks?.has_all_targets !== false,
+      no_source_lang:
+        checks.no_source_lang && result.checks?.no_source_lang !== false,
+    };
+    chunkResults[index] = result.translations;
+
+    if (typeof options.onChunkDone === "function") {
+      options.onChunkDone({
+        fieldName,
+        chunkIndex: index,
+        chunkCount: chunks.length,
+        doneUnitsDelta: targets.length,
+        currentTarget: targets.join(","),
+      });
+    }
+  });
+
+  for (let index = 0; index < chunkResults.length; index += 1) {
+    const result = chunkResults[index] || {};
+    for (const target of targets) {
+      merged[target] = `${merged[target] || ""}${result?.[target] || ""}`;
+    }
+  }
+
+  return {
+    translations: merged,
+    checks,
+    cached: anyCached,
+    chunk_count: chunks.length,
+  };
+}
+
 function normalizeFields(rawFields) {
   if (!rawFields || typeof rawFields !== "object" || Array.isArray(rawFields)) {
     throw new Error("fields must be an object");
@@ -837,6 +1245,453 @@ function normalizeFields(rawFields) {
     throw new Error("fields is empty");
   }
   return pairs;
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function getElapsedMs(startedAt, finishedAt) {
+  if (!startedAt) return 0;
+  const start = new Date(startedAt).getTime();
+  if (!Number.isFinite(start)) return 0;
+  const end = finishedAt
+    ? new Date(finishedAt).getTime()
+    : Date.now();
+  if (!Number.isFinite(end)) return 0;
+  return Math.max(0, end - start);
+}
+
+function computePercent(doneUnits, totalUnits) {
+  if (!totalUnits || totalUnits <= 0) {
+    return doneUnits > 0 ? 100 : 0;
+  }
+  return Math.min(100, Math.max(0, Math.round((doneUnits / totalUnits) * 100)));
+}
+
+function createEmptyLangMap(targets) {
+  const value = {};
+  for (const target of targets) value[target] = "";
+  return value;
+}
+
+function getActiveGlobalConcurrency() {
+  let limit = DEFAULT_GLOBAL_JOB_CONCURRENCY;
+  for (const job of translationJobs.values()) {
+    if (!job) continue;
+    if (["queued", "running", "canceling"].includes(job.status)) {
+      const cfgLimit = Number.parseInt(`${job.config_snapshot?.global_job_concurrency || ""}`, 10);
+      if (Number.isFinite(cfgLimit) && cfgLimit > limit) {
+        limit = cfgLimit;
+      }
+    }
+  }
+  return Math.max(1, limit);
+}
+
+function markJobFinished(job, status, error = null) {
+  const finishedAt = nowISO();
+  job.status = status;
+  job.finished_at = finishedAt;
+  job.updated_at = finishedAt;
+  job.progress.current_stage = status;
+  if (status === "succeeded" || status === "partial_success") {
+    job.progress.done_units = job.progress.total_units;
+    job.progress.percent = 100;
+  } else {
+    job.progress.percent = computePercent(
+      job.progress.done_units,
+      job.progress.total_units
+    );
+  }
+  job.error = error
+    ? {
+        code: error?.code || "UNKNOWN",
+        message: error?.message || `${error}`,
+      }
+    : null;
+}
+
+function serializeJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    scene: job.scene,
+    source_lang: job.source_lang,
+    targets: job.targets,
+    status: job.status,
+    progress: {
+      total_units: job.progress.total_units,
+      done_units: job.progress.done_units,
+      percent: job.progress.percent,
+      current_stage: job.progress.current_stage,
+      current_field: job.progress.current_field,
+      current_target: job.progress.current_target,
+    },
+    timing: {
+      created_at: job.created_at,
+      started_at: job.started_at,
+      finished_at: job.finished_at,
+      elapsed_ms: getElapsedMs(job.started_at, job.finished_at),
+    },
+    partial_result: job.partial_result,
+    error: job.error,
+    errors: job.errors,
+    meta: {
+      engine: job.meta.engine,
+      provider: job.meta.provider,
+      endpoint: job.meta.endpoint,
+      model: job.meta.model,
+      retry_count: job.meta.retry_count,
+      chunk_failures: job.meta.chunk_failures,
+    },
+  };
+}
+
+function requestCancelJob(job) {
+  if (!job || isTerminalJobStatus(job.status)) {
+    return false;
+  }
+  job.cancel_requested = true;
+  job.updated_at = nowISO();
+
+  if (job.status === "queued") {
+    markJobFinished(job, "canceled", createAppError("JOB_CANCELED", "translation job canceled"));
+    return true;
+  }
+
+  if (job.status === "running") {
+    job.status = "canceling";
+    job.progress.current_stage = "canceling";
+  }
+
+  const reason = createAppError("JOB_CANCELED", "translation job canceled");
+  if (!job.abort_controller.signal.aborted) {
+    job.abort_controller.abort(reason);
+  }
+  for (const controller of job.active_controllers) {
+    try {
+      controller.abort(reason);
+    } catch {
+      // ignore
+    }
+  }
+  return true;
+}
+
+async function executeTranslationJob(job) {
+  if (!job || isTerminalJobStatus(job.status)) return;
+  if (job.cancel_requested || job.abort_controller.signal.aborted) {
+    markJobFinished(
+      job,
+      "canceled",
+      createAppError("JOB_CANCELED", "translation job canceled")
+    );
+    return;
+  }
+
+  const startedAt = nowISO();
+  job.started_at = startedAt;
+  job.updated_at = startedAt;
+  job.status = "running";
+  job.progress.current_stage = "running";
+
+  const jobTimeoutHandle = setTimeout(() => {
+    if (isTerminalJobStatus(job.status)) return;
+    const timeoutError = createAppError(
+      "JOB_TIMEOUT",
+      `translation job timeout (${job.config_snapshot.job_timeout_ms}ms)`
+    );
+    job.cancel_requested = true;
+    job.status = "canceling";
+    job.progress.current_stage = "canceling";
+    job.abort_controller.abort(timeoutError);
+  }, job.config_snapshot.job_timeout_ms);
+
+  try {
+    const fields = job.fields;
+    const translations = {};
+    for (const [fieldName, text] of fields) {
+      if (job.abort_controller.signal.aborted) {
+        throw job.abort_controller.signal.reason;
+      }
+
+      const normalizedText = typeof text === "string" ? text : `${text ?? ""}`;
+      if (!normalizedText.trim()) {
+        translations[fieldName] = createEmptyLangMap(job.targets);
+        job.partial_result[fieldName] = translations[fieldName];
+        continue;
+      }
+
+      try {
+        const result = await translateFieldWithChunking(
+          job.config_snapshot,
+          {
+            sourceLang: job.source_lang,
+            targets: job.targets,
+            text: normalizedText,
+            fieldName,
+          },
+          {
+            signal: job.abort_controller.signal,
+            activeControllers: job.active_controllers,
+            timeoutMs: job.config_snapshot.request_timeout_ms,
+            onRetry: () => {
+              job.meta.retry_count += 1;
+              job.updated_at = nowISO();
+            },
+            onChunkDone: ({ doneUnitsDelta, currentTarget }) => {
+              job.progress.done_units += doneUnitsDelta;
+              job.progress.percent = computePercent(
+                job.progress.done_units,
+                job.progress.total_units
+              );
+              job.progress.current_stage = "translating";
+              job.progress.current_field = fieldName;
+              job.progress.current_target = currentTarget;
+              job.updated_at = nowISO();
+            },
+          }
+        );
+
+        translations[fieldName] = result.translations;
+        job.partial_result[fieldName] = result.translations;
+      } catch (error) {
+        if (job.abort_controller.signal.aborted || error?.code === "JOB_CANCELED") {
+          throw error;
+        }
+        job.meta.chunk_failures += 1;
+        job.errors.push({
+          field: fieldName,
+          code: error?.code || "FIELD_TRANSLATE_ERROR",
+          message: error?.message || `${error}`,
+        });
+        const empty = createEmptyLangMap(job.targets);
+        translations[fieldName] = empty;
+        job.partial_result[fieldName] = empty;
+      }
+    }
+
+    job.translations = translations;
+    if (job.errors.length > 0) {
+      markJobFinished(job, "partial_success");
+    } else {
+      markJobFinished(job, "succeeded");
+    }
+  } catch (error) {
+    if (error?.code === "JOB_TIMEOUT") {
+      markJobFinished(job, "failed", error);
+      return;
+    }
+    if (job.abort_controller.signal.aborted || error?.code === "JOB_CANCELED") {
+      markJobFinished(job, "canceled", error || job.abort_controller.signal.reason);
+      return;
+    }
+    if (Object.keys(job.partial_result).length > 0) {
+      job.errors.push({
+        field: job.progress.current_field || "unknown",
+        code: error?.code || "JOB_PARTIAL_FAILURE",
+        message: error?.message || `${error}`,
+      });
+      markJobFinished(job, "partial_success", error);
+      return;
+    }
+    markJobFinished(job, "failed", error);
+  } finally {
+    clearTimeout(jobTimeoutHandle);
+  }
+}
+
+function pumpTranslationJobs() {
+  const limit = getActiveGlobalConcurrency();
+  while (activeJobCount < limit && queuedJobIds.length > 0) {
+    const jobId = queuedJobIds.shift();
+    if (!jobId) continue;
+    const job = translationJobs.get(jobId);
+    if (!job || job.status !== "queued") continue;
+    activeJobCount += 1;
+    executeTranslationJob(job)
+      .catch((error) => {
+        logger.error("translation job execute failed:", error?.message || error);
+        if (!isTerminalJobStatus(job.status)) {
+          markJobFinished(job, "failed", error);
+        }
+      })
+      .finally(() => {
+        activeJobCount = Math.max(0, activeJobCount - 1);
+        pumpTranslationJobs();
+      });
+  }
+}
+
+function createTranslationJob({ scene, sourceLang, targets, fields, config }) {
+  const createdAt = nowISO();
+  const totalUnits = countFieldUnits(fields, targets, config);
+  const job = {
+    id: createTranslationJobId(),
+    scene: scene || "admin",
+    source_lang: sourceLang,
+    targets,
+    fields,
+    config_snapshot: config,
+    status: "queued",
+    created_at: createdAt,
+    started_at: null,
+    finished_at: null,
+    updated_at: createdAt,
+    cancel_requested: false,
+    abort_controller: new AbortController(),
+    active_controllers: new Set(),
+    progress: {
+      total_units: totalUnits,
+      done_units: 0,
+      percent: 0,
+      current_stage: "queued",
+      current_field: "",
+      current_target: "",
+    },
+    partial_result: {},
+    translations: {},
+    errors: [],
+    error: null,
+    meta: {
+      engine: config.engine,
+      provider: config.engine === "ai" ? config.ai_provider : "free",
+      endpoint: config.right_code_endpoint,
+      model: config.right_code_model,
+      retry_count: 0,
+      chunk_failures: 0,
+    },
+  };
+  translationJobs.set(job.id, job);
+  queuedJobIds.push(job.id);
+  pumpTranslationJobs();
+  return job;
+}
+
+async function handleCreateTranslateJob(req, res, authHeader) {
+  const rawBody = await readBody(req);
+  const payload = parseJSON(rawBody);
+  if (!payload) {
+    return sendJSON(res, 400, { ok: false, error: "invalid JSON body" });
+  }
+
+  const sourceLang = normalizeLang(payload.source_lang);
+  if (!sourceLang) {
+    return sendJSON(res, 400, { ok: false, error: "invalid source_lang" });
+  }
+
+  const targets = normalizeTargets(sourceLang, payload.targets);
+  if (targets.length === 0) {
+    return sendJSON(res, 400, { ok: false, error: "no target languages" });
+  }
+
+  let fields;
+  try {
+    fields = normalizeFields(payload.fields);
+  } catch (error) {
+    return sendJSON(res, 400, { ok: false, error: error?.message || "invalid fields" });
+  }
+
+  const { config } = await loadTranslationConfig(authHeader);
+  if (!config.enabled) {
+    return sendJSON(res, 503, { ok: false, error: "translation is disabled" });
+  }
+
+  const job = createTranslationJob({
+    scene: `${payload.scene || "admin"}`.slice(0, 120),
+    sourceLang,
+    targets,
+    fields,
+    config,
+  });
+
+  return sendJSON(res, 200, {
+    ok: true,
+    job_id: job.id,
+    status: job.status,
+    progress: {
+      total_units: job.progress.total_units,
+      done_units: job.progress.done_units,
+      percent: job.progress.percent,
+    },
+  });
+}
+
+function parseJobPath(path) {
+  const baseMatch = path.match(/^\/admin\/translate\/jobs\/([^/]+)$/);
+  if (baseMatch) {
+    return {
+      jobId: decodeURIComponent(baseMatch[1]),
+      action: "status",
+    };
+  }
+  const actionMatch = path.match(/^\/admin\/translate\/jobs\/([^/]+)\/(cancel|result)$/);
+  if (actionMatch) {
+    return {
+      jobId: decodeURIComponent(actionMatch[1]),
+      action: actionMatch[2],
+    };
+  }
+  return null;
+}
+
+async function handleGetTranslateJob(res, jobId) {
+  const job = translationJobs.get(jobId);
+  if (!job) {
+    return sendJSON(res, 404, { ok: false, error: "job not found" });
+  }
+  return sendJSON(res, 200, {
+    ok: true,
+    job: serializeJob(job),
+  });
+}
+
+async function handleCancelTranslateJob(res, jobId) {
+  const job = translationJobs.get(jobId);
+  if (!job) {
+    return sendJSON(res, 404, { ok: false, error: "job not found" });
+  }
+  requestCancelJob(job);
+  return sendJSON(res, 200, {
+    ok: true,
+    job_id: job.id,
+    status: job.status,
+  });
+}
+
+async function handleGetTranslateJobResult(res, jobId) {
+  const job = translationJobs.get(jobId);
+  if (!job) {
+    return sendJSON(res, 404, { ok: false, error: "job not found" });
+  }
+
+  if (!isTerminalJobStatus(job.status)) {
+    return sendJSON(res, 409, {
+      ok: false,
+      error: "job is not completed",
+      status: job.status,
+      job: serializeJob(job),
+    });
+  }
+
+  return sendJSON(res, 200, {
+    ok: job.status === "succeeded" || job.status === "partial_success",
+    status: job.status,
+    translations: job.translations,
+    partial_result: job.partial_result,
+    errors: job.errors,
+    error: job.error,
+    meta: {
+      engine: job.meta.engine,
+      provider: job.meta.provider,
+      endpoint: job.meta.endpoint,
+      model: job.meta.model,
+      duration_ms: getElapsedMs(job.started_at, job.finished_at),
+      retry_count: job.meta.retry_count,
+      chunk_failures: job.meta.chunk_failures,
+    },
+  });
 }
 
 async function handleTranslate(req, res, authHeader) {
@@ -867,11 +1722,16 @@ async function handleTranslate(req, res, authHeader) {
   let anyCached = false;
 
   for (const [fieldName, text] of fields) {
-    const result = await translateByConfig(config, {
-      sourceLang,
-      targets,
-      text,
-    });
+    const result = await translateFieldWithChunking(
+      config,
+      {
+        sourceLang,
+        targets,
+        text,
+        fieldName,
+      },
+      {}
+    );
     if (result.cached) anyCached = true;
     translations[fieldName] = result.translations;
   }
@@ -1002,6 +1862,23 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    if (req.method === "POST" && path === "/admin/translate/jobs") {
+      return await handleCreateTranslateJob(req, res, authHeader);
+    }
+    const jobRoute = parseJobPath(path);
+    if (jobRoute) {
+      if (req.method === "GET" && jobRoute.action === "status") {
+        return await handleGetTranslateJob(res, jobRoute.jobId);
+      }
+      if (req.method === "POST" && jobRoute.action === "cancel") {
+        return await handleCancelTranslateJob(res, jobRoute.jobId);
+      }
+      if (req.method === "GET" && jobRoute.action === "result") {
+        return await handleGetTranslateJobResult(res, jobRoute.jobId);
+      }
+      return sendJSON(res, 405, { ok: false, error: "method not allowed" });
+    }
+
     if (req.method === "POST" && path === "/admin/translate") {
       return await handleTranslate(req, res, authHeader);
     }

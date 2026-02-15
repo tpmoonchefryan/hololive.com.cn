@@ -27,6 +27,7 @@ import ContentListSurface from "../../components/admin/content/ContentListSurfac
 import ContentDraggableRow from "../../components/admin/content/ContentDraggableRow";
 import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
 import ContentIconActionButton from "../../components/admin/content/ContentIconActionButton";
+import TranslationProgressModal from "../../components/admin/content/TranslationProgressModal";
 
 /**
  * Server Info Fields Management Page
@@ -37,7 +38,13 @@ const logger = createAppLogger("ServerInfoFields");
 export default function ServerInfoFields() {
   const { t } = useTranslation();
   const { notify, confirm } = useUIFeedback();
-  const { translating, translateFields } = useAdminContentTranslation();
+  const {
+    translating,
+    translationJob,
+    translateFields,
+    cancelTranslationJob,
+    closeTranslationProgress,
+  } = useAdminContentTranslation();
   const languageOptions = useTriLanguageOptions();
 
   const [fields, setFields] = useState([]);
@@ -152,8 +159,17 @@ export default function ServerInfoFields() {
         ...prev,
         ...result.fields,
       }));
-      notify(t("admin.serverInfoFields.toast.translateSuccess"), "success");
+      notify(
+        result.partial
+          ? t("admin.translationJob.toast.partial")
+          : t("admin.serverInfoFields.toast.translateSuccess"),
+        result.partial ? "warning" : "success"
+      );
     } catch (error) {
+      if (error?.code === "TRANSLATION_CANCELED") {
+        notify(t("admin.translationJob.toast.canceled"), "warning");
+        return;
+      }
       logger.error("Failed to translate server info field:", error);
       notify(error?.message || t("admin.serverInfoFields.toast.translateError"), "error");
     }
@@ -416,6 +432,11 @@ export default function ServerInfoFields() {
           })}
         </ContentListSurface>
       )}
+      <TranslationProgressModal
+        job={translationJob}
+        onCancel={cancelTranslationJob}
+        onClose={closeTranslationProgress}
+      />
     </div>
   );
 }

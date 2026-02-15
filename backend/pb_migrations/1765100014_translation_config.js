@@ -214,7 +214,7 @@ migrate((app) => {
             "right_code_api_key": "",
             "right_code_model": "gpt-5.2",
             "right_code_endpoint": "responses",
-            "request_timeout_ms": 20000,
+            "request_timeout_ms": 120000,
             "max_input_chars": 30000,
             "fill_policy": "fill_empty_only",
             "enable_cache": true,

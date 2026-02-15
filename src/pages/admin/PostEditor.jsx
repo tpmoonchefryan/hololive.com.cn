@@ -20,6 +20,7 @@ import ContentFieldLabel from "../../components/admin/content/ContentFieldLabel"
 import ContentTextInput from "../../components/admin/content/ContentTextInput";
 import ContentSelectInput from "../../components/admin/content/ContentSelectInput";
 import ContentCheckboxInput from "../../components/admin/content/ContentCheckboxInput";
+import TranslationProgressModal from "../../components/admin/content/TranslationProgressModal";
 
 /**
  * 文章编辑器组件（支持三语言）
@@ -33,7 +34,13 @@ export default function PostEditor() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { notify } = useUIFeedback();
-  const { translating, translateFields } = useAdminContentTranslation();
+  const {
+    translating,
+    translationJob,
+    translateFields,
+    cancelTranslationJob,
+    closeTranslationProgress,
+  } = useAdminContentTranslation();
   const isEditMode = !!id;
 
   // 语言选项
@@ -139,7 +146,6 @@ export default function PostEditor() {
   // 一键智能翻译
   const handleAutoTranslate = async () => {
     try {
-      notify(t("admin.postEditor.toast.connectTranslate"), "info");
       const result = await translateFields({
         scene: "post_editor",
         fields: [
@@ -156,9 +162,18 @@ export default function PostEditor() {
           ...prev,
           ...result.fields,
         }));
-        notify(t("admin.postEditor.toast.translateSuccess"), "success");
+        notify(
+          result.partial
+            ? t("admin.translationJob.toast.partial")
+            : t("admin.postEditor.toast.translateSuccess"),
+          result.partial ? "warning" : "success"
+        );
       }
     } catch (err) {
+      if (err?.code === "TRANSLATION_CANCELED") {
+        notify(t("admin.translationJob.toast.canceled"), "warning");
+        return;
+      }
       logger.error("Translation error:", err);
       notify(t("admin.postEditor.toast.translateError"), "error");
     }
@@ -479,6 +494,11 @@ export default function PostEditor() {
           )}
         </div>
       )}
+      <TranslationProgressModal
+        job={translationJob}
+        onCancel={cancelTranslationJob}
+        onClose={closeTranslationProgress}
+      />
     </div>
   );
 }
