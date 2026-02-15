@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:migrations": "node scripts/check_pb_migrations.mjs",
     "check:bundle": "node scripts/check_bundle_budget.mjs",
     "lint": "eslint src backend --max-warnings 0",
     "lint:fix": "eslint src backend --fix",
     "audit:prod": "npm audit --omit=dev --registry=https://registry.npmjs.org",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "new:migration": "node scripts/new_pb_migration.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",

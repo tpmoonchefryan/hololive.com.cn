@@ -12,10 +12,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Optimization: Use system installed Node.js to avoid slow downloads
       - name: Check Node.js Version
         run: node -v && npm -v
+
+      - name: Check PocketBase Migrations Governance
+        run: npm run check:migrations
+        env:
+          MIGRATION_CHECK_BASE_SHA: ${{ github.event.before }}
+          MIGRATION_CHECK_HEAD_SHA: ${{ github.sha }}
 
       - name: Install Dependencies (with retry)
         run: |
