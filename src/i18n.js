@@ -480,7 +480,7 @@ const resources = {
         slugLabel: "URL 标识 (Slug)",
         slugHint: "用于生成文章 URL，留空将自动根据中文标题生成。",
         toast: {
-          connectTranslate: "正在连接免费翻译接口...",
+          connectTranslate: "正在连接翻译服务...",
           noContent: "未检测到需要翻译的内容，请先填写至少一个语言的字段。",
           translateSuccess: "翻译完成！",
           translateError: "翻译失败，请稍后重试。",
@@ -904,8 +904,8 @@ const resources = {
           edit: "编辑分段",
         },
         buttons: {
-          translate: "一键智能翻译 (免费版)",
-          translating: "正在连接免费翻译接口...",
+          translate: "一键翻译",
+          translating: "正在连接翻译服务...",
           save: "保存",
           add: "添加按钮",
           remove: "移除",
@@ -2017,8 +2017,8 @@ const resources = {
             edit: "Edit Section",
           },
           buttons: {
-            translate: "Auto Translate (Free)",
-            translating: "Connecting...",
+            translate: "Auto Translate",
+            translating: "Connecting to translation service...",
             save: "Save",
             add: "Add Button",
             remove: "Remove",
@@ -3153,8 +3153,8 @@ const resources = {
         edit: "セクション編集",
       },
       buttons: {
-        translate: "自動翻訳 (無料)",
-        translating: "接続中...",
+        translate: "自動翻訳",
+        translating: "翻訳サービスに接続中...",
         save: "保存",
         add: "ボタン追加",
         remove: "削除",
