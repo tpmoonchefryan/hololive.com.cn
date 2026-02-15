@@ -1096,169 +1096,63 @@ async function translateByConfig(config, { sourceLang, targets, text }, options 
   };
 }
 
-function splitLongToken(token, maxChars) {
-  if (!token || token.length <= maxChars) return [token];
-  const result = [];
-  let start = 0;
-  while (start < token.length) {
-    result.push(token.slice(start, start + maxChars));
-    start += maxChars;
-  }
-  return result;
-}
-
-function splitTextIntoChunks(text, maxChars, softLimitChars) {
-  if (!text || text.length <= maxChars) return [text];
-
-  const chunkLimit = Math.max(200, Math.min(maxChars, softLimitChars || maxChars));
-  const rawTokens = text
-    .split(/(\n{2,})/)
-    .filter((token) => token !== "");
-  const tokens = rawTokens.flatMap((token) => splitLongToken(token, maxChars));
-  const chunks = [];
-  let current = "";
-
-  const flushCurrent = () => {
-    if (current) {
-      chunks.push(current);
-      current = "";
-    }
-  };
-
-  for (const token of tokens) {
-    if (!current) {
-      current = token;
-      continue;
-    }
-    const candidate = `${current}${token}`;
-    if (candidate.length <= chunkLimit || current.length < 200) {
-      current = candidate;
-      continue;
-    }
-    flushCurrent();
-    current = token;
-  }
-  flushCurrent();
-
-  return chunks.length > 0 ? chunks : [text];
-}
-
-function countFieldUnits(fields, targets, config) {
+function countFieldUnits(fields, targets) {
   let totalUnits = 0;
   for (const [, text] of fields) {
     const normalized = typeof text === "string" ? text : `${text ?? ""}`;
     if (!normalized.trim()) continue;
-    const chunks = splitTextIntoChunks(
-      normalized,
-      config.max_input_chars,
-      config.chunk_soft_limit_chars
-    );
-    totalUnits += chunks.length * targets.length;
+    totalUnits += targets.length;
   }
   return totalUnits;
 }
 
-async function runAsyncPool(total, concurrency, worker) {
-  let cursor = 0;
-  const workerCount = Math.max(1, Math.min(total, concurrency || 1));
-  const runners = Array.from({ length: workerCount }).map(async () => {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= total) return;
-      await worker(index);
-    }
-  });
-  await Promise.all(runners);
-}
-
-async function translateFieldWithChunking(
+async function translateFieldAsSingleRequest(
   config,
   { sourceLang, targets, text, fieldName },
   options = {}
 ) {
   const normalizedText = typeof text === "string" ? text : `${text ?? ""}`;
-  const chunks = splitTextIntoChunks(
-    normalizedText,
-    config.max_input_chars,
-    config.chunk_soft_limit_chars
+  if (options.signal?.aborted) {
+    throw options.signal.reason || createAppError("JOB_CANCELED", "translation job canceled");
+  }
+  const result = await withRetry(
+    () =>
+      translateByConfig(
+        config,
+        { sourceLang, targets, text: normalizedText },
+        {
+          signal: options.signal,
+          activeControllers: options.activeControllers,
+          timeoutMs: options.timeoutMs,
+        }
+      ),
+    {
+      maxRetries: config.max_retries,
+      backoffMs: config.retry_backoff_ms,
+      signal: options.signal,
+      onRetry: ({ attempt, error }) => {
+        if (typeof options.onRetry === "function") {
+          options.onRetry({ attempt, error, fieldName, chunkIndex: 0 });
+        }
+      },
+    }
   );
 
-  const merged = {};
-  for (const target of targets) merged[target] = "";
-  let checks = {
-    json_parse: true,
-    has_all_targets: true,
-    no_source_lang: true,
-  };
-  let anyCached = false;
-  const chunkResults = new Array(chunks.length).fill(null);
-  const chunkConcurrency = Math.max(
-    1,
-    Math.min(chunks.length, config.job_chunk_concurrency || 1)
-  );
-  await runAsyncPool(chunks.length, chunkConcurrency, async (index) => {
-    if (options.signal?.aborted) {
-      throw options.signal.reason || createAppError("JOB_CANCELED", "translation job canceled");
-    }
-
-    const chunk = chunks[index];
-    const result = await withRetry(
-      () =>
-        translateByConfig(
-          config,
-          { sourceLang, targets, text: chunk },
-          {
-            signal: options.signal,
-            activeControllers: options.activeControllers,
-            timeoutMs: options.timeoutMs,
-          }
-        ),
-      {
-        maxRetries: config.max_retries,
-        backoffMs: config.retry_backoff_ms,
-        signal: options.signal,
-        onRetry: ({ attempt, error }) => {
-          if (typeof options.onRetry === "function") {
-            options.onRetry({ attempt, error, fieldName, chunkIndex: index });
-          }
-        },
-      }
-    );
-
-    anyCached = anyCached || result.cached;
-    checks = {
-      json_parse: checks.json_parse && result.checks?.json_parse !== false,
-      has_all_targets:
-        checks.has_all_targets && result.checks?.has_all_targets !== false,
-      no_source_lang:
-        checks.no_source_lang && result.checks?.no_source_lang !== false,
-    };
-    chunkResults[index] = result.translations;
-
-    if (typeof options.onChunkDone === "function") {
-      options.onChunkDone({
-        fieldName,
-        chunkIndex: index,
-        chunkCount: chunks.length,
-        doneUnitsDelta: targets.length,
-        currentTarget: targets.join(","),
-      });
-    }
-  });
-
-  for (let index = 0; index < chunkResults.length; index += 1) {
-    const result = chunkResults[index] || {};
-    for (const target of targets) {
-      merged[target] = `${merged[target] || ""}${result?.[target] || ""}`;
-    }
+  if (typeof options.onChunkDone === "function") {
+    options.onChunkDone({
+      fieldName,
+      chunkIndex: 0,
+      chunkCount: 1,
+      doneUnitsDelta: targets.length,
+      currentTarget: targets.join(","),
+    });
   }
 
   return {
-    translations: merged,
-    checks,
-    cached: anyCached,
-    chunk_count: chunks.length,
+    translations: result.translations,
+    checks: result.checks,
+    cached: result.cached,
+    chunk_count: 1,
   };
 }
 
@@ -1453,7 +1347,7 @@ async function executeTranslationJob(job) {
       }
 
       try {
-        const result = await translateFieldWithChunking(
+        const result = await translateFieldAsSingleRequest(
           job.config_snapshot,
           {
             sourceLang: job.source_lang,
@@ -1555,7 +1449,7 @@ function pumpTranslationJobs() {
 
 function createTranslationJob({ scene, sourceLang, targets, fields, config }) {
   const createdAt = nowISO();
-  const totalUnits = countFieldUnits(fields, targets, config);
+  const totalUnits = countFieldUnits(fields, targets);
   const job = {
     id: createTranslationJobId(),
     scene: scene || "admin",
@@ -1751,7 +1645,7 @@ async function handleTranslate(req, res, authHeader) {
   let anyCached = false;
 
   for (const [fieldName, text] of fields) {
-    const result = await translateFieldWithChunking(
+    const result = await translateFieldAsSingleRequest(
       config,
       {
         sourceLang,
