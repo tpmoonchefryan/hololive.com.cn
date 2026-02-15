@@ -228,6 +228,21 @@ export default function AnnouncementPage() {
         notify(t("admin.translationJob.toast.canceled"), "warning");
         return;
       }
+      if (error?.code === "TRANSLATION_PRECHECK_TOO_LONG") {
+        const details = Array.isArray(error?.details)
+          ? error.details
+            .map((item) => `${item.field}[${item.source_lang}] ${item.length}`)
+            .join("; ")
+          : "";
+        notify(
+          t("admin.translationJob.toast.precheckTooLong", {
+            max: error?.max_input_chars || "",
+            details,
+          }),
+          "warning"
+        );
+        return;
+      }
       logger.error("Failed to auto-translate announcement:", error);
       const errorMsg =
         error?.response?.message ||

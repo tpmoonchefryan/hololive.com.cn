@@ -5,10 +5,12 @@ const logger = createAppLogger("AdminTranslateAPI");
 const API_BASE = "/ai-api/admin/translate";
 const SUPPORTED_LANGS = ["zh", "en", "ja"];
 const DEFAULT_FILL_POLICY = "fill_empty_only";
+const DEFAULT_MAX_INPUT_CHARS = 120000;
 const TRANSLATION_CONFIG_CACHE_TTL_MS = 15000;
 
 let translationConfigCache = {
   fillPolicy: DEFAULT_FILL_POLICY,
+  maxInputChars: DEFAULT_MAX_INPUT_CHARS,
   expiresAt: 0,
 };
 
@@ -46,6 +48,14 @@ function normalizeFillPolicy(fillPolicy) {
     : DEFAULT_FILL_POLICY;
 }
 
+function normalizeMaxInputChars(value) {
+  const parsed = Number.parseInt(`${value || ""}`, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_MAX_INPUT_CHARS;
+  if (parsed < 100) return 100;
+  if (parsed > 500000) return 500000;
+  return parsed;
+}
+
 async function callTranslateApiWithMethod(method, path, payload = null, { allowFailedOk = false } = {}) {
   const authHeader = ensureAuthHeader();
   const response = await fetch(path, {
@@ -72,10 +82,13 @@ async function callTranslateApiWithMethod(method, path, payload = null, { allowF
   return data;
 }
 
-export async function getAdminTranslationFillPolicy({ force = false } = {}) {
+export async function getAdminTranslationRuntimeConfig({ force = false } = {}) {
   const now = Date.now();
   if (!force && now < translationConfigCache.expiresAt) {
-    return translationConfigCache.fillPolicy;
+    return {
+      fillPolicy: translationConfigCache.fillPolicy,
+      maxInputChars: translationConfigCache.maxInputChars,
+    };
   }
 
   try {
@@ -84,19 +97,33 @@ export async function getAdminTranslationFillPolicy({ force = false } = {}) {
     });
     const record = result?.items?.[0];
     const fillPolicy = normalizeFillPolicy(record?.fill_policy);
+    const maxInputChars = normalizeMaxInputChars(record?.max_input_chars);
     translationConfigCache = {
       fillPolicy,
+      maxInputChars,
       expiresAt: now + TRANSLATION_CONFIG_CACHE_TTL_MS,
     };
-    return fillPolicy;
+    return {
+      fillPolicy,
+      maxInputChars,
+    };
   } catch {
-    logger.warn("Failed to load translation fill_policy, fallback to fill_empty_only.");
+    logger.warn("Failed to load translation runtime config, fallback to defaults.");
     translationConfigCache = {
       fillPolicy: DEFAULT_FILL_POLICY,
+      maxInputChars: DEFAULT_MAX_INPUT_CHARS,
       expiresAt: now + TRANSLATION_CONFIG_CACHE_TTL_MS,
     };
-    return DEFAULT_FILL_POLICY;
+    return {
+      fillPolicy: DEFAULT_FILL_POLICY,
+      maxInputChars: DEFAULT_MAX_INPUT_CHARS,
+    };
   }
+}
+
+export async function getAdminTranslationFillPolicy({ force = false } = {}) {
+  const cfg = await getAdminTranslationRuntimeConfig({ force });
+  return cfg.fillPolicy;
 }
 
 export async function testAdminTranslationConfig({

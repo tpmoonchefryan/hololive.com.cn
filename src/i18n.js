@@ -220,6 +220,7 @@ const resources = {
         toast: {
           canceled: "翻译任务已取消",
           partial: "翻译完成，部分失败",
+          precheckTooLong: "以下字段超过最大长度 {{max}}：{{details}}",
         },
       },
       dashboard: {
@@ -1375,6 +1376,7 @@ const resources = {
         toast: {
           canceled: "Translation was canceled",
           partial: "Translation completed with partial failures",
+          precheckTooLong: "Fields exceed max length {{max}}: {{details}}",
         },
       },
       dashboard: {
@@ -2516,6 +2518,7 @@ const resources = {
         toast: {
           canceled: "翻訳タスクを中止しました",
           partial: "翻訳完了（一部失敗）",
+          precheckTooLong: "次のフィールドが最大長 {{max}} を超えています: {{details}}",
         },
       },
       dashboard: {

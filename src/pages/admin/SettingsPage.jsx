@@ -30,7 +30,7 @@ const DEFAULT_TRANSLATION_CONFIG = {
   right_code_model: "gpt-5.2",
   right_code_endpoint: "responses",
   request_timeout_ms: 120000,
-  max_input_chars: 30000,
+  max_input_chars: 120000,
   fill_policy: "fill_empty_only",
   enable_cache: true,
   cache_ttl_ms: 1800000,
@@ -71,6 +71,13 @@ function normalizeTranslationConfigForSave(raw = {}) {
   const normalizedApiKey = `${normalized.right_code_api_key || ""}`
     .trim()
     .replace(/^Bearer\s+/i, "");
+  const normalizedMaxInputChars = Math.min(
+    500000,
+    Math.max(
+      100,
+      Number.parseInt(`${normalized.max_input_chars || DEFAULT_TRANSLATION_CONFIG.max_input_chars}`, 10) || DEFAULT_TRANSLATION_CONFIG.max_input_chars
+    )
+  );
   return {
     enabled: normalized.enabled !== false,
     engine: normalized.engine === "ai" ? "ai" : "free",
@@ -84,10 +91,7 @@ function normalizeTranslationConfigForSave(raw = {}) {
       1000,
       Number.parseInt(`${normalized.request_timeout_ms || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms}`, 10) || DEFAULT_TRANSLATION_CONFIG.request_timeout_ms
     ),
-    max_input_chars: Math.max(
-      100,
-      Number.parseInt(`${normalized.max_input_chars || DEFAULT_TRANSLATION_CONFIG.max_input_chars}`, 10) || DEFAULT_TRANSLATION_CONFIG.max_input_chars
-    ),
+    max_input_chars: normalizedMaxInputChars,
     fill_policy:
       normalized.fill_policy === "overwrite_target" ? "overwrite_target" : "fill_empty_only",
     enable_cache: normalized.enable_cache !== false,
@@ -893,6 +897,7 @@ export default function SettingsPage() {
                       <ContentTextInput
                         type="number"
                         min={100}
+                        max={500000}
                         step={100}
                         value={formData.translation_config.max_input_chars}
                         onChange={(e) =>

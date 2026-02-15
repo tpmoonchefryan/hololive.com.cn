@@ -174,8 +174,23 @@ export default function PostEditor() {
         notify(t("admin.translationJob.toast.canceled"), "warning");
         return;
       }
+      if (err?.code === "TRANSLATION_PRECHECK_TOO_LONG") {
+        const details = Array.isArray(err?.details)
+          ? err.details
+            .map((item) => `${item.field}[${item.source_lang}] ${item.length}`)
+            .join("; ")
+          : "";
+        notify(
+          t("admin.translationJob.toast.precheckTooLong", {
+            max: err?.max_input_chars || "",
+            details,
+          }),
+          "warning"
+        );
+        return;
+      }
       logger.error("Translation error:", err);
-      notify(t("admin.postEditor.toast.translateError"), "error");
+      notify(err?.message || t("admin.postEditor.toast.translateError"), "error");
     }
   };
 

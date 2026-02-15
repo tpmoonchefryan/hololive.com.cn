@@ -256,6 +256,21 @@ export default function SectionEditor() {
         notify(t("translationJob.toast.canceled"), "warning");
         return;
       }
+      if (err?.code === "TRANSLATION_PRECHECK_TOO_LONG") {
+        const details = Array.isArray(err?.details)
+          ? err.details
+            .map((item) => `${item.field}[${item.source_lang}] ${item.length}`)
+            .join("; ")
+          : "";
+        notify(
+          t("translationJob.toast.precheckTooLong", {
+            max: err?.max_input_chars || "",
+            details,
+          }),
+          "warning"
+        );
+        return;
+      }
       logger.error("Translation error:", err);
       notify(err?.message || t("sectionEditor.toast.translateError"), "error");
     }

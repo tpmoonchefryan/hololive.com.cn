@@ -3,7 +3,7 @@ import {
   cancelAdminTranslationJob,
   createAdminTranslationJob,
   detectSourceLanguage,
-  getAdminTranslationFillPolicy,
+  getAdminTranslationRuntimeConfig,
   getAdminTranslationJob,
   getAdminTranslationJobResult,
   getTargetLangs,
@@ -16,6 +16,7 @@ const TERMINAL_JOB_STATUS = new Set([
   "canceled",
 ]);
 const POLL_INTERVAL_MS = 2000;
+const DEFAULT_MAX_INPUT_CHARS = 120000;
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -120,9 +121,25 @@ function createCanceledError(message = "translation canceled") {
   return error;
 }
 
+function createPrecheckTooLongError(items, maxInputChars) {
+  const list = Array.isArray(items) ? items : [];
+  const max = Number.isFinite(maxInputChars) ? maxInputChars : DEFAULT_MAX_INPUT_CHARS;
+  const details = list
+    .slice(0, 4)
+    .map((item) => `${item.field}[${item.source_lang}] ${item.length}`)
+    .join(", ");
+  const suffix = list.length > 4 ? ` ...(+${list.length - 4})` : "";
+  const error = new Error(`字段长度超过限制（max ${max}）：${details}${suffix}`);
+  error.code = "TRANSLATION_PRECHECK_TOO_LONG";
+  error.details = list;
+  error.max_input_chars = max;
+  return error;
+}
+
 export function useAdminContentTranslation() {
   const [translating, setTranslating] = useState(false);
   const [fillPolicy, setFillPolicy] = useState("fill_empty_only");
+  const [maxInputChars, setMaxInputChars] = useState(DEFAULT_MAX_INPUT_CHARS);
   const [translationJob, setTranslationJob] = useState(createInitialJobState);
   const activeJobRef = useRef({
     jobId: "",
@@ -131,13 +148,14 @@ export function useAdminContentTranslation() {
 
   useEffect(() => {
     let mounted = true;
-    const loadPolicy = async () => {
-      const policy = await getAdminTranslationFillPolicy();
+    const loadRuntimeConfig = async () => {
+      const config = await getAdminTranslationRuntimeConfig();
       if (mounted) {
-        setFillPolicy(policy);
+        setFillPolicy(config.fillPolicy);
+        setMaxInputChars(config.maxInputChars);
       }
     };
-    loadPolicy();
+    loadRuntimeConfig();
     return () => {
       mounted = false;
     };
@@ -246,6 +264,41 @@ export function useAdminContentTranslation() {
           canceled: false,
           errors: [],
         };
+      }
+
+      let runtimeMaxInputChars = maxInputChars;
+      try {
+        const runtimeConfig = await getAdminTranslationRuntimeConfig();
+        if (runtimeConfig?.maxInputChars) {
+          runtimeMaxInputChars = runtimeConfig.maxInputChars;
+          setMaxInputChars(runtimeConfig.maxInputChars);
+        }
+        if (runtimeConfig?.fillPolicy) {
+          setFillPolicy(runtimeConfig.fillPolicy);
+        }
+      } catch {
+        // Fallback to local state.
+      }
+
+      const tooLongItems = [];
+      for (const field of safeFields) {
+        const key = `${field?.key || ""}`.trim();
+        if (!key) continue;
+        const value = normalizeValueMap(field.value);
+        const sourceLang = detectSourceLanguage(value);
+        if (!sourceLang) continue;
+        const sourceText = `${value?.[sourceLang] || ""}`.trim();
+        if (!sourceText) continue;
+        if (sourceText.length > runtimeMaxInputChars) {
+          tooLongItems.push({
+            field: key,
+            source_lang: sourceLang,
+            length: sourceText.length,
+          });
+        }
+      }
+      if (tooLongItems.length > 0) {
+        throw createPrecheckTooLongError(tooLongItems, runtimeMaxInputChars);
       }
 
       setTranslating(true);
@@ -399,12 +452,13 @@ export function useAdminContentTranslation() {
         activeJobRef.current.jobId = "";
       }
     },
-    [defaultFillEmptyOnly, pollTranslationJob]
+    [defaultFillEmptyOnly, maxInputChars, pollTranslationJob]
   );
 
   return {
     translating,
     fillPolicy,
+    maxInputChars,
     translationJob,
     translateFields,
     cancelTranslationJob,
