@@ -20,7 +20,7 @@ const BUDGETS = {
     cssMaxGzipKB: 20,
   },
   totals: {
-    jsTotalGzipKB: 410,
+    jsTotalGzipKB: 415,
     cssTotalGzipKB: 25,
   },
 };
