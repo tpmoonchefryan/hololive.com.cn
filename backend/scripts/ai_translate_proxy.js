@@ -53,6 +53,14 @@ const RATE_LIMIT_MAX = Number.parseInt(
   process.env.AI_TRANSLATE_RATE_LIMIT_MAX || "30",
   10
 );
+const RATE_LIMIT_JOB_READ_MAX = Number.parseInt(
+  process.env.AI_TRANSLATE_RATE_LIMIT_JOB_READ_MAX || "240",
+  10
+);
+const RATE_LIMIT_JOB_WRITE_MAX = Number.parseInt(
+  process.env.AI_TRANSLATE_RATE_LIMIT_JOB_WRITE_MAX || "60",
+  10
+);
 
 const SUPPORTED_LANGS = ["zh", "en", "ja"];
 const DEFAULT_TEST_SAMPLE_TEXT = "这是配置测试文本，请翻译。";
@@ -147,15 +155,36 @@ setInterval(() => {
   }
 }, 300000);
 
-function rateLimit(ip) {
+function getRateLimitProfile(method, path) {
+  if (typeof path === "string" && path.startsWith("/admin/translate/jobs")) {
+    if (method === "GET") {
+      return {
+        scope: "job_read",
+        limit: RATE_LIMIT_JOB_READ_MAX,
+      };
+    }
+    return {
+      scope: "job_write",
+      limit: RATE_LIMIT_JOB_WRITE_MAX,
+    };
+  }
+  return {
+    scope: "default",
+    limit: RATE_LIMIT_MAX,
+  };
+}
+
+function rateLimit(ip, method, path) {
   const now = Date.now();
-  let bucket = rateBuckets.get(ip);
+  const profile = getRateLimitProfile(method, path);
+  const bucketKey = `${ip}::${profile.scope}`;
+  let bucket = rateBuckets.get(bucketKey);
   if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW_MS) {
     bucket = { start: now, count: 0 };
-    rateBuckets.set(ip, bucket);
+    rateBuckets.set(bucketKey, bucket);
   }
   bucket.count += 1;
-  return bucket.count > RATE_LIMIT_MAX;
+  return bucket.count > profile.limit;
 }
 
 function createTranslationJobId() {
@@ -1851,7 +1880,7 @@ const server = http.createServer(async (req, res) => {
     req.headers["x-real-ip"] ||
     req.socket.remoteAddress ||
     "unknown";
-  if (rateLimit(String(ip))) {
+  if (rateLimit(String(ip), req.method || "GET", path)) {
     return sendJSON(res, 429, { ok: false, error: "too many requests" });
   }
 

@@ -15,7 +15,7 @@ const TERMINAL_JOB_STATUS = new Set([
   "failed",
   "canceled",
 ]);
-const POLL_INTERVAL_MS = 1200;
+const POLL_INTERVAL_MS = 2000;
 
 function sleep(ms) {
   return new Promise((resolve) => {
