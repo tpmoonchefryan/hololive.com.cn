@@ -126,6 +126,12 @@ jobs:
             sudo /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh
           fi
 
+          # Ensure Microsoft OAuth client secret expiry monitor is installed/updated
+          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh ]; then
+            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh
+            sudo /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh
+          fi
+
           # Restart PocketBase and Velocity Sync Service
           # Note: The runner user must have permission to run this (e.g. root or sudo w/o password)
           sudo systemctl restart pocketbase

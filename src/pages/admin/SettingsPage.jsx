@@ -6,6 +6,7 @@ import { logSystemSettings } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
 import { createAppLogger } from "../../lib/appLogger";
+import { sha256Hex } from "../../lib/adminKeyHash";
 import Modal from "../../components/admin/ui/Modal";
 import { testAdminTranslationConfig } from "../../lib/adminTranslateApi";
 import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
@@ -178,7 +179,9 @@ export default function SettingsPage() {
       setFormData({
         microsoft_auth_config: settingsData?.microsoft_auth_config || {},
         analytics_config: settingsData?.analytics_config || { google: "", baidu: "" },
-        admin_entrance_key: settingsData?.admin_entrance_key || "",
+        // 明文密钥已不再经 API 下发（字段为 hidden）。能渲染到这个页面就说明
+        // AdminGuard 已用哈希校验通过 URL 片段，因此 adminKey 就是当前密钥本身。
+        admin_entrance_key: adminKey || "",
         enable_pb_public_entry: settingsData?.enable_pb_public_entry !== false,
         translation_config: normalizeTranslationConfig(translationRecord || {}),
       });
@@ -205,7 +208,7 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [t, notify]);
+  }, [t, notify, adminKey]);
 
   useEffect(() => {
     fetchSettings();
@@ -306,7 +309,8 @@ export default function SettingsPage() {
 
       // 记录系统设置更新日志
       const logDetails = keyChanged
-        ? `Updated Admin Key: ${settings?.admin_entrance_key || "Unknown"} → ${updateData.admin_entrance_key}`
+        // 不记录密钥明文：audit_logs 对任何已登录用户可读，写进去等于又开一个泄露口
+        ? "Updated Admin Key (value redacted)"
         : "Updated System Settings";
       await logSystemSettings(logDetails);
 
@@ -392,15 +396,16 @@ export default function SettingsPage() {
         baidu: formData.analytics_config.baidu?.trim() || "",
       },
       admin_entrance_key: normalizedKey,
+      // 哈希必须与明文同步写入：AdminGuard 只认哈希，漏写会让新 URL 直接变 404
+      admin_entrance_key_hash: await sha256Hex(normalizedKey),
       enable_pb_public_entry: formData.enable_pb_public_entry !== false,
     };
     const translationUpdateData = normalizeTranslationConfigForSave(
       formData.translation_config
     );
 
-    // 检查 admin_entrance_key 是否改变
-    const keyChanged =
-      settings && settings.admin_entrance_key !== updateData.admin_entrance_key;
+    // 与 URL 中的当前密钥比对（明文已不再下发，settings 里读不到）
+    const keyChanged = Boolean(adminKey) && normalizedKey !== adminKey;
 
     if (keyChanged) {
       // 触发自定义红色警告模态，而不是直接保存
