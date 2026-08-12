@@ -116,15 +116,16 @@ const logger = createAppLogger("SettingsPage");
 
 export default function SettingsPage() {
   const { t } = useTranslation();
-  const { notify, confirm } = useUIFeedback();
+  const { notify } = useUIFeedback();
   const { adminKey } = useParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [settings, setSettings] = useState(null);
   const [translationConfigId, setTranslationConfigId] = useState("");
   const [showKeyWarning, setShowKeyWarning] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState(null);
+  // 新密钥只用于弹窗展示与跳转，不再是数据库字段，因此单独存放
+  const [pendingKey, setPendingKey] = useState("");
   const [pendingTranslationUpdate, setPendingTranslationUpdate] = useState(null);
   const [testingTranslation, setTestingTranslation] = useState(false);
   const [translationTestText, setTranslationTestText] = useState(DEFAULT_TRANSLATION_TEST_TEXT);
@@ -174,7 +175,6 @@ export default function SettingsPage() {
         logger.warn("translation_config is unavailable, fallback to defaults.");
       }
 
-      setSettings(settingsData);
       setTranslationConfigId(translationRecord?.id || "");
       setFormData({
         microsoft_auth_config: settingsData?.microsoft_auth_config || {},
@@ -189,7 +189,6 @@ export default function SettingsPage() {
       logger.error("Failed to fetch settings:", error);
       // 如果记录不存在，使用默认值
       if (error?.status === 404) {
-        setSettings(null);
         setTranslationConfigId("");
         setFormData({
           microsoft_auth_config: {},
@@ -214,30 +213,9 @@ export default function SettingsPage() {
     fetchSettings();
   }, [fetchSettings]);
 
-  // 检查当前 URL 中的 Key 是否与数据库中的 Key 一致
-  useEffect(() => {
-    if (!settings || !settings.admin_entrance_key) return;
-
-    const dbKey = settings.admin_entrance_key;
-    if (adminKey === dbKey) return;
-
-    const currentUrl = window.location.href;
-    const newUrl = currentUrl.replace(`/${adminKey}/`, `/${dbKey}/`);
-
-    const checkMismatch = async () => {
-      const accepted = await confirm({
-        title: t("admin.settingsPage.modal.title"),
-        message: `${t("admin.settingsPage.modal.desc")}\n\n${t("admin.settingsPage.modal.dbKey")} ${dbKey}\n${t("admin.settingsPage.modal.currentKey")} ${adminKey}\n\n${t("admin.settingsPage.modal.newUrl")} ${newUrl}`,
-        confirmText: t("admin.settingsPage.modal.confirm"),
-        cancelText: t("admin.settingsPage.modal.cancel"),
-      });
-      if (accepted) {
-        window.location.href = newUrl;
-      }
-    };
-
-    checkMismatch();
-  }, [settings, adminKey, t, confirm]);
+  // 原先这里会比对 URL 与库中明文，不一致就引导跳转。明文字段已删除，
+  // 而且 AdminGuard 现在用哈希把关——能渲染到本页就说明 URL 里的密钥是对的，
+  // 不可能出现不一致，故整段移除。
 
   const patchTranslationConfig = (patch) => {
     setFormData((prev) => ({
@@ -285,7 +263,8 @@ export default function SettingsPage() {
     }
   };
 
-  const saveSettings = async (updateData, translationUpdateData, keyChanged) => {
+  const saveSettings = async (updateData, translationUpdateData, nextKey = "") => {
+    const keyChanged = Boolean(nextKey);
     setSaving(true);
     setError(null);
 
@@ -316,8 +295,7 @@ export default function SettingsPage() {
 
       // 如果 Key 改变了，直接跳转到新地址
       if (keyChanged) {
-        const newKey = updateData.admin_entrance_key;
-        const newUrl = `/${newKey}/webadmin/settings`;
+        const newUrl = `/${nextKey}/webadmin/settings`;
         window.location.href = newUrl;
         return;
       }
@@ -395,8 +373,8 @@ export default function SettingsPage() {
         google: formData.analytics_config.google?.trim() || "",
         baidu: formData.analytics_config.baidu?.trim() || "",
       },
-      admin_entrance_key: normalizedKey,
-      // 哈希必须与明文同步写入：AdminGuard 只认哈希，漏写会让新 URL 直接变 404
+      // 只存哈希。明文字段已删除：PocketBase 会把 hidden 字段从非超管的写入里
+      // 静默剔除（返回 200 但不落库），留着必然和哈希分叉。
       admin_entrance_key_hash: await sha256Hex(normalizedKey),
       enable_pb_public_entry: formData.enable_pb_public_entry !== false,
     };
@@ -410,12 +388,13 @@ export default function SettingsPage() {
     if (keyChanged) {
       // 触发自定义红色警告模态，而不是直接保存
       setPendingUpdate(updateData);
+      setPendingKey(normalizedKey);
       setPendingTranslationUpdate(translationUpdateData);
       setShowKeyWarning(true);
       return;
     }
 
-    await saveSettings(updateData, translationUpdateData, false);
+    await saveSettings(updateData, translationUpdateData);
   };
 
   return (
@@ -426,6 +405,7 @@ export default function SettingsPage() {
         onClose={() => {
           setShowKeyWarning(false);
           setPendingUpdate(null);
+          setPendingKey("");
           setPendingTranslationUpdate(null);
         }}
         title={t("admin.settingsPage.modal.title")}
@@ -445,24 +425,16 @@ export default function SettingsPage() {
                     {adminKey}
                   </code>
                 </p>
-                {settings?.admin_entrance_key && (
-                  <p className="break-words">
-                    {t("admin.settingsPage.modal.dbKey")}
-                    <code className="px-1 rounded bg-white border border-red-100">
-                      {settings.admin_entrance_key}
-                    </code>
-                  </p>
-                )}
                 <p className="break-words">
                   {t("admin.settingsPage.modal.newKey")}
                   <code className="px-1 rounded bg-white border border-red-100">
-                    {pendingUpdate?.admin_entrance_key || ""}
+                    {pendingKey}
                   </code>
                 </p>
                 <p className="break-words">
                   {t("admin.settingsPage.modal.newUrl")}
                   <code className="px-1 rounded bg-white border border-red-100">
-                    /{pendingUpdate?.admin_entrance_key || ""}/webadmin
+                    /{pendingKey}/webadmin
                   </code>
                 </p>
               </div>
@@ -474,6 +446,7 @@ export default function SettingsPage() {
               onClick={() => {
                 setShowKeyWarning(false);
                 setPendingUpdate(null);
+                setPendingKey("");
                 setPendingTranslationUpdate(null);
               }}
               className="px-3 py-1.5 text-xs"
@@ -487,7 +460,7 @@ export default function SettingsPage() {
               loading={saving}
               onClick={() =>
                 pendingUpdate &&
-                saveSettings(pendingUpdate, pendingTranslationUpdate, true)
+                saveSettings(pendingUpdate, pendingTranslationUpdate, pendingKey)
               }
               className="rounded-full bg-red-600 text-white hover:bg-red-700 px-3.5 py-1.5 text-xs font-semibold"
             >

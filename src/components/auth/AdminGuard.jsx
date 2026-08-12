@@ -39,11 +39,10 @@ export default function AdminGuard() {
           return;
         }
 
-        // 哈希尚未回填时回退到明文比对。部署时前端产物先于 PocketBase 重启落地，
-        // 存在一小段“新前端 + 旧数据”的窗口，没有这个回退会把管理员挡在门外。
-        const dbKey = settings?.admin_entrance_key;
-        const expectedKey = dbKey || devFallbackKey;
-        setIsValidKey(Boolean(expectedKey) && adminKey === expectedKey);
+        // 库里没有哈希时不再回退到明文——明文字段已被删除，因为 PocketBase 会把
+        // hidden 字段从非超管的写入里静默剔除，留着它只会和哈希分叉、变成错误值。
+        // 开发模式仍可用环境变量顶上。
+        setIsValidKey(Boolean(devFallbackKey) && adminKey === devFallbackKey);
       } catch (error) {
         logger.error("Failed to validate admin key:", error);
         // 生产环境读取失败时直接拒绝；开发模式可回退到环境变量
