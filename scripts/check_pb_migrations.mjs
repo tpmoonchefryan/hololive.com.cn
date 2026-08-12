@@ -229,7 +229,10 @@ function validateMigrationTemplate(filePath, content) {
     analysis.firstCommaIndex >= 0
       ? content.slice(analysis.firstCommaIndex + 1, analysis.firstCommaIndex + 220)
       : "";
-  if (!/\b(?:async\s*)?\(\s*app\s*\)\s*=>|\bfunction\b/.test(afterComma)) {
+  // \b 必须只作用于可选的 async。写在最外层时它要求 "(" 前面是个单词字符，
+  // 而 ", (app) => {" 里 "(" 前面是空格，于是裸箭头函数永远匹配不上——
+  // 连 new_pb_migration.mjs 自己生成的模板都会被判为不合规。
+  if (!/(?:\basync\s*)?\(\s*app\s*\)\s*=>|\bfunction\b/.test(afterComma)) {
     return {
       ok: false,
       reason: "down migration must be a function (expected ', (app) => { ... }')",
