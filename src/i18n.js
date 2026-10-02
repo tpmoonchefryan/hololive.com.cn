@@ -690,6 +690,7 @@ const resources = {
         dashboard: {
           status: "状态",
           statusActive: "配置已激活",
+          syncStatus: "上次同步", lastSuccess: "上次同步成功", lastFailure: "上次同步失败", pending: "等待同步", unknown: "同步状态未知",
           statusDesc: "通过同步脚本管理",
           proxyStatus: "代理进程",
           proxyStatusDesc: "实时进程状态",
@@ -1822,6 +1823,7 @@ const resources = {
         dashboard: {
           status: "Status",
           statusActive: "Config Active",
+          syncStatus: "Last sync", lastSuccess: "Last sync succeeded", lastFailure: "Last sync failed", pending: "Sync pending", unknown: "Sync unknown",
           statusDesc: "Managed via sync script",
           proxyStatus: "Proxy Process",
           proxyStatusDesc: "Real-time process status",
@@ -2925,6 +2927,7 @@ const resources = {
         dashboard: {
           status: "ステータス",
           statusActive: "設定適用済み",
+          syncStatus: "前回の同期", lastSuccess: "前回の同期は成功", lastFailure: "前回の同期は失敗", pending: "同期待ち", unknown: "同期状態不明",
           statusDesc: "同期スクリプト経由",
           proxyStatus: "プロキシプロセス",
           proxyStatusDesc: "リアルタイム状態",

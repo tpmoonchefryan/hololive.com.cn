@@ -35,7 +35,7 @@ test('public cold start independently authenticates and configuration expiry rev
   const load = createConfigLoader({ pbUrl: 'http://pb', serviceEmail: 'fixture', servicePassword: 'fixture', now: () => time, ttlMs: 5,
     fetchImpl: async (url, options) => {
       calls.push(url);
-      if (url.includes('auth-with-password')) return Response.json({ token: 'server-only' });
+      if (url.includes('/users/auth-')) return Response.json({ token: 'server-only', record: { collectionName: 'users', is_admin: true, service_account: true } });
       assert.equal(options.headers.Authorization, 'server-only');
       if (denied) return new Response('{}', { status: 403 });
       return Response.json({ items: [{ enabled, panel_url: 'http://panel/', api_key: 'not-public' }] });
@@ -67,7 +67,7 @@ test('real proxy public cold start, config revocation and upstream failures', as
   const panel = `http://127.0.0.1:${upstream.address().port}`;
   const pb = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    if (req.url.includes('auth-with-password')) return res.end(JSON.stringify({ token: 'fixture-service' }));
+    if (req.url.includes('/users/auth-')) return res.end(JSON.stringify({ token: 'fixture-service', record: { collectionName: 'users', is_admin: true, service_account: true } }));
     if (req.headers.authorization !== 'fixture-service') { res.statusCode = 403; return res.end('{}'); }
     res.end(JSON.stringify({ items: [{ enabled, panel_url: panel, api_key: 'fixture-secret', public_cache_ttl: 10000 }] }));
   });
@@ -86,4 +86,45 @@ test('real proxy public cold start, config revocation and upstream failures', as
   assert.equal((await fetch(`http://127.0.0.1:${port}/public/status`)).status, 503);
   enabled = true; upstreamFailed = true; await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal((await fetch(`http://127.0.0.1:${port}/public/status`)).status, 500);
+});
+
+import { binaries, startOwned, unusedPort, waitFor, root } from './helpers/pocketbase.mjs';
+import { serviceFixture } from './helpers/service-identity.mjs';
+import path from 'node:path';
+for (const [version, binary] of binaries) test(`real users service cold/expiry/public contract ${version}`, async () => {
+  const fixture = await serviceFixture(binary);
+  const { createServer } = await import('node:http');
+  const upstream = createServer((_req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ status: 200, data: { remote: [] } })); });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  let proxy;
+  try {
+    const { database, service, password } = fixture;
+    const configs = await database.request('/api/collections/mcsm_config/records', { token: database.token });
+    const config = configs.data.items[0];
+    assert.ok(config);
+    assert.equal((await database.request('/api/collections/mcsm_config/records/' + config.id, { token: database.token, method: 'PATCH', body: { enabled: true, panel_url: `http://127.0.0.1:${upstream.address().port}`, api_key: 'disposable-panel-secret' } })).status, 200);
+    let time = 0;
+    const load = createConfigLoader({ pbUrl: database.url, serviceEmail: service.email, servicePassword: password, ttlMs: 1, now: () => time });
+    assert.equal((await load()).enabled, true);
+    time = 2; assert.equal((await load()).enabled, true);
+    const port = await unusedPort();
+    proxy = await startOwned(process.execPath, [path.join(root, 'backend/scripts/mcsm_proxy.js')], { PB_URL: database.url, PB_EMAIL: service.email, PB_PASS: password, MCSM_PROXY_PORT: String(port), MCSM_CONFIG_CACHE_TTL_MS: '1', MCSM_PROXY_LOG_LEVEL: 'error' });
+    await waitFor(`http://127.0.0.1:${port}/`, proxy);
+    const response = await fetch(`http://127.0.0.1:${port}/public/status`);
+    assert.equal(response.status, 200); assert.doesNotMatch(await response.text(), /disposable-panel-secret/);
+    await fixture.changeUser(service, { service_account: false }); time = 4;
+    await assert.rejects(load(), /Service/);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal((await fetch(`http://127.0.0.1:${port}/public/status`)).status, 500);
+    await fixture.changeUser(service, { service_account: true, is_admin: false }); time = 6;
+    await assert.rejects(load(), /Service/);
+    await fixture.changeUser(service, { is_admin: true }); time = 8;
+    assert.equal((await load()).enabled, true);
+    assert.equal((await database.request('/api/collections/mcsm_config/records/' + config.id, { token: database.token, method: 'PATCH', body: { enabled: false } })).status, 200);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal((await fetch(`http://127.0.0.1:${port}/public/status`)).status, 503);
+    for (const identity of [fixture.human, fixture.ordinary]) {
+      await assert.rejects(createConfigLoader({ pbUrl: database.url, serviceEmail: identity.email, servicePassword: password })(), /Service/);
+    }
+  } finally { if (proxy) await proxy.close(); await fixture.close(); await new Promise(resolve => upstream.close(resolve)); }
 });

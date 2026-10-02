@@ -1,21 +1,14 @@
+import { createServiceAuth } from './service-auth.js';
 /** Expired or revoked config fails closed; public cold starts use service auth. */
 export function createConfigLoader({ pbUrl, serviceEmail, servicePassword, fetchImpl = fetch, now = Date.now, ttlMs = 5000, timeoutMs = 15000 }) {
+  const authorize = createServiceAuth({ pbUrl, email: serviceEmail, password: servicePassword, fetchImpl, timeoutMs });
   let cached = null;
   let expiresAt = 0;
   return async (adminToken) => {
     if (cached && now() < expiresAt) return cached;
     try {
       let auth = adminToken;
-      if (!auth) {
-        if (!serviceEmail || !servicePassword) throw new Error("Public MCSM status requires PB_EMAIL and PB_PASS service configuration");
-        const login = await fetchImpl(`${pbUrl}/api/collections/_superusers/auth-with-password`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identity: serviceEmail, password: servicePassword }), signal: AbortSignal.timeout(timeoutMs),
-        });
-        if (!login.ok) throw new Error(`MCSM service authentication failed: HTTP ${login.status}`);
-        auth = (await login.json()).token;
-        if (!auth) throw new Error("MCSM service authentication returned no token");
-      }
+      if (!auth) auth = await authorize();
       const response = await fetchImpl(`${pbUrl}/api/collections/mcsm_config/records?perPage=1`, {
         headers: { Authorization: auth }, signal: AbortSignal.timeout(timeoutMs),
       });

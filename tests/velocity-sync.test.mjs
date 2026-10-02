@@ -89,3 +89,63 @@ test('real files recover config, JAR, marker and secret after restart failure', 
   assert.equal((await fs.stat(path.join(directory, 'forwarding.secret'))).mode & 0o777, 0o600);
   assert.equal(reports[0][0], 'error'); assert.equal(reports[0][2], undefined);
 });
+
+import { binaries } from './helpers/pocketbase.mjs';
+import { serviceFixture } from './helpers/service-identity.mjs';
+import { createVelocityPocketBase } from '../backend/scripts/lib/velocity-pocketbase.js';
+for (const [version, binary] of binaries) test(`real Velocity users auth/read/realtime/update/revocation ${version}`, async () => {
+  const f = await serviceFixture(binary); let unsubscribe;
+  try {
+    const data = createVelocityPocketBase({ pb: f.pb, email: f.service.email, password: f.password });
+    const initial = await data.read();
+    assert.ok(initial.settings.id); assert.ok(Array.isArray(initial.servers)); assert.ok(Array.isArray(initial.forcedHosts));
+    // Fresh PB optional number fields are zero: retain strict config rejection until configured.
+    assert.throws(() => prepareVelocityConfig(initial.settings, initial.servers, initial.forcedHosts), /Invalid query_port/);
+    await data.update('velocity_settings', initial.settings.id, { query_port: 25577, connection_timeout: 5000, read_timeout: 30000, forwarding_secret: 'isolated-secret' });
+    const server = await f.record('velocity_servers', { name: 'Fixture', address: '127.0.0.1:25565', try_order: 1 });
+    let resolveEvent;
+    const event = new Promise(resolve => { resolveEvent = resolve; });
+    const events = []; const authorizationErrors = [];
+    let resolveDenied; const deniedEvent = new Promise(resolve => { resolveDenied = resolve; });
+    const callbacks = Object.fromEntries(['velocity_settings', 'velocity_servers', 'velocity_forced_hosts'].map(collection => [collection, e => { events.push(collection); if (collection === 'velocity_settings' && e.record.last_sync_status === 'error') resolveEvent(e); }]));
+    unsubscribe = await data.subscribe({ ...callbacks, onError: error => { authorizationErrors.push(error.message); resolveDenied(error); } });
+    const updated = await data.update('velocity_settings', initial.settings.id, { last_sync_status: 'error', last_sync_error: 'isolated failure', last_sync_at: new Date().toISOString(), proxy_status: 'inactive', last_heartbeat: new Date().toISOString() });
+    assert.equal(updated.last_sync_status, 'error'); assert.equal(updated.proxy_status, 'inactive'); assert.equal(updated.last_sync_error, 'isolated failure');
+    const timeout = setTimeout(() => resolveEvent(null), 3000);
+    assert.ok(await event, 'actual realtime delivery'); clearTimeout(timeout);
+    assert.equal((await data.update('velocity_servers', server.id, { status: 'online', ping: 5, last_check: new Date().toISOString() })).status, 'online');
+    const applied = fixture(); applied.adapter.read = data.read;
+    applied.adapter.report = (status, error, hash) => data.update('velocity_settings', initial.settings.id, { last_sync_status: status, last_sync_error: error, last_sync_at: new Date().toISOString(), ...(hash ? { last_applied_hash: hash } : {}) });
+    assert.equal((await runVelocitySync(applied.adapter)).status, 'applied');
+    const saved = await f.pb.collection('velocity_settings').getOne(initial.settings.id);
+    assert.equal(saved.last_sync_status, 'ok'); assert.match(saved.last_applied_hash, /^[a-f0-9]{64}$/);
+    await f.changeUser(f.service, { service_account: false, verified: true });
+    const eventCount = events.length;
+    assert.equal((await f.database.request('/api/collections/velocity_settings/records/' + initial.settings.id, { token: f.database.token, method: 'PATCH', body: { last_sync_error: 'revoked event' } })).status, 200);
+    const deniedTimeout = setTimeout(() => resolveDenied(null), 3000);
+    assert.ok(await deniedEvent, 'service revocation blocks callback even when human admin data rule allows delivery'); clearTimeout(deniedTimeout);
+    assert.ok(authorizationErrors.length); assert.equal(events.length, eventCount);
+    await f.changeUser(f.service, { service_account: true, verified: false });
+    await data.authorize();
+    await unsubscribe(); unsubscribe = null;
+    for (const body of [{ service_account: false }, { service_account: true, is_admin: false }]) {
+      await f.changeUser(f.service, body);
+      const denied = fixture(); denied.adapter.read = data.read; denied.adapter.report = applied.adapter.report;
+      await assert.rejects(runVelocitySync(denied.adapter), /Service/);
+      assert.equal(denied.calls.includes('snapshot'), false); assert.equal(denied.calls.includes('config'), false); assert.equal(denied.calls.includes('restart'), false);
+      await assert.rejects(data.update('velocity_settings', initial.settings.id, { proxy_status: 'active' }), /Service/);
+      await assert.rejects(data.subscribe(callbacks), /Service/);
+    }
+    await f.changeUser(f.service, { is_admin: true });
+    assert.ok((await data.read()).settings.id);
+    // Real short-lived PB token exercises expired refresh and users reauthentication.
+    assert.equal((await f.database.request('/api/collections/users', { token: f.database.token, method: 'PATCH', body: { authToken: { duration: 10 } } })).status, 200);
+    const reauthenticated = createVelocityPocketBase({ pb: f.pb, email: f.service.email, password: f.password });
+    assert.ok((await reauthenticated.read()).settings.id);
+    await new Promise(resolve => setTimeout(resolve, 10500));
+    assert.ok((await reauthenticated.read()).settings.id);
+    for (const user of [f.human, f.ordinary]) {
+      await assert.rejects(createVelocityPocketBase({ pb: f.pb, email: user.email, password: f.password }).read(), /Service/);
+    }
+  } finally { try { if (unsubscribe) await unsubscribe(); } finally { await f.close(); } }
+});
