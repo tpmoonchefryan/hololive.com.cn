@@ -1,5 +1,5 @@
 import Modal from "../components/admin/ui/Modal";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Server, ArrowLeft, Loader2, Map, Maximize, Minimize, Activity, Users, Zap, Info } from "lucide-react";
@@ -8,6 +8,8 @@ import pb from "../lib/pocketbase";
 import { getServerInfoIcon } from "../lib/serverInfoIcons";
 import { createAppLogger } from "../lib/appLogger";
 import MCSMStatusPanel from "../components/server/MCSMStatusPanel";
+
+import { isMapEscapeMessage } from "../lib/mapEmbedMessages";
 
 const logger = createAppLogger("ServerInfo");
 
@@ -20,6 +22,8 @@ export default function ServerInfo() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [serverInfoFields, setServerInfoFields] = useState([]);
   const [fieldsLoading, setFieldsLoading] = useState(true);
+  const fullscreenFrameRef = useRef(null);
+  const fullscreenTriggerRef = useRef(null);
   const [isMapFullscreen, setIsMapFullscreen] = useState(false);
   const [serverStatus, setServerStatus] = useState({
     data: null,
@@ -220,16 +224,21 @@ export default function ServerInfo() {
     setSearchParams({ mapId: map.id });
   };
 
-  // 切换地图全屏模式
-  const toggleMapFullscreen = () => {
-    setIsMapFullscreen(!isMapFullscreen);
-  };
+  const toggleMapFullscreen = () => setIsMapFullscreen((open) => !open);
+  useEffect(() => {
+    if (!isMapFullscreen) return;
+    const onMessage = (event) => {
+      if (isMapEscapeMessage(event, fullscreenFrameRef.current)) setIsMapFullscreen(false);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [isMapFullscreen]);
 
   return (
     <>
       {/* Fullscreen Map Overlay */}
       {isMapFullscreen && selectedMap && (
-        <Modal isOpen={isMapFullscreen} onClose={() => setIsMapFullscreen(false)} title={selectedMap.name} size="full">
+        <Modal isOpen={isMapFullscreen} onClose={() => setIsMapFullscreen(false)} title={selectedMap.name} size="full" returnFocusRef={fullscreenTriggerRef}>
           {/* Fullscreen iframe */}
           <div className="flex-1 relative w-full h-full">
             {mapBlockedByMixedContent ? (
@@ -257,6 +266,7 @@ export default function ServerInfo() {
               </div>
             ) : (
               <iframe
+                ref={fullscreenFrameRef}
                 sandbox="allow-scripts allow-forms allow-pointer-lock allow-downloads"
                 referrerPolicy="no-referrer"
                 src={selectedMapEmbedUrl}
@@ -576,10 +586,10 @@ export default function ServerInfo() {
                         allowFullScreen
                       />
                     )}
-                    {/* Enter Fullscreen Button - only visible in normal mode */}
-                    {!isMapFullscreen && (
+                    {/* Keep the trigger mounted for focus restoration; the modal makes it inert. */}
                       <button
                         type="button"
+                        ref={fullscreenTriggerRef}
                         onClick={toggleMapFullscreen}
                         className="absolute top-4 right-4 p-3 bg-white/90 hover:bg-white rounded-lg shadow-lg transition-[background-color,color,box-shadow] z-[60] group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand-blue)]/30"
                         title={t("serverInfo.map.enterFullscreen")}
@@ -587,7 +597,6 @@ export default function ServerInfo() {
                       >
                         <Maximize size={20} className="text-slate-700 group-hover:text-slate-900" />
                       </button>
-                    )}
                   </div>
                 </div>
               ) : (

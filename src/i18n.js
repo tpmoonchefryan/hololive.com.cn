@@ -168,6 +168,7 @@ const resources = {
       },
     },
     admin: {
+      console: "控制台", backend: "管理后台",
       sidebar: {
         subtitle: "HololiveCN MC 后台",
         dashboard: "总览",
@@ -1287,6 +1288,7 @@ const resources = {
       },
     },
     admin: {
+      console: "Console", backend: "Administration",
       sidebar: {
         subtitle: "HololiveCN MC Admin",
         dashboard: "Dashboard",
@@ -2392,6 +2394,7 @@ const resources = {
       },
     },
     admin: {
+      console: "コンソール", backend: "管理画面",
       sidebar: {
         subtitle: "HololiveCN MC 管理",
         dashboard: "ダッシュボード",

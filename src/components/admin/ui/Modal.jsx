@@ -4,13 +4,13 @@ import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { openDialog, isBackdropClick, trapDialogTab } from "./dialogLifecycle";
 
-export default function Modal({ isOpen, onClose, title, children, size = "md" }) {
+export default function Modal({ isOpen, onClose, title, children, size = "md", returnFocusRef }) {
   const { t } = useTranslation("common");
   const dialogRef = useRef(null);
   const titleId = useId();
   useEffect(() => {
-    if (isOpen) return openDialog(dialogRef.current, document.body);
-  }, [isOpen]);
+    if (isOpen) return openDialog(dialogRef.current, document.body, returnFocusRef);
+  }, [isOpen, returnFocusRef]);
   if (!isOpen || typeof document === "undefined") return null;
   const sizes = { sm: "max-w-md", md: "max-w-2xl", lg: "max-w-4xl", xl: "max-w-6xl", full: "max-w-none w-screen h-dvh" };
   return createPortal(
