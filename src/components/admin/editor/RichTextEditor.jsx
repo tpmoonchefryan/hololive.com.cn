@@ -161,8 +161,8 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
       return;
     }
 
-    if (editor && content !== editor.getHTML()) {
-      editor.commands.setContent(content || "");
+    if (editor && !editor.isDestroyed && content !== editor.getHTML()) {
+      editor.commands.setContent(content || "", { emitUpdate: false });
     }
   }, [content, editor, isSourceMode]);
 

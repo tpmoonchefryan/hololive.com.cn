@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Save, Plus, Trash2 } from "lucide-react";
 import pb from "../../lib/pocketbase";
@@ -46,6 +46,8 @@ export default function SectionEditor() {
   const languages = useTriLanguageOptions();
   const isEditMode = !!id;
 
+  const translateRef = useRef(t);
+  useEffect(() => { translateRef.current = t; }, [t]);
   const [activeLang, setActiveLang] = useState("zh");
 
   const [formData, setFormData] = useState({
@@ -132,14 +134,14 @@ export default function SectionEditor() {
         setError(null);
       } catch (err) {
         logger.error("Failed to fetch section:", err);
-        setError(t("sectionEditor.toast.saveError"));
+        setError(translateRef.current("sectionEditor.toast.saveError"));
       } finally {
         setLoading(false);
       }
     };
 
     fetchSection();
-  }, [id, isEditMode, t]);
+  }, [id, isEditMode]);
 
   const updateMultilangField = (field, lang, value) => {
     setFormData((prev) => ({
