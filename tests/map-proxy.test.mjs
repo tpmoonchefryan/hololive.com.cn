@@ -1,4 +1,6 @@
 import test from 'node:test';
+import vm from 'node:vm';
+import { MAP_ESCAPE_BRIDGE, MAP_ESCAPE_MESSAGE, injectMapEscapeBridge } from '../backend/scripts/lib/map-embed-bridge.js';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
@@ -40,6 +42,7 @@ test('gzip, br and plain HTML/resource headers describe delivered bytes and redi
       if (type === 'html') {
         assert.match(text, /<base href="\/map-proxy\/http\/127\.0\.0\.1:\d+\/sub\/">/);
         assert.match(text, /href="\/map-proxy\/http\/127\.0\.0\.1:\d+\/tile"/);
+        assert.match(text, /data-hololive-map-escape/);
         assert.equal(Number(response.headers['content-length']), response.bytes.length);
       } else assert.equal(text, 'map tile resource ✓');
     }
@@ -49,4 +52,18 @@ test('gzip, br and plain HTML/resource headers describe delivered bytes and redi
     const source = await readFile(path.join(root, 'src/pages/ServerInfo.jsx'), 'utf8');
     assert.equal((source.match(/sandbox="allow-scripts allow-forms allow-pointer-lock allow-downloads"/g) || []).length, 2);
   } finally { await service.close(); await close(pb); await close(upstream); }
+});
+
+test('minimal bridge sends only the fixed Escape notification and has no inbound capabilities', () => {
+  let listener; const messages = [];
+  const parent = { postMessage: (...args) => messages.push(args) };
+  const window = { parent };
+  const document = { addEventListener: (type, callback, capture) => { assert.equal(type, 'keydown'); assert.equal(capture, true); listener = callback; } };
+  vm.runInNewContext(MAP_ESCAPE_BRIDGE.replace(/<script[^>]*>|<\/script>/g, ''), { window, document });
+  listener({ key: 'Enter' }); assert.equal(messages.length, 0);
+  listener({ key: 'Escape' }); assert.equal(messages.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[0][0])), MAP_ESCAPE_MESSAGE);
+  assert.equal(messages[0][1], '*');
+  window.parent = window; listener({ key: 'Escape' }); assert.equal(messages.length, 1);
+  assert.match(injectMapEscapeBridge('<html><body>map</body></html>'), /^<script data-hololive-map-escape>/);
 });

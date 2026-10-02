@@ -1,4 +1,5 @@
 import http from "http";
+import { injectMapEscapeBridge } from "./lib/map-embed-bridge.js";
 import { Readable } from "stream";
 import { createLogger } from "./logger.js";
 
@@ -69,7 +70,7 @@ const rewriteHtml = (html, target) => {
     ? html
     : html.replace(/<head([^>]*)>/i, `<head$1><base href="${proxyPrefix}${target.pathname.endsWith("/") ? target.pathname : target.pathname.slice(0, target.pathname.lastIndexOf("/") + 1)}">`);
 
-  return withBase
+  return injectMapEscapeBridge(withBase)
     .replace(
       /(href|src|action)=("|')\/(?!\/|map-proxy\/)/gi,
       `$1=$2${proxyPrefix}/`
