@@ -1482,10 +1482,10 @@ const resources = {
         title: "Current Administrator",
         subtitle: "View your identity and trusted provisioning guidance",
         loading: "Loading…",
-        provision: {"title": "Authorization maintained by a superuser", "desc": "A trusted PocketBase superuser creates, authorizes, revokes and deletes accounts through a separate administration channel. This page shows your account only, rather than a complete administrator roster.", "service": "Service identities require both is_admin=true and service_account=true; human administrators also require verified identity.", "current": "Current account", "identity": "Identity type", "humanIdentity": "Human administrator", "serviceIdentity": "Service account", "unavailable": "Current account unavailable"},
+        provision: {"title": "Authorization maintained by a superuser", "desc": "A trusted PocketBase superuser manages account creation, authorization, revocation and deletion separately. Only your account is shown here.", "service": "Service identities require both is_admin=true and service_account=true; human administrators also require verified identity.", "current": "Current account", "identity": "Identity type", "humanIdentity": "Human administrator", "serviceIdentity": "Service account", "unavailable": "Current account unavailable"},
         toggle: {
           title: "Allow Local Password Login",
-          desc: "This reflects server settings. When disabled, human administrators cannot authenticate with a password; trusted service identities retain separate access. Failed or missing settings are unknown and the login page closes the password entry.",
+          desc: "Server state: disabling password login blocks human password authentication. Trusted services retain separate access. Failed or missing settings show unknown and close password entry.",
           loading: "Reading…",
           unknown: "Unknown (password entry closed)",
           on: "Enabled",
