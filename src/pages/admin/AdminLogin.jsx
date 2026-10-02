@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import pb from "../../lib/pocketbase";
+import pb, { refreshAdminSession } from "../../lib/pocketbase";
 import { createAppLogger } from "../../lib/appLogger";
 import { logLogin } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
@@ -65,11 +65,7 @@ export default function AdminLogin() {
 
   // 白名单验证和跳转的通用逻辑
   const handleAuthSuccess = async () => {
-    const { record } = await pb.collection("users").authRefresh();
-    if (!record.is_admin || (!record.verified && !record.service_account)) {
-      pb.authStore.clear();
-      throw new Error("Administrator authorization required");
-    }
+    await refreshAdminSession();
     navigate("../dashboard");
     return true;
   };
@@ -113,6 +109,7 @@ export default function AdminLogin() {
         await logLogin("SSO 登录");
       }
     } catch (error) {
+      if (error.code === 'SESSION_CHANGED') return;
       // 处理认证失败
       logger.error("Microsoft login error:", error);
 
@@ -176,6 +173,7 @@ export default function AdminLogin() {
         await logLogin("本地登录");
       }
     } catch (error) {
+      if (error.code === 'SESSION_CHANGED') return;
       // 处理认证失败
       logger.error("Local login error:", error);
 
