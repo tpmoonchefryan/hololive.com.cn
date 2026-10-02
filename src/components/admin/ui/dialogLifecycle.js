@@ -3,7 +3,7 @@ let previousOverflow;
 
 // Native modal dialogs provide the top layer, background inertness and Tab trap.
 // Keep the scroll lock until the last nested dialog closes.
-export function openDialog(dialog, body) {
+export function openDialog(dialog, body, returnFocusRef) {
   const trigger = dialog.ownerDocument.activeElement;
   if (!activeDialogs.size) previousOverflow = body.style.overflow;
   activeDialogs.add(dialog);
@@ -13,7 +13,8 @@ export function openDialog(dialog, body) {
     dialog.close();
     activeDialogs.delete(dialog);
     if (!activeDialogs.size) body.style.overflow = previousOverflow;
-    if (trigger?.isConnected) trigger.focus();
+    const target = returnFocusRef?.current || trigger;
+    if (target?.isConnected && !target.disabled) target.focus();
   };
 }
 

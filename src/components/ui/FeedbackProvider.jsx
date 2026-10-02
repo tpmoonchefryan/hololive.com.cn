@@ -1,8 +1,9 @@
-import Modal from "../admin/ui/Modal";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { FeedbackContext } from "./feedbackContext";
+
+const Modal = lazy(() => import("../admin/ui/Modal"));
 
 const EMPTY_CONFIRM_STATE = {
   open: false,
@@ -132,7 +133,7 @@ export function FeedbackProvider({ children }) {
         ))}
       </div>
 
-      <Modal isOpen={confirmState.open} onClose={() => closeConfirm(false)} title={confirmState.title} size="sm">
+      {confirmState.open && <Suspense fallback={null}><Modal isOpen={confirmState.open} onClose={() => closeConfirm(false)} title={confirmState.title} size="sm">
           <div className="p-5">
             {confirmState.message && (
               <p className="mt-2 whitespace-pre-line break-words text-sm text-slate-600">
@@ -158,7 +159,7 @@ export function FeedbackProvider({ children }) {
               </button>
             </div>
           </div>
-      </Modal>
+      </Modal></Suspense>}
     </FeedbackContext.Provider>
   );
 }

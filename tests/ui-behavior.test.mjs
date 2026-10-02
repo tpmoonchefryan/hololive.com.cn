@@ -40,7 +40,7 @@ const consumers = [
 test('all modal consumers share the native top-layer component', () => {
   for (const file of consumers) {
     const source = read(file);
-    assert.match(source, /import Modal from/);
+    assert.match(source, /import Modal from|lazy\(\(\) => import\("\.\.\/admin\/ui\/Modal"\)/);
     assert.match(source, /<Modal\b/);
     assert.doesNotMatch(source, /aria-modal="true"/);
   }
@@ -52,7 +52,7 @@ test('all modal consumers share the native top-layer component', () => {
   assert.match(read('src/pages/ServerInfo.jsx'), /sandbox="allow-scripts allow-forms allow-pointer-lock allow-downloads"/);
 });
 test('global consumer gate rejects an independently implemented dialog', () => {
-  const migrationGate = (source) => /import Modal from/.test(source) && /<Modal\b/.test(source) && !/aria-modal="true"/.test(source);
+  const migrationGate = (source) => /import Modal from|lazy\(\(\) => import\("\.\.\/admin\/ui\/Modal"\)/.test(source) && /<Modal\b/.test(source) && !/aria-modal="true"/.test(source);
   assert.equal(migrationGate(read('src/components/ui/FeedbackProvider.jsx')), true);
   assert.equal(migrationGate('<div role="dialog" aria-modal="true">confirm</div>'), false);
 });
@@ -88,4 +88,34 @@ test('Tab wraps forward and backward without trapping ordinary intermediate navi
   trapDialogTab(event); assert.deepEqual(calls, []);
   trapDialogTab({ ...event, shiftKey: true }); assert.deepEqual(calls, ['prevent', 'last']);
   calls.length = 0; trapDialogTab({ ...event, key: 'Enter' }); assert.deepEqual(calls, []);
+});
+
+test('explicit stable return focus replaces a disconnected automatically captured trigger', () => {
+  const focused = [];
+  const stable = { isConnected: true, focus: () => focused.push('stable') };
+  const dialog = { ownerDocument: { activeElement: { isConnected: false } }, showModal() {}, close() {} };
+  openDialog(dialog, { style: { overflow: 'auto' } }, { current: stable })();
+  assert.deepEqual(focused, ['stable']);
+});
+
+test('map close bridge binds exact shape to the current iframe window', async () => {
+  const { isMapEscapeMessage } = await import('../src/lib/mapEmbedMessages.js');
+  const source = {}, other = {}, frame = { contentWindow: source };
+  const message = { source, origin: 'null', data: { type: 'hololive:map-escape', version: 1 } };
+  assert.equal(isMapEscapeMessage(message, frame), true);
+  for (const data of [null, [], 'hololive:map-escape', { type: 'hololive:map-escape' }, { type: 'hololive:map-escape', version: 2 }, { type: 'hololive:map-escape', version: 1, extra: true }, { type: 'other', version: 1 }]) {
+    assert.equal(isMapEscapeMessage({ ...message, data }, frame), false);
+  }
+  assert.equal(isMapEscapeMessage({ ...message, source: other }, frame), false);
+  assert.equal(isMapEscapeMessage(message, { contentWindow: other }), false);
+  assert.equal(isMapEscapeMessage(message, null), false);
+});
+
+test('shell labels resolve in all locales with the existing namespace separator', async () => {
+  globalThis.localStorage = { getItem: () => 'zh', setItem() {} };
+  const { default: i18n } = await import('../src/i18n.js');
+  for (const lng of ['zh', 'en', 'ja']) {
+    for (const key of ['admin.console', 'admin.backend']) assert.notEqual(i18n.t(key, { lng }), key);
+  }
+  assert.equal(i18n.options.nsSeparator, '.');
 });
