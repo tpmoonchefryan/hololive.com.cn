@@ -4,6 +4,7 @@ import { ArrowLeft, Loader2, Calendar, Image as ImageIcon, Pin } from "lucide-re
 import { useTranslation } from "react-i18next";
 import { getLocalizedContent } from "../../utils/postHelpers";
 import { formatLocalizedDate } from "../../utils/localeFormat";
+import ContentPagination from "../admin/content/ContentPagination";
 import { usePublicPostsByCategory } from "../../hooks/usePublicPostsByCategory";
 
 export default function PostCategoryListPage({
@@ -18,11 +19,13 @@ export default function PostCategoryListPage({
 }) {
   const { i18n, t } = useTranslation("docs");
   const baseUrl = import.meta.env.VITE_POCKETBASE_URL?.replace(/\/$/, "") || "";
-  const { posts, loading, error } = usePublicPostsByCategory({
+  const query = usePublicPostsByCategory({
     category,
     loadErrorKey,
     loggerScope,
   });
+
+  const { posts, loading, error } = query;
 
   return (
     <div className="min-h-screen w-full pt-20 pb-10 flex flex-col items-center bg-gradient-to-br from-slate-50 to-blue-50">
@@ -52,11 +55,12 @@ export default function PostCategoryListPage({
         {loading ? (
           <div className="flex flex-col items-center justify-center py-20">
             <Loader2 className="w-8 h-8 animate-spin text-slate-400 mb-4" />
-            <p className="text-slate-600">{t("common.loading")}</p>
+            <p className="text-slate-600">{t("routeLoading", { ns: "common" })}</p>
           </div>
         ) : error ? (
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700">
-            {error}
+            <p>{error}</p>
+            <button type="button" className="mt-2 underline" onClick={query.reload}>{t("home.retry")}</button>
           </div>
         ) : posts.length === 0 ? (
           <div className="bg-white rounded-xl p-8 text-center border border-slate-200">
@@ -133,6 +137,7 @@ export default function PostCategoryListPage({
             })}
           </div>
         )}
+        <ContentPagination query={query} />
       </main>
     </div>
   );

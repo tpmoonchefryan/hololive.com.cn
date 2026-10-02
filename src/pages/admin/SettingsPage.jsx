@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { Save, Settings, AlertTriangle } from "lucide-react";
 import pb from "../../lib/pocketbase";
@@ -117,6 +117,8 @@ const logger = createAppLogger("SettingsPage");
 export default function SettingsPage() {
   const { t } = useTranslation();
   const { notify } = useUIFeedback();
+  const feedbackRef = useRef({ t, notify });
+  feedbackRef.current = { t, notify };
   const { adminKey } = useParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -146,6 +148,7 @@ export default function SettingsPage() {
 
   // 获取系统设置
   const fetchSettings = useCallback(async () => {
+    const { t, notify } = feedbackRef.current;
     try {
       setLoading(true);
       setError(null);
@@ -207,7 +210,7 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [t, notify, adminKey]);
+  }, [adminKey]);
 
   useEffect(() => {
     fetchSettings();
