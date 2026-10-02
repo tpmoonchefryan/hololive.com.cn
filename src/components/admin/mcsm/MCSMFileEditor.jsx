@@ -21,17 +21,23 @@ export default function MCSMFileEditor({
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     if (!isOpen || !target) return;
+    let cancelled = false;
     setLoading(true);
+    setLoaded(false);
+    setContent("");
     readFile(uuid, daemonId, target)
-      .then((data) => setContent(typeof data === "string" ? data : JSON.stringify(data, null, 2)))
-      .catch(() => setContent(""))
-      .finally(() => setLoading(false));
+      .then((data) => { if (!cancelled) { setContent(data); setLoaded(true); } })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [isOpen, uuid, daemonId, target, readFile]);
 
   const handleSave = async () => {
+    if (!loaded || loading || saving) return;
     setSaving(true);
     try {
       await writeFile(uuid, daemonId, target, content);
@@ -63,6 +69,8 @@ export default function MCSMFileEditor({
         <div className="flex-1 overflow-hidden p-4">
           {loading ? (
             <ContentStateBlock loading className="h-full rounded-lg" />
+          ) : !loaded ? (
+            <div role="alert">{t("admin.mcsm.error.loadFailed")}</div>
           ) : (
             <ContentTextareaInput
               value={content}
@@ -79,7 +87,7 @@ export default function MCSMFileEditor({
           <ContentPrimaryButton
             type="button"
             onClick={handleSave}
-            disabled={saving || loading}
+            disabled={saving || loading || !loaded}
             loading={saving}
             icon={Save}
             iconSize={16}

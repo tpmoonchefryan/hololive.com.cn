@@ -15,6 +15,7 @@
     "new:migration": "node scripts/new_pb_migration.mjs"
   },
   "dependencies": {
+    "@iarna/toml": "^2.2.5",
     "@tailwindcss/vite": "^4.1.18",
     "@tiptap/extension-image": "3.30.5",
     "@tiptap/extension-link": "3.30.5",
