@@ -1,25 +1,19 @@
-import { CheckCircle, Activity, Server } from "lucide-react";
+import { Activity, Server } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 export default function DashboardTab({ settings, servers }) {
     const { t } = useTranslation();
-    const syncOk = settings.last_sync_status === "ok";
+    const syncOk = settings.last_sync_status === "ok" && /^[a-f0-9]{64}$/.test(settings.last_applied_hash || "") && Number.isFinite(Date.parse(settings.last_sync_at || ""));
+    const syncState = syncOk ? "Last sync succeeded" : settings.last_sync_status === "error" ? "Last sync failed" : settings.last_sync_status === "pending" ? "Sync pending" : "Sync unknown";
+    const syncColor = syncOk ? "text-green-600" : settings.last_sync_status === "error" ? "text-red-500" : "text-amber-600";
 
     return (
         <div className="space-y-8">
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
-                <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
-                    <h3 className="text-sm font-medium text-slate-500 mb-1">{t("admin.velocity.dashboard.status")}</h3>
-                    <div className="flex items-center gap-2 text-green-600">
-                        <CheckCircle className="w-5 h-5" />
-                        <span className="font-semibold text-lg">{t("admin.velocity.dashboard.statusActive")}</span>
-                    </div>
-                    <p className="text-xs text-slate-400 mt-2">{t("admin.velocity.dashboard.statusDesc")}</p>
-                </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
 
                 <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
                     <h3 className="text-sm font-medium text-slate-500 mb-1">{t("admin.velocity.dashboard.proxyStatus")}</h3>
-                    <div className={`flex items-center gap-2 ${settings.proxy_status === 'active' ? 'text-green-600' : 'text-red-500'}`}>
+                    <div className={`flex items-center gap-2 ${settings.proxy_status === 'active' ? 'text-green-600' : settings.proxy_status ? 'text-red-500' : 'text-amber-600'}`}>
                         <Activity className="w-5 h-5" />
                         <span className="font-semibold text-lg capitalize">
                             {settings.proxy_status || "Unknown"}
@@ -36,15 +30,16 @@ export default function DashboardTab({ settings, servers }) {
                 </div>
                 <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
                     <h3 className="text-sm font-medium text-slate-500 mb-1">{t("admin.velocity.dashboard.syncStatus", { defaultValue: "Sync" })}</h3>
-                    <div className={`flex items-center gap-2 ${syncOk ? "text-green-600" : "text-amber-600"}`}>
+                    <div className={`flex items-center gap-2 ${syncColor}`}>
                         <Activity className="w-5 h-5" />
                         <span className="font-semibold text-lg capitalize">
-                            {settings.last_sync_status || "unknown"}
+                            {t(`admin.velocity.dashboard.${syncOk ? "lastSuccess" : settings.last_sync_status === "error" ? "lastFailure" : settings.last_sync_status === "pending" ? "pending" : "unknown"}`, { defaultValue: syncState })}
                         </span>
                     </div>
                     <p className="text-xs text-slate-400 mt-2">
                         {settings.last_sync_at ? new Date(settings.last_sync_at).toLocaleTimeString() : "-"}
                     </p>
+                    {settings.last_sync_status === "error" && settings.last_sync_error && <p className="text-sm text-red-600 mt-2 break-words">{settings.last_sync_error}</p>}
                 </div>
 
                 <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">

@@ -1,3 +1,4 @@
+import { createVelocityPocketBase } from './lib/velocity-pocketbase.js';
 import { runVelocitySync, createVelocityFiles } from "./lib/velocity-sync.js";
 import PocketBase from 'pocketbase';
 import fs from 'fs/promises';
@@ -26,6 +27,8 @@ global.EventSource = EventSource;
 const pb = new PocketBase(PB_URL);
 pb.autoCancellation(false); // Disable auto-cancellation for long running process
 
+const data = createVelocityPocketBase({ pb, email: PB_ADMIN_EMAIL, password: PB_ADMIN_PASS });
+
 const logger = createLogger("VelocitySync", { levelEnv: "VELOCITY_SYNC_LOG_LEVEL" });
 const logInfo = (...args) => logger.info(...args);
 const logError = (...args) => logger.error(...args);
@@ -47,7 +50,7 @@ async function main() {
     }
 
     try {
-        await pb.admins.authWithPassword(PB_ADMIN_EMAIL, PB_ADMIN_PASS);
+        await data.authorize();
         logInfo(`[Sync] Authenticated as ${maskEmail(PB_ADMIN_EMAIL)}`);
     } catch (err) {
         logError("Failed to authenticate:", err.message);
@@ -58,7 +61,7 @@ async function main() {
     await queueSync({ reason: "initial startup", restartIfChanged: true });
 
     // Subscribe to Settings Changes (Restart Trigger & Config Updates)
-    pb.collection('velocity_settings').subscribe('*', async (e) => {
+    await data.subscribe({ onError: error => logError('[Realtime] Authorization/action failed:', error.message), velocity_settings: async (e) => {
         // logInfo(`[Realtime] Settings update detected (${e.action})`);
 
         if (e.action === 'update') {
@@ -100,10 +103,10 @@ async function main() {
                 currentSettings = newSettings;
             }
         }
-    });
+    },
 
     // Subscribe to Server Changes (Connectivity Check)
-    pb.collection('velocity_servers').subscribe('*', async (e) => {
+    velocity_servers: async (e) => {
         if (e.action === 'update' || e.action === 'create') {
             const server = e.record;
             if (server.status === 'pending') {
@@ -114,15 +117,15 @@ async function main() {
         if (e.action === 'update' || e.action === 'create' || e.action === 'delete') {
             await queueSync({ reason: `server ${e.action}`, restartIfChanged: true });
         }
-    });
+    },
 
     // Subscribe to Forced Hosts Changes
-    pb.collection('velocity_forced_hosts').subscribe('*', async (e) => {
+    velocity_forced_hosts: async (e) => {
         if (e.action === 'create' || e.action === 'update' || e.action === 'delete') {
             logInfo(`[Realtime] Forced Host change detected (${e.action}). Syncing...`);
             await queueSync({ reason: `forced-host ${e.action}`, restartIfChanged: true });
         }
-    });
+    } });
 
     // Start Monitoring
     monitorProxyStatus();
@@ -139,12 +142,9 @@ async function queueSync({ reason = "manual", restartIfChanged = false, forceRes
     syncQueue = syncQueue.catch(() => {}).then(() => runVelocitySync({
         read: async () => {
             pendingJarVersion = null;
-            const list = await pb.collection('velocity_settings').getList(1, 1);
-            if (!list.items.length) throw new Error("No velocity settings found");
-            currentSettings = list.items[0];
-            const servers = await pb.collection('velocity_servers').getFullList({ sort: 'try_order' });
-            const forcedHosts = await pb.collection('velocity_forced_hosts').getFullList();
-            return { settings: currentSettings, servers, forcedHosts };
+            const input = await data.read();
+            currentSettings = input.settings;
+            return input;
         },
         snapshot: runtimeFiles.snapshot,
         restore: runtimeFiles.restore,
@@ -182,6 +182,7 @@ async function updateProxyStatusOnce() {
         return;
     }
 
+    try { await data.authorize(); } catch (error) { logError('[Monitor] Authorization failed:', error.message); return; }
     let status;
     try {
         const { stdout } = await execAsync(`systemctl is-active ${VELOCITY_SERVICE}`);
@@ -196,7 +197,7 @@ async function updateProxyStatusOnce() {
             proxy_status: status,
             last_heartbeat: new Date().toISOString()
         };
-        await pb.collection('velocity_settings').update(currentSettings.id, payload);
+        await data.update('velocity_settings', currentSettings.id, payload);
         currentSettings = { ...currentSettings, ...payload };
         if (status !== lastReportedProxyStatus) {
             logInfo(`[Monitor] Proxy status => ${status}`);
@@ -281,7 +282,7 @@ async function updateSyncMeta(status, errorMessage = "", appliedHash) {
     };
 
     try {
-        await pb.collection('velocity_settings').update(currentSettings.id, payload);
+        await data.update('velocity_settings', currentSettings.id, payload);
         currentSettings = { ...currentSettings, ...payload };
     } catch (e) {
         throw new Error(`Failed to update sync metadata: ${e.message}`, { cause: e });
@@ -299,6 +300,7 @@ async function pathExists(filePath) {
 }
 
 async function checkServerStatus(server) {
+    await data.authorize();
     const [host, portStr] = server.address.split(':');
     const port = parseInt(portStr) || 25565;
 
@@ -307,14 +309,14 @@ async function checkServerStatus(server) {
         await tcpPing(host, port);
         const latency = Date.now() - start;
 
-        await pb.collection('velocity_servers').update(server.id, {
+        await data.update('velocity_servers', server.id, {
             status: 'online',
             ping: latency,
             last_check: new Date().toISOString()
         });
         logInfo(`[Ping] ${server.name} is ONLINE (${latency}ms)`);
     } catch (err) {
-        await pb.collection('velocity_servers').update(server.id, {
+        await data.update('velocity_servers', server.id, {
             status: 'offline',
             ping: 0,
             last_check: new Date().toISOString()

@@ -116,3 +116,5 @@ PocketBase 支持基准为 **0.26.5 和 0.34.2**；部署默认 0.26.5，升级�
 两个地图 iframe 均使用允许脚本、表单、指针锁及下载的 sandbox，刻意不启用 allow-same-origin、顶部导航或弹窗权限。代理 HTML 响应额外发送 CSP sandbox，使直接打开同源代理 URL 也不能接触站点存储。地图用匿名 CORS 加载代理资源；父页面 DOM、localStorage 和管理员 token 均处于隔离边界外。依赖持久存储或凭据的地图插件须在隔离来源重新评估，不能通过取消 sandbox 恢复。
 
 允许来源仍取自 server_maps，跨未授权来源的重定向拒绝。代理不转发站点 Cookie/Authorization；解压后的响应移除 Content-Encoding、原始长度与摘要，HTML 重写重新计算 UTF-8 长度。此方案不依赖新增 DNS 或线上来源；本地验证不代表真实地图供应者/生产浏览器验收。
+
+MCSM 公开状态与 Velocity Sync 的 `PB_EMAIL` / `PB_PASS` 必须属于 `users` 集合中 `is_admin=true` 且 `service_account=true` 的独立服务身份，不再接受超管凭据。两者共用登录/刷新检查；Velocity 每次同步、订阅回调及状态更新都复核权限。关闭人类密码登录不关闭服务身份；撤销任一服务权限后拒绝后续动作。生产切换前须由维护者在既定部署阶段核实已有服务身份与凭据，本地验证不会创建生产账号。
