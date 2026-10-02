@@ -28,7 +28,7 @@ import {
   Monitor,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import pb from "../../lib/pocketbase";
+import pb, { refreshAdminSession } from "../../lib/pocketbase";
 import GlobalBanner from "../announcement/GlobalBanner";
 import LanguageSwitcher from "./LanguageSwitcher";
 import ContentTextButton from "./content/ContentTextButton";
@@ -51,11 +51,9 @@ export default function AdminLayout() {
     let active = true;
     const verify = async () => {
       try {
-        const { record } = await pb.collection("users").authRefresh();
-        if (!record.is_admin || (!record.verified && !record.service_account)) throw new Error("Unauthorized");
-      } catch {
-        if (active) {
-          pb.authStore.clear();
+        await refreshAdminSession();
+      } catch (error) {
+        if (active && error.code !== 'SESSION_CHANGED') {
           navigate(`/${adminKey}/webadmin/login`);
         }
       }

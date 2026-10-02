@@ -1,6 +1,9 @@
 import test from 'node:test';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import PocketBase from 'pocketbase';
+import { createAdminSession } from '../src/lib/adminSession.js';
 import { binaries, pocketbase, startOwned, unusedPort, waitFor, root } from './helpers/pocketbase.mjs';
 import { verifyAdminAuth } from '../backend/scripts/lib/admin-auth.js';
 const migrations = ['1690000000_init_schema.js', '1710000000_initial_data.js', '1765100011_mcsm_config.js', '1790000000_schema_security_server_admin_authorization.js'];
@@ -77,4 +80,72 @@ test('Node authorization fails closed and rejects ordinary/self-claimed identiti
     assert.equal(await verifyAdminAuth('http://fixture', 'token', async () => ({ ok: true, json: async () => ({ record }) })), false);
   }
   assert.equal(await verifyAdminAuth('http://fixture', 'token', async () => { throw new Error('offline'); }), false);
+});
+
+for (const [version, binary] of binaries) test(`SDK session concurrency and invalidation ${version}`, async () => {
+  const server = await pocketbase(binary, migrations);
+  let release;
+  let arrived;
+  let pause = false;
+  let refreshes = 0;
+  const proxy = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const response = await fetch(server.url + req.url, {
+      method: req.method, headers: { 'Content-Type': 'application/json', Authorization: req.headers.authorization || '' },
+      ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}),
+    });
+    const body = await response.text();
+    if (req.url.endsWith('/auth-refresh')) {
+      refreshes += 1;
+      if (pause) { arrived(); await new Promise(resolve => { release = resolve; }); }
+    }
+    res.writeHead(response.status, { 'Content-Type': 'application/json' }); res.end(body);
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const client = new PocketBase(`http://127.0.0.1:${proxy.address().port}`);
+  const refresh = createAdminSession(client);
+  const password = 'Disposable-User-2026!';
+  try {
+    const users = [];
+    for (const email of ['first@example.invalid', 'second@example.invalid']) {
+      const response = await server.request('/api/collections/users/records', { method: 'POST', token: server.token,
+        body: { email, password, passwordConfirm: password, verified: true, is_admin: true } });
+      assert.equal(response.status, 200); users.push(response.data);
+    }
+    const login = async user => {
+      const response = await server.request('/api/collections/users/auth-with-password', { method: 'POST', body: { identity: user.email, password } });
+      assert.equal(response.status, 200); client.authStore.save(response.data.token, response.data.record);
+    };
+    await login(users[0]);
+    const a = refresh(), b = refresh(); assert.equal(a, b);
+    assert.equal((await a).record.id, users[0].id); assert.equal((await b).record.id, users[0].id);
+    assert.equal(refreshes, 1);
+    await refresh(); assert.equal(refreshes, 2, 'settled verification must not be cached');
+
+    // The upstream really returned 200; delay only its delivery to the SDK.
+    const waitForResponse = () => new Promise(resolve => { pause = true; arrived = resolve; });
+    let received = waitForResponse();
+    const beforeLogout = refresh();
+    const logoutRejected = assert.rejects(beforeLogout, { code: 'SESSION_CHANGED' });
+    await received; client.authStore.clear(); release(); await logoutRejected;
+    assert.equal(client.authStore.token, ''); assert.equal(client.authStore.record, null);
+
+    pause = false; await login(users[0]); received = waitForResponse();
+    const beforeNewLogin = refresh();
+    const changedRejected = assert.rejects(beforeNewLogin, { code: 'SESSION_CHANGED' });
+    await received; await login(users[1]); const newToken = client.authStore.token;
+    release(); await changedRejected;
+    assert.equal(client.authStore.record.id, users[1].id); assert.equal(client.authStore.token, newToken);
+
+    pause = false;
+    await server.request('/api/collections/users/records/' + users[1].id, { method: 'PATCH', token: server.token, body: { is_admin: false } });
+    await assert.rejects(refresh()); assert.equal(client.authStore.token, '');
+    client.authStore.save('invalid-expired-token', users[0]);
+    await assert.rejects(refresh()); assert.equal(client.authStore.token, '');
+    await login(users[0]);
+    client.baseURL = `http://127.0.0.1:${await unusedPort()}`;
+    await assert.rejects(refresh()); assert.equal(client.authStore.token, '', 'network failure cannot verify cached identity');
+  } finally {
+    release?.(); proxy.closeAllConnections(); await new Promise(resolve => proxy.close(resolve)); await server.close();
+  }
 });

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ShieldCheck, User } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import pb from "../../lib/pocketbase";
+import pb, { refreshAdminSession } from "../../lib/pocketbase";
 import ContentPageHeader from "../../components/admin/content/ContentPageHeader";
 import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
 import ContentStateBlock from "../../components/admin/content/ContentStateBlock";
@@ -16,7 +16,7 @@ export default function AdminUsersPage() {
     let active = true;
     const load = async () => {
       try {
-        const { record } = await pb.collection("users").authRefresh();
+        const { record } = await refreshAdminSession();
         if (active) setAccount(record);
       } catch {
         if (active) setAccount(null);
