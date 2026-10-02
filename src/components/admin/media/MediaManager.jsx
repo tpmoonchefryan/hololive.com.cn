@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import useContentQuery from "../../../hooks/useContentQuery";
+import ContentPagination from "../content/ContentPagination";
+import { useState, useRef } from "react";
 import {
   Upload,
   Search,
@@ -30,11 +32,9 @@ const logger = createAppLogger("MediaManager");
  * @param {Function} onSelect - 可选，选择文件时的回调函数 (url) => void
  * @param {Function} closeModal - 可选，关闭模态框的函数
  */
-export default function MediaManager({ onSelect, closeModal }) {
+export default function MediaManager({ onSelect, closeModal, selectRecord = false }) {
   const { t, i18n } = useTranslation();
   const { notify, confirm } = useUIFeedback();
-  const [mediaList, setMediaList] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [category, setCategory] = useState("all"); // all, images, videos, files
@@ -53,25 +53,8 @@ export default function MediaManager({ onSelect, closeModal }) {
     return value || "-";
   };
 
-  // 获取媒体列表
-  const fetchMedia = async () => {
-    try {
-      setLoading(true);
-      const result = await pb.collection("media").getList(1, 200, {
-        sort: "-created",
-      });
-      setMediaList(result.items);
-    } catch (error) {
-      logger.error("获取媒体列表失败:", error);
-      notify(t("admin.media.manager.toast.fetchError"), "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchMedia();
-  }, []);
+  const query = useContentQuery("media", searchQuery, onSelect ? "images" : category);
+  const { items: filteredMedia, loading, reload: fetchMedia } = query;
 
   // 上传文件
   const handleUpload = async (file) => {
@@ -131,7 +114,7 @@ export default function MediaManager({ onSelect, closeModal }) {
   // 判断文件类型（从文件名推断）
   const getFileType = (fileName) => {
     if (!fileName) return "file";
-    const lowerName = fileName.toLowerCase();
+    const lowerName = fileName;
     // 图片扩展名
     if (/\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)$/i.test(lowerName)) {
       return "image";
@@ -143,54 +126,14 @@ export default function MediaManager({ onSelect, closeModal }) {
     return "file";
   };
 
-  // 获取文件图标
-  const getFileIcon = (fileName) => {
-    const type = getFileType(fileName);
-    switch (type) {
-      case "image":
-        return ImageIcon;
-      case "video":
-        return Video;
-      default:
-        return File;
-    }
-  };
-
-  // 过滤文件
-  const filteredMedia = mediaList.filter((item) => {
-    const fileName = item.file || "";
-    
-    // 选择模式：只显示图片
-    if (onSelect) {
-      if (getFileType(fileName) !== "image") return false;
-    }
-    
-    // 分类过滤
-    if (category !== "all") {
-      const type = getFileType(fileName);
-      if (category === "images" && type !== "image") return false;
-      if (category === "videos" && type !== "video") return false;
-      if (category === "files" && (type === "image" || type === "video")) {
-        return false;
-      }
-    }
-
-    // 搜索过滤
-    if (searchQuery.trim()) {
-      if (!fileName.toLowerCase().includes(searchQuery.toLowerCase())) {
-        return false;
-      }
-    }
-
-    return true;
-  });
+  const getFileIcon = (fileName) => ({ image: ImageIcon, video: Video }[getFileType(fileName)] || File);
 
   // 处理文件选择
   const handleFileClick = (item) => {
     if (onSelect) {
       // 选择模式：触发回调并关闭模态框
       const url = getFileUrl(item);
-      onSelect(url);
+      onSelect(selectRecord ? item.id : url);
       if (closeModal) closeModal();
     } else {
       // 管理模式：显示详情
@@ -269,7 +212,7 @@ export default function MediaManager({ onSelect, closeModal }) {
       </div>
 
       {/* 文件网格 */}
-      {loading ? (
+      {query.error ? <ContentStateBlock title={t("admin.media.manager.toast.fetchError")} action={<button onClick={fetchMedia}>↻</button>} /> : loading ? (
         <ContentStateBlock
           loading
           loadingText={t("routeLoading", { ns: "common" })}
@@ -344,6 +287,7 @@ export default function MediaManager({ onSelect, closeModal }) {
         </div>
       )}
 
+      <ContentPagination query={query} />
       {/* 文件详情 Modal（管理模式） */}
       <Modal
         isOpen={Boolean(selectedMedia && !onSelect)}

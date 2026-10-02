@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Save, Pin } from "lucide-react";
 import pb from "../../lib/pocketbase";
@@ -45,6 +45,8 @@ export default function PostEditor() {
 
   // 语言选项
   const languages = useTriLanguageOptions();
+  const translateRef = useRef(t);
+  useEffect(() => { translateRef.current = t; }, [t]);
   const [activeLang, setActiveLang] = useState("zh");
 
   // 表单状态 - 多语言格式
@@ -106,20 +108,7 @@ export default function PostEditor() {
         });
 
         // 处理多语言字段：如果已经是对象则直接使用，如果是字符串则转换
-        const normalizeField = (field, defaultValue = { zh: "", en: "", ja: "" }) => {
-          if (!field) return defaultValue;
-          if (typeof field === "string") {
-            return { zh: field, en: field, ja: field };
-          }
-          if (typeof field === "object" && field !== null) {
-            return {
-              zh: field.zh || "",
-              en: field.en || "",
-              ja: field.ja || "",
-            };
-          }
-          return defaultValue;
-        };
+        const normalizeField = (field) => Object.fromEntries(["zh", "en", "ja"].map(lang => [lang, typeof field === "string" ? field : field?.[lang] || ""]));
 
         setFormData({
           title: normalizeField(post.title),
@@ -134,14 +123,14 @@ export default function PostEditor() {
         setError(null);
       } catch (err) {
         logger.error("Failed to fetch post:", err);
-        setError(t("admin.postEditor.toast.loadError"));
+        setError(translateRef.current("admin.postEditor.toast.loadError"));
       } finally {
         setLoading(false);
       }
     };
 
     fetchPost();
-  }, [id, isEditMode, t]);
+  }, [id, isEditMode]);
 
   // 一键智能翻译
   const handleAutoTranslate = async () => {

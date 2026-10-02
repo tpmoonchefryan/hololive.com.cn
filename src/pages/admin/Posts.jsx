@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import useContentQuery from "../../hooks/useContentQuery";
+import ContentPagination from "../../components/admin/content/ContentPagination";
+import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { Plus, FileText, Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -26,48 +28,12 @@ export default function Posts() {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   const { notify, confirm } = useUIFeedback();
-  const [posts, setPosts] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
   const [search, setSearch] = useState("");
 
-  // 获取文章列表
-  const fetchPosts = useCallback(async () => {
-    try {
-      setLoading(true);
-      const result = await pb.collection("posts").getList(1, 100, {
-        sort: "-updated",
-      });
-      setPosts(result.items);
-    } catch (error) {
-      logger.error("Failed to fetch posts:", error);
-      notify(t("admin.posts.toast.fetchError"), "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [notify, t]);
-
-  useEffect(() => {
-    fetchPosts();
-  }, [fetchPosts]);
-
-  const filteredPosts = useMemo(() => {
-    if (!search.trim()) return posts;
-    const q = search.trim().toLowerCase();
-    return posts.filter((post) => {
-      // 处理多语言标题（向后兼容）
-      const title = typeof post.title === "string"
-        ? post.title
-        : (post.title?.zh || post.title?.en || post.title?.ja || "");
-      const slug = post.slug || "";
-      const category = post.category || "";
-      return (
-        title.toLowerCase().includes(q) ||
-        slug.toLowerCase().includes(q) ||
-        category.toLowerCase().includes(q)
-      );
-    });
-  }, [posts, search]);
+  const query = useContentQuery("posts", search);
+  const { items: filteredPosts, loading, reload: fetchPosts } = query;
+  const posts = filteredPosts;
 
   // 格式化日期
   const formatDate = (dateString) => {
@@ -107,16 +73,10 @@ export default function Posts() {
       setDeletingId(postId);
 
       // 先获取文章信息用于日志记录
-      let postTitle = "Unknown Post";
+      let postTitle = "Post";
       try {
         const post = await pb.collection("posts").getOne(postId);
-        if (post.title) {
-          if (typeof post.title === "object") {
-            postTitle = post.title.zh || post.title.en || post.title.ja || "Unknown Post";
-          } else {
-            postTitle = post.title;
-          }
-        }
+        postTitle = getLocalizedContent(post, "title", "zh") || "Post";
       } catch {
         logger.warn("Failed to fetch post info for logging");
       }
@@ -134,16 +94,6 @@ export default function Posts() {
     } finally {
       setDeletingId(null);
     }
-  };
-
-  // 分类颜色映射
-  const getCategoryColor = (category) => {
-    const colors = {
-      "公告": "bg-sky-100 text-sky-800",
-      "文档": "bg-emerald-100 text-emerald-800",
-      "更新日志": "bg-amber-100 text-amber-800",
-    };
-    return colors[category] || "bg-slate-100 text-slate-800";
   };
 
   return (
@@ -178,7 +128,7 @@ export default function Posts() {
       />
 
       {/* 列表内容 */}
-      {loading ? (
+      {query.error ? <ContentStateBlock title={t("admin.posts.toast.fetchError")} action={<button onClick={fetchPosts}>{t("admin.posts.title")}</button>} /> : loading ? (
         <ContentStateBlock
           loading
           loadingText={t("admin.posts.loading")}
@@ -221,9 +171,7 @@ export default function Posts() {
                   <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                     {post.category ? (
                       <span
-                        className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${getCategoryColor(
-                          post.category,
-                        )}`}
+                        className="inline-flex items-center rounded-full px-2 py-0.5 font-medium bg-sky-100 text-sky-800"
                       >
                         {getCategoryLabel(post.category)}
                       </span>
@@ -268,6 +216,7 @@ export default function Posts() {
           ))}
         </div>
       )}
+      <ContentPagination query={query} />
     </div>
   );
 }
