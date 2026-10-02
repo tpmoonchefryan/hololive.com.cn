@@ -35,6 +35,11 @@ for (const [version, binary] of binaries) test(`server authorization ${version}`
     assert.notEqual((await login(impostor.email)).status, 200);
     const adminLogin = await login(admin.email); assert.equal(adminLogin.status, 200, JSON.stringify(adminLogin));
     const token = adminLogin.data.token;
+    const visibleAccounts = await request('/api/collections/users/records', { token });
+    assert.deepEqual(visibleAccounts.data.items.map(item => item.id), [admin.id]);
+    assert.notEqual((await record('users', { email: 'created-by-admin@example.invalid', password, passwordConfirm: password }, token)).status, 200);
+    assert.notEqual((await request('/api/collections/users/records/' + admin.id, { token, method: 'PATCH', body: { service_account: true } })).status, 200);
+    assert.notEqual((await request('/api/collections/users/records/' + ordinary.id, { token, method: 'DELETE' })).status, 200);
     for (const [file, portEnv, route, admittedStatus] of [['mcsm_proxy.js', 'MCSM_PROXY_PORT', '/admin/overview', 503], ['ai_translate_proxy.js', 'AI_TRANSLATE_PROXY_PORT', '/admin/unknown', 404]]) {
       const port = await unusedPort();
       const proxy = await startOwned(process.execPath, [path.join(root, 'backend/scripts', file)], { PB_URL: pb.url, [portEnv]: String(port), MCSM_PROXY_LOG_LEVEL: 'error', AI_TRANSLATE_PROXY_LOG_LEVEL: 'error' });
