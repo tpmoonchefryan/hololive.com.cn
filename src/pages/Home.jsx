@@ -143,22 +143,14 @@ function HomeContent({ sections }) {
 
 export default function Home() {
   const { t } = useTranslation("home");
-  const { sections, loading } = useCmsSections();
-
-  if (loading) {
-    return (
-      <div className="relative w-full min-h-screen overflow-hidden flex items-center justify-center">
-        <div className="text-white text-xl">{t("common.loading")}</div>
+  const { sections, loading, error, retry } = useCmsSections();
+  if (loading || error || sections.length === 0) {
+    return <main className="min-h-screen flex items-center justify-center bg-slate-950 px-6 pt-24 text-white">
+      <div className="text-center" role={error ? "alert" : "status"} aria-live="polite">
+        <p className="text-xl font-semibold">{t(loading ? "loading" : error ? "error" : "empty")}</p>
+        {error && <button type="button" onClick={retry} className="mt-5 rounded-lg bg-blue-700 px-5 py-3 font-semibold text-white hover:bg-blue-800">{t("retry")}</button>}
       </div>
-    );
-  }
-
-  if (sections.length === 0) {
-    return (
-      <div className="relative w-full min-h-screen overflow-hidden flex items-center justify-center">
-        <div className="text-white text-xl">{t("common.empty")}</div>
-      </div>
-    );
+    </main>;
   }
 
   // 只有在数据准备好后才渲染使用 useScroll 的组件

@@ -61,6 +61,7 @@ const resources = {
       },
     },
     home: {
+      loading: "加载中...", empty: "暂无内容", error: "首页加载失败，请稍后重试。", retry: "重试",
       common: {
         loading: '加载中...',
         empty: '暂无内容',
@@ -1218,6 +1219,7 @@ const resources = {
       },
     },
     home: {
+      loading: "Loading...", empty: "No content yet", error: "Unable to load the homepage. Please try again.", retry: "Try again",
       common: {
         loading: 'Loading...',
         empty: 'No Content',
@@ -2361,6 +2363,7 @@ const resources = {
       },
     },
     home: {
+      loading: "読み込み中...", empty: "コンテンツはまだありません", error: "ホームページを読み込めませんでした。再試行してください。", retry: "再試行",
       common: {
         loading: '読み込み中...',
         empty: 'コンテンツはありません',

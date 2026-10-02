@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { X, Save } from "lucide-react";
+import { Save } from "lucide-react";
 import ContentStateBlock from "../content/ContentStateBlock";
 import ContentTextareaInput from "../content/ContentTextareaInput";
 import ContentSecondaryButton from "../content/ContentSecondaryButton";
 import ContentPrimaryButton from "../content/ContentPrimaryButton";
-import ContentIconActionButton from "../content/ContentIconActionButton";
+import Modal from "../ui/Modal";
 
 export default function MCSMFileEditor({
   isOpen,
@@ -52,20 +52,7 @@ export default function MCSMFileEditor({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-          <h3 className="font-semibold text-slate-800 truncate">{fileName || target}</h3>
-          <ContentIconActionButton
-            onClick={onClose}
-            tone="neutral"
-            icon={X}
-            size="sm"
-            iconSize={20}
-            title={t("admin.mcsm.files.cancel")}
-            aria-label={t("admin.mcsm.files.cancel")}
-          />
-        </div>
+    <Modal isOpen={isOpen} onClose={onClose} title={fileName || target} size="lg">
         <div className="flex-1 overflow-hidden p-4">
           {loading ? (
             <ContentStateBlock loading className="h-full rounded-lg" />
@@ -95,7 +82,6 @@ export default function MCSMFileEditor({
             {t("admin.mcsm.files.save")}
           </ContentPrimaryButton>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

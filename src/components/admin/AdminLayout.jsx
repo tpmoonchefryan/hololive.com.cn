@@ -1,3 +1,4 @@
+import Modal from "./ui/Modal";
 import { useState, useEffect } from "react";
 import {
   Outlet,
@@ -43,6 +44,7 @@ export default function AdminLayout() {
   const location = useLocation();
   const user = pb.authStore.model;
   const [expandedMenus, setExpandedMenus] = useState({});
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
@@ -199,6 +201,15 @@ export default function AdminLayout() {
       {/* 顶部全站公告 */}
       <GlobalBanner />
 
+      <Modal isOpen={mobileMenuOpen} onClose={() => setMobileMenuOpen(false)} title={t("admin.console")} size="sm">
+        <nav aria-label={t("admin.console")} className="p-4 grid gap-1">
+          {navItems.flatMap((item) => item.children || [item]).map((item) => (
+            <Link key={item.key} to={item.path} aria-current={isActive(item.path) ? "page" : undefined} onClick={() => setMobileMenuOpen(false)} className="rounded-lg px-3 py-3 text-slate-900 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-blue-600">{item.label}</Link>
+          ))}
+          <Link to="/" onClick={() => setMobileMenuOpen(false)} className="rounded-lg px-3 py-3 text-slate-900 hover:bg-slate-100">{t("admin.sidebar.backHome")}</Link>
+          <button type="button" disabled={loggingOut} onClick={handleLogout} className="text-left rounded-lg px-3 py-3 text-slate-900 hover:bg-slate-100">{t("admin.sidebar.logout")}</button>
+        </nav>
+      </Modal>
       <div className="flex flex-1">
         {/* 侧边栏 */}
         <aside className="hidden md:flex md:w-64 lg:w-72 bg-slate-950 text-white flex-col border-r border-slate-800/80">
@@ -348,6 +359,7 @@ export default function AdminLayout() {
 
           {/* 移动端简单顶部栏，仅展示标题 */}
           <header className="md:hidden px-4 py-2 border-b border-slate-200 bg-white/90 backdrop-blur-md flex items-center justify-between">
+            <button type="button" onClick={() => setMobileMenuOpen(true)} aria-haspopup="dialog" aria-expanded={mobileMenuOpen} className="rounded-lg border border-slate-200 px-3 py-2 text-slate-900">{t("navbar.openMenu", { ns: "common" })}</button>
             <h1 className="text-base font-semibold text-slate-900">
               {currentTitle}
             </h1>

@@ -1,3 +1,4 @@
+import Modal from "../components/admin/ui/Modal";
 import { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -224,42 +225,11 @@ export default function ServerInfo() {
     setIsMapFullscreen(!isMapFullscreen);
   };
 
-  // ESC 键退出全屏
-  useEffect(() => {
-    const handleEsc = (e) => {
-      if (e.key === "Escape" && isMapFullscreen) {
-        setIsMapFullscreen(false);
-      }
-    };
-    window.addEventListener("keydown", handleEsc);
-    return () => window.removeEventListener("keydown", handleEsc);
-  }, [isMapFullscreen]);
-
-  useEffect(() => {
-    if (!isMapFullscreen) return undefined;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [isMapFullscreen]);
-
   return (
     <>
       {/* Fullscreen Map Overlay */}
       {isMapFullscreen && selectedMap && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("serverInfo.map.fullscreenDialog")}
-          className="fixed inset-0 z-[110] w-screen h-screen bg-background flex flex-col"
-        >
-          {/* Header with title */}
-          <div className="flex items-center justify-between px-6 py-4 bg-slate-50 border-b border-slate-200">
-            <h3 className="text-xl font-bold text-slate-900">
-              {selectedMap.name}
-            </h3>
-          </div>
+        <Modal isOpen={isMapFullscreen} onClose={() => setIsMapFullscreen(false)} title={selectedMap.name} size="full">
           {/* Fullscreen iframe */}
           <div className="flex-1 relative w-full h-full">
             {mapBlockedByMixedContent ? (
@@ -306,7 +276,7 @@ export default function ServerInfo() {
               <Minimize size={20} className="text-slate-700 group-hover:text-slate-900" />
             </button>
           </div>
-        </div>
+        </Modal>
       )}
 
       <div className="min-h-screen w-full pt-20 pb-10 flex flex-col items-center bg-gradient-to-br from-slate-50 to-blue-50">
