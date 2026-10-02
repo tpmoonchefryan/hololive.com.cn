@@ -1,13 +1,14 @@
+import { runVelocitySync, createVelocityFiles } from "./lib/velocity-sync.js";
 import PocketBase from 'pocketbase';
 import fs from 'fs/promises';
 import path from 'path';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import net from 'net';
-import { createHash } from 'crypto';
 import { createLogger, maskEmail } from './logger.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Configuration
 const PB_URL = process.env.PB_URL || "http://127.0.0.1:8090";
@@ -16,7 +17,6 @@ const PB_ADMIN_PASS = process.env.PB_PASS?.trim();
 const VELOCITY_DIR = process.env.VELOCITY_DIR || "/opt/velocity";
 const VELOCITY_SERVICE = "velocity";
 const VELOCITY_OWNER = process.env.VELOCITY_OWNER || "ubuntu:ubuntu";
-const FORWARDING_SECRET_FILENAME = "forwarding.secret";
 const JAR_REF_MARKER = ".velocity_jar_ref";
 
 // EventSource required for Realtime in Node environment
@@ -28,13 +28,13 @@ pb.autoCancellation(false); // Disable auto-cancellation for long running proces
 
 const logger = createLogger("VelocitySync", { levelEnv: "VELOCITY_SYNC_LOG_LEVEL" });
 const logInfo = (...args) => logger.info(...args);
-const logWarn = (...args) => logger.warn(...args);
 const logError = (...args) => logger.error(...args);
 
 // State
 let currentSettings = null;
 let syncQueue = Promise.resolve({ configChanged: false, jarChanged: false, appliedHash: "" });
 let lastReportedProxyStatus = null;
+let pendingJarVersion = null;
 
 async function main() {
     logInfo(`[Sync] Starting Velocity Sync Daemon...`);
@@ -133,32 +133,37 @@ async function main() {
     process.stdin.resume();
 }
 
+const runtimeFiles = createVelocityFiles({ fs, directory: VELOCITY_DIR, join: path.join, ownership: ensureOwnership });
+
 async function queueSync({ reason = "manual", restartIfChanged = false, forceRestart = false } = {}) {
-    syncQueue = syncQueue
-        .catch(() => ({ configChanged: false, jarChanged: false, appliedHash: "" }))
-        .then(async () => {
-            try {
-                const result = await syncConfig();
-                await updateJarVersion();
-
-                if (forceRestart) {
-                    logInfo(`[Sync] Restart requested (${reason}).`);
-                    await restartService();
-                } else if (restartIfChanged && (result.configChanged || result.jarChanged)) {
-                    logInfo(`[Sync] Restart required because config changed (${reason}).`);
-                    await restartService();
-                }
-
-                await updateSyncMeta("ok", "", result.appliedHash);
-                return result;
-            } catch (err) {
-                logError(`[Sync] queueSync failed (${reason}):`, err.message);
-                await updateSyncMeta("error", err.message || String(err), "");
-                return { configChanged: false, jarChanged: false, appliedHash: "" };
+    syncQueue = syncQueue.catch(() => {}).then(() => runVelocitySync({
+        read: async () => {
+            pendingJarVersion = null;
+            const list = await pb.collection('velocity_settings').getList(1, 1);
+            if (!list.items.length) throw new Error("No velocity settings found");
+            currentSettings = list.items[0];
+            const servers = await pb.collection('velocity_servers').getFullList({ sort: 'try_order' });
+            const forcedHosts = await pb.collection('velocity_forced_hosts').getFullList();
+            return { settings: currentSettings, servers, forcedHosts };
+        },
+        snapshot: runtimeFiles.snapshot,
+        restore: runtimeFiles.restore,
+        applyConfig: runtimeFiles.applyConfig,
+        applyJar: async settings => {
+            const changed = await syncJarIfNeeded(settings);
+            const jarPath = path.join(VELOCITY_DIR, 'velocity.jar');
+            if (await pathExists(jarPath)) {
+                const { stdout } = await execFileAsync('unzip', ['-p', jarPath, 'META-INF/MANIFEST.MF']);
+                pendingJarVersion = stdout.match(/^Implementation-Version:\s*(.+)$/m)?.[1]?.trim() || null;
             }
-        });
-
-    return syncQueue;
+            return changed;
+        },
+        applySecret: runtimeFiles.applySecret,
+        restart: restartService,
+        report: updateSyncMeta,
+    }, { restartIfChanged, forceRestart }));
+    try { return await syncQueue; }
+    catch (error) { logError(`[Sync] Failed (${reason}):`, error.message); return { status: "failed", stage: error.stage, error: error.message }; }
 }
 
 async function monitorProxyStatus() {
@@ -202,106 +207,6 @@ async function updateProxyStatusOnce() {
     }
 }
 
-async function syncConfig() {
-    const noChange = { configChanged: false, jarChanged: false, appliedHash: "" };
-
-    // Fetch Settings
-    try {
-        const list = await pb.collection('velocity_settings').getList(1, 1);
-        if (list.items.length === 0) {
-            logError("No velocity settings found.");
-            return noChange;
-        }
-        currentSettings = list.items[0];
-    } catch (err) {
-        logError("Error fetching settings:", err.message);
-        return noChange;
-    }
-
-    // Fetch Servers
-    let servers;
-    try {
-        servers = await pb.collection('velocity_servers').getFullList({ sort: 'try_order' });
-    } catch (err) {
-        logError("Error fetching servers:", err.message);
-        return noChange;
-    }
-
-    // Fetch Forced Hosts
-    let forcedHosts = [];
-    try {
-        forcedHosts = await pb.collection('velocity_forced_hosts').getFullList();
-    } catch (err) {
-        // Is okay, maybe collection not ready
-    }
-
-    let jarChanged = false;
-    try {
-        jarChanged = await syncJarIfNeeded(currentSettings);
-    } catch (err) {
-        logError("[Sync] Failed to sync velocity.jar:", err.message);
-    }
-
-    try {
-        await ensureForwardingSecretFile(currentSettings.forwarding_secret);
-    } catch (err) {
-        logError("[Sync] Failed to sync forwarding secret file:", err.message);
-    }
-
-    // Generate velocity.toml
-    const tomlContent = generateToml(currentSettings, servers, forcedHosts);
-    const appliedHash = createHash("sha256").update(tomlContent).digest("hex");
-    const tomlPath = path.join(VELOCITY_DIR, 'velocity.toml');
-
-    let configChanged = false;
-
-    // Check config difference
-    try {
-        const currentToml = await fs.readFile(tomlPath, 'utf8');
-        if (currentToml.trim() !== tomlContent.trim()) {
-            configChanged = true;
-        }
-    } catch (e) {
-        configChanged = true;
-    }
-
-    if (configChanged) {
-        logInfo("[Sync] Configuration changed. Updating velocity.toml...");
-        await fs.writeFile(tomlPath, tomlContent);
-        await ensureOwnership(tomlPath);
-    }
-
-    return { configChanged, jarChanged, appliedHash };
-}
-
-async function updateJarVersion() {
-    const jarPath = path.join(VELOCITY_DIR, 'velocity.jar');
-    try {
-        // Check if JAR exists
-        await fs.access(jarPath);
-
-        // Velocity doesn't support --version CLI flag.
-        // We use unzip to read META-INF/MANIFEST.MF
-        // Implementation-Version: 3.3.0-SNAPSHOT
-        const { stdout } = await execAsync(`unzip -p "${jarPath}" META-INF/MANIFEST.MF | grep "Implementation-Version"`);
-
-        // Output example: "Implementation-Version: 3.3.0-SNAPSHOT"
-        const versionLine = stdout.split(':')[1]?.trim();
-
-        if (versionLine && currentSettings && currentSettings.jar_version !== versionLine) {
-            logInfo(`[Version] Detected new version: ${versionLine}`);
-            await pb.collection('velocity_settings').update(currentSettings.id, {
-                jar_version: versionLine
-            });
-            // Update local state
-            currentSettings.jar_version = versionLine;
-        }
-    } catch (err) {
-        // Suppress error if just unzip check fails, but log if needed
-        // logWarn("[Version] Failed to detect version:", err.message);
-    }
-}
-
 async function restartService() {
     logInfo("[Sync] Restarting Velocity service...");
     try {
@@ -309,6 +214,7 @@ async function restartService() {
         logInfo("[Sync] Service restarted successfully.");
     } catch (err) {
         logError("Failed to restart service:", err.message);
+        throw err;
     }
 }
 
@@ -318,12 +224,13 @@ async function syncJarIfNeeded(settings) {
 
     const jarPath = path.join(VELOCITY_DIR, 'velocity.jar');
     const markerPath = path.join(VELOCITY_DIR, JAR_REF_MARKER);
-    const jarRef = `${settings.id}:${jarField}:${settings.updated || ""}`;
+    const jarRef = `${settings.id}:${jarField}`;
 
     let markerRef;
     try {
         markerRef = (await fs.readFile(markerPath, "utf8")).trim();
     } catch (e) {
+        if (e.code !== "ENOENT") throw e;
         markerRef = "";
     }
 
@@ -333,7 +240,7 @@ async function syncJarIfNeeded(settings) {
 
     const jarUrl = pb.files.getURL(settings, jarField);
     const headers = pb.authStore.token ? { Authorization: `Bearer ${pb.authStore.token}` } : {};
-    const res = await fetch(jarUrl, { headers });
+    const res = await fetch(jarUrl, { headers, signal: AbortSignal.timeout(30000) });
     if (!res.ok) {
         throw new Error(`download failed with status ${res.status}`);
     }
@@ -344,85 +251,40 @@ async function syncJarIfNeeded(settings) {
     }
 
     const tmpPath = `${jarPath}.tmp`;
-    const backupPath = `${jarPath}.bak`;
-
     await fs.writeFile(tmpPath, fileBuffer);
     await ensureOwnership(tmpPath);
-
-    const hadOldJar = await pathExists(jarPath);
-    if (await pathExists(backupPath)) {
-        await fs.unlink(backupPath);
-    }
-
-    try {
-        if (hadOldJar) {
-            await fs.rename(jarPath, backupPath);
-        }
-        await fs.rename(tmpPath, jarPath);
-    } catch (err) {
-        if (await pathExists(tmpPath)) {
-            await fs.unlink(tmpPath);
-        }
-        if (hadOldJar && await pathExists(backupPath)) {
-            await fs.rename(backupPath, jarPath);
-        }
-        throw err;
-    }
-
-    if (await pathExists(backupPath)) {
-        await fs.unlink(backupPath);
-    }
-    await ensureOwnership(jarPath);
-    await fs.writeFile(markerPath, `${jarRef}\n`);
-    await ensureOwnership(markerPath);
+    await fs.rename(tmpPath, jarPath);
+    await fs.writeFile(`${markerPath}.tmp`, `${jarRef}\n`);
+    await ensureOwnership(`${markerPath}.tmp`);
+    await fs.rename(`${markerPath}.tmp`, markerPath);
 
     logInfo("[Sync] velocity.jar updated from PocketBase file.");
     return true;
-}
-
-async function ensureForwardingSecretFile(secretValue) {
-    const secret = `${secretValue || ""}`.trim();
-    if (!secret) {
-        throw new Error("forwarding_secret is empty");
-    }
-
-    const secretPath = path.join(VELOCITY_DIR, FORWARDING_SECRET_FILENAME);
-    let existingSecret;
-    try {
-        existingSecret = (await fs.readFile(secretPath, "utf8")).trim();
-    } catch (e) {
-        existingSecret = "";
-    }
-
-    if (existingSecret === secret) return;
-
-    await fs.writeFile(secretPath, `${secret}\n`, { mode: 0o600 });
-    await ensureOwnership(secretPath);
 }
 
 async function ensureOwnership(filePath) {
     try {
         await execAsync(`chown ${VELOCITY_OWNER} "${filePath}"`);
     } catch (e) {
-        logWarn(`[Sync] Failed to chown ${filePath}:`, e.message);
+        throw new Error(`Failed to chown ${filePath}: ${e.message}`, { cause: e });
     }
 }
 
-async function updateSyncMeta(status, errorMessage = "", appliedHash = "") {
+async function updateSyncMeta(status, errorMessage = "", appliedHash) {
     if (!currentSettings?.id) return;
 
     const payload = {
         last_sync_status: status,
         last_sync_error: (errorMessage || "").slice(0, 1000),
         last_sync_at: new Date().toISOString(),
-        last_applied_hash: appliedHash || "",
+        ...(status === "ok" ? { last_applied_hash: appliedHash, ...(pendingJarVersion ? { jar_version: pendingJarVersion } : {}) } : {}),
     };
 
     try {
         await pb.collection('velocity_settings').update(currentSettings.id, payload);
         currentSettings = { ...currentSettings, ...payload };
     } catch (e) {
-        logWarn("[Sync] Failed to update sync metadata:", e.message);
+        throw new Error(`Failed to update sync metadata: ${e.message}`, { cause: e });
     }
 }
 
@@ -431,6 +293,7 @@ async function pathExists(filePath) {
         await fs.access(filePath);
         return true;
     } catch (e) {
+        if (e.code !== "ENOENT") throw e;
         return false;
     }
 }
@@ -486,100 +349,6 @@ function tcpPing(host, port) {
     });
 }
 
-function generateToml(settings, servers, forcedHosts = []) {
-    const toTomlString = (value) => `${value ?? ""}`.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const asNumber = (value, fallback) => {
-        const parsed = Number(value);
-        return Number.isFinite(parsed) ? parsed : fallback;
-    };
-    const asBool = (value, fallback) => (typeof value === "boolean" ? value : fallback);
-
-    let serversBlock = "";
-    servers.forEach(srv => {
-        serversBlock += `"${toTomlString(srv.name)}" = "${toTomlString(srv.address)}"\n`;
-    });
-
-    let tryServers = servers
-        .filter(s => s.is_try_server)
-        .sort((a, b) => a.try_order - b.try_order)
-        .map(s => `"${toTomlString(s.name)}"`)
-        .join(", ");
-
-    if (!tryServers) {
-        if (servers.length > 0) tryServers = `"${toTomlString(servers[0].name)}"`;
-        else tryServers = "";
-    }
-
-    let forcedHostsBlock = "";
-    forcedHosts.forEach(host => {
-        const hostServers = Array.isArray(host.server)
-            ? host.server
-            : (host.server ? [host.server] : []);
-        const targetServerNames = hostServers
-            .map((id) => servers.find((s) => s.id === id))
-            .filter(Boolean)
-            .map((s) => `"${toTomlString(s.name)}"`);
-
-        if (targetServerNames.length > 0) {
-            forcedHostsBlock += `"${toTomlString(host.hostname)}" = [${targetServerNames.join(", ")}]\n`;
-        }
-    });
-
-    // Modern Velocity 3.x TOML Structure (Flat)
-    return `
-# Velocity Configuration - Managed by PocketBase
-# DO NOT EDIT MANUALLY
-config-version = "2.7"
-bind = "0.0.0.0:${toTomlString(settings.bind_port || 25577)}"
-motd = "${toTomlString(settings.motd)}"
-show-max-players = ${asNumber(settings.max_players, 500)}
-online-mode = ${asBool(settings.online_mode, false)}
-sample-players-in-ping = ${asBool(settings.sample_players_in_ping, true)}
-enable-player-address-logging = ${asBool(settings.enable_player_address_logging, true)}
-force-key-authentication = ${asBool(settings.force_key_authentication, false)}
-prevent-client-proxy-connections = ${asBool(settings.prevent_client_proxy_connections, false)}
-player-info-forwarding-mode = "${toTomlString(settings.player_info_forwarding_mode || 'modern')}"
-forwarding-secret-file = "${FORWARDING_SECRET_FILENAME}"
-announce-forge = ${asBool(settings.announce_forge, false)}
-kick-existing-players = ${asBool(settings.kick_existing_players, false)}
-ping-passthrough = "${toTomlString(settings.ping_passthrough || 'DISABLED')}"
-accepts-transfers = ${asBool(settings.accepts_transfers, false)}
-
-[servers]
-${serversBlock}
-try = [${tryServers}]
-
-[forced-hosts]
-${forcedHostsBlock}
-
-[advanced]
-compression-threshold = ${asNumber(settings.compression_threshold, 256)}
-compression-level = ${asNumber(settings.compression_level, -1)}
-login-ratelimit = ${asNumber(settings.login_ratelimit, 3000)}
-connection-timeout = ${asNumber(settings.connection_timeout, 5000)}
-read-timeout = ${asNumber(settings.read_timeout, 30000)}
-failover-on-unexpected-server-disconnect = ${asBool(settings.failover_on_unexpected_server_disconnect, true)}
-haproxy-protocol = ${asBool(settings.haproxy_protocol, false)}
-tcp-fast-open = ${asBool(settings.tcp_fast_open, false)}
-bungee-plugin-message-channel = ${asBool(settings.bungee_plugin_message_channel, true)}
-show-ping-requests = ${asBool(settings.show_ping_requests, false)}
-log-command-executions = ${asBool(settings.log_command_executions, false)}
-log-player-connections = ${asBool(settings.log_player_connections, true)}
-enable-reuse-port = ${asBool(settings.enable_reuse_port, false)}
-announce-proxy-commands = ${asBool(settings.expose_proxy_commands, false)}
-command-rate-limit = ${asNumber(settings.command_rate_limit, 0)}
-forward-commands-if-rate-limited = ${asBool(settings.forward_commands_if_rate_limited, true)}
-kick-after-rate-limited-commands = ${asNumber(settings.kick_after_rate_limited_commands, 5)}
-tab-complete-rate-limit = ${asNumber(settings.tab_complete_rate_limit, 0)}
-kick-after-rate-limited-tab-completes = ${asNumber(settings.kick_after_rate_limited_tab_completes, 5)}
-
-[query]
-enabled = ${asBool(settings.query_enabled, false)}
-port = ${asNumber(settings.query_port, 25577)}
-map = "${toTomlString(settings.query_map || 'Velocity')}"
-show-plugins = ${asBool(settings.query_show_plugins, false)}
-`;
-}
 
 
 main().catch((err) => {

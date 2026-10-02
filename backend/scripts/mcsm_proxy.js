@@ -1,3 +1,4 @@
+import { createConfigLoader } from "./lib/mcsm-config.js";
 import { verifyAdminAuth } from "./lib/admin-auth.js";
 import http from "http";
 import { createLogger } from "./logger.js";
@@ -45,43 +46,10 @@ setInterval(() => {
 }, 300000);
 
 // --- MCSM config cache (from PocketBase) ---
-let cachedConfig = null;
-let configExpiresAt = 0;
-
-async function loadConfig(authHeader) {
-  const now = Date.now();
-  // Public routes (no auth): always use cache if available
-  if (!authHeader) {
-    if (cachedConfig) return cachedConfig;
-    throw new Error("no cached config available for public route");
-  }
-  // Admin routes: short 5s cache so config changes are picked up quickly
-  if (cachedConfig && now < configExpiresAt) return cachedConfig;
-
-  const endpoint = `${PB_URL}/api/collections/mcsm_config/records?perPage=1`;
-  const res = await fetch(endpoint, { headers: { Authorization: authHeader } });
-  if (!res.ok) {
-    if (cachedConfig) return cachedConfig;
-    throw new Error(`failed to load mcsm_config: HTTP ${res.status}`);
-  }
-  const payload = await res.json();
-  const item = payload?.items?.[0];
-  if (!item) {
-    if (cachedConfig) return cachedConfig;
-    throw new Error("mcsm_config record not found");
-  }
-
-  cachedConfig = {
-    panelUrl: `${item.panel_url || ""}`.replace(/\/$/, ""),
-    apiKey: item.api_key || "",
-    enabled: !!item.enabled,
-    publicCacheTtl: item.public_cache_ttl || 10000,
-    instanceLabels: item.instance_labels || {},
-    hiddenInstances: item.hidden_instances || [],
-  };
-  configExpiresAt = now + 5000; // 5s TTL for admin-loaded config
-  return cachedConfig;
-}
+const loadConfig = createConfigLoader({
+  pbUrl: PB_URL, serviceEmail: process.env.PB_EMAIL?.trim(), servicePassword: process.env.PB_PASS?.trim(),
+  ttlMs: Math.min(CONFIG_CACHE_TTL_MS, 5000), timeoutMs: REQUEST_TIMEOUT_MS,
+});
 
 // --- PocketBase auth verification ---
 async function verifyPBAuth(authHeader) {
@@ -117,10 +85,10 @@ async function mcsmFetch(config, path, { method = "GET", body, query } = {}) {
     const logUrl = finalUrl.replace(/apikey=[^&]+/, "apikey=***");
     logger.debug(`MCSM ${method} ${logUrl}`);
     const res = await fetch(finalUrl, opts);
-    clearTimeout(timeout);
     const data = await res.json();
-    if (data?.status && data.status !== 200) {
-      logger.warn(`MCSM ${method} ${path} → ${data.status}: ${typeof data.data === "string" ? data.data : JSON.stringify(data.data)}`);
+    clearTimeout(timeout);
+    if (!res.ok || data?.status !== 200) {
+      throw new Error(`MCSM ${method} ${path} failed: HTTP ${res.status}, status ${data?.status ?? "missing"}`);
     }
     return { status: res.status, data };
   } catch (err) {
@@ -197,6 +165,7 @@ function calcNodeMemoryPercent(used, total) {
 // --- Public status cache ---
 let publicStatusCache = null;
 let publicStatusExpiresAt = 0;
+let publicStatusConfig = null;
 
 // --- Fetch all nodes with instances via remote_services ---
 async function fetchNodesWithInstances(config) {
@@ -223,7 +192,7 @@ async function handlePublicStatus(req, res) {
   const config = await loadConfig();
   if (!config.enabled) return sendJSON(res, 503, { error: "mcsm disabled" });
 
-  if (publicStatusCache && now < publicStatusExpiresAt) {
+  if (publicStatusCache && publicStatusConfig === config && now < publicStatusExpiresAt) {
     return sendJSON(res, 200, publicStatusCache);
   }
 
@@ -279,6 +248,7 @@ async function handlePublicStatus(req, res) {
   }
 
   publicStatusCache = { instances, timestamp: now };
+  publicStatusConfig = config;
   publicStatusExpiresAt = now + config.publicCacheTtl;
   return sendJSON(res, 200, publicStatusCache);
 }

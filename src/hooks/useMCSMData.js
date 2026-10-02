@@ -1,3 +1,4 @@
+import { createMCSMClient } from "../lib/mcsmClient";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import pb from "../lib/pocketbase";
@@ -5,56 +6,11 @@ import { useUIFeedback } from "./useUIFeedback";
 import { createAppLogger } from "../lib/appLogger";
 
 const logger = createAppLogger("useMCSMData");
-const MCSM_API = "/mcsm-api";
-
-function authHeaders() {
-    return { Authorization: pb.authStore.token };
-}
-
-async function mcsmGet(path, params = {}) {
-    const url = new URL(`${MCSM_API}${path}`, window.location.origin);
-    for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-    const res = await fetch(url.toString(), { headers: authHeaders() });
-    return res.json();
-}
-
-async function mcsmPost(path, body = {}, params = {}) {
-    const url = new URL(`${MCSM_API}${path}`, window.location.origin);
-    for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-    const res = await fetch(url.toString(), {
-        method: "POST",
-        headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    return res.json();
-}
-
-async function mcsmPut(path, body = {}, params = {}) {
-    const url = new URL(`${MCSM_API}${path}`, window.location.origin);
-    for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-    const res = await fetch(url.toString(), {
-        method: "PUT",
-        headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    return res.json();
-}
-
-async function mcsmDelete(path, body = {}) {
-    const url = new URL(`${MCSM_API}${path}`, window.location.origin);
-    const res = await fetch(url.toString(), {
-        method: "DELETE",
-        headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    return res.json();
-}
+const mcsm = createMCSMClient({ token: () => pb.authStore.token });
+const mcsmGet = (path, params) => mcsm(path, { params });
+const mcsmPost = (path, body, params) => mcsm(path, { method: "POST", body, params });
+const mcsmPut = (path, body, params) => mcsm(path, { method: "PUT", body, params });
+const mcsmDelete = (path, body) => mcsm(path, { method: "DELETE", body });
 
 export default function useMCSMData() {
     const { t } = useTranslation();
@@ -86,7 +42,7 @@ export default function useMCSMData() {
                 setConfigId(list.items[0].id);
             }
         } catch (err) {
-            logger.error("Failed to fetch MCSM config:", err);
+            logger.error(err);
             notify(t("admin.mcsm.error.loadFailed"), "error");
         } finally {
             setLoading(false);
@@ -95,32 +51,32 @@ export default function useMCSMData() {
 
     useEffect(() => { fetchConfig(); }, [fetchConfig]);
 
+    const saveDisplayConfig = useCallback(async (updated) => {
+        try {
+            await pb.collection("mcsm_config").update(configId, updated);
+            setConfig(updated);
+            notify(t("admin.mcsm.settings.saveSuccess"), "success");
+        } catch (err) {
+            logger.error(err);
+            notify(t("admin.mcsm.settings.saveError"), "error");
+        }
+    }, [configId, t, notify]);
+
     const handleSaveConfig = useCallback(async () => {
         if (!configId) return;
         setSaving(true);
-        try {
-            await pb.collection("mcsm_config").update(configId, config);
-            notify(t("admin.mcsm.settings.saveSuccess"), "success");
-        } catch (err) {
-            logger.error("Failed to save config:", err);
-            notify(t("admin.mcsm.settings.saveError"), "error");
-        } finally {
-            setSaving(false);
-        }
-    }, [configId, config, t, notify]);
+        await saveDisplayConfig(config);
+        setSaving(false);
+    }, [configId, config, saveDisplayConfig]);
 
     const handleTestConnection = useCallback(async () => {
         setTestingConnection(true);
         try {
             const data = await mcsmGet("/admin/overview");
-            if (data?.status === 200 && data?.data && typeof data.data === "object") {
-                notify(t("admin.mcsm.settings.testSuccess"), "success");
-            } else {
-                const msg = typeof data?.data === "string" ? data.data : t("admin.mcsm.settings.testFailed");
-                notify(msg, "error");
-            }
+            if (!data.data || typeof data.data !== "object") throw new Error("Invalid overview");
+            notify(t("admin.mcsm.settings.testSuccess"), "success");
         } catch (err) {
-            logger.error("Test connection failed:", err);
+            logger.error(err);
             notify(t("admin.mcsm.settings.testFailed"), "error");
         } finally {
             setTestingConnection(false);
@@ -132,23 +88,7 @@ export default function useMCSMData() {
             const data = await mcsmGet("/admin/overview");
             if (data?.data) setOverview(data.data);
         } catch (err) {
-            logger.error("Failed to fetch overview:", err);
-        }
-    }, []);
-
-    const fetchInstances = useCallback(async () => {
-        try {
-            const data = await mcsmGet("/admin/instances");
-            const nodes = Array.isArray(data?.data) ? data.data : [];
-            const all = [];
-            for (const node of nodes) {
-                for (const inst of node.instances || []) {
-                    all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
-                }
-            }
-            setInstances(all);
-        } catch (err) {
-            logger.error("Failed to fetch instances:", err);
+            logger.error(err);
         }
     }, []);
 
@@ -156,19 +96,15 @@ export default function useMCSMData() {
         try {
             // /admin/instances now returns all nodes with their instances via remote_services
             const data = await mcsmGet("/admin/instances");
-            const nodes = Array.isArray(data?.data) ? data.data : [];
-
-            const all = [];
-            for (const node of nodes) {
-                for (const inst of node.instances || []) {
-                    all.push({ ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid });
-                }
-            }
-            setInstances(all);
+            setInstances((data.data || []).flatMap(node => (node.instances || []).map(inst => ({
+                ...inst, daemonId: node.uuid, nodeName: node.remarks || node.uuid,
+            }))));
         } catch (err) {
-            logger.error("Failed to fetch all instances:", err);
+            logger.error(err);
         }
     }, []);
+
+    const fetchInstances = fetchAllInstances;
 
     const handleInstanceAction = useCallback(async (action, uuid, daemonId) => {
         if (action === "kill") {
@@ -180,7 +116,7 @@ export default function useMCSMData() {
             await mcsmPost(`/admin/instance/${action}`, {}, { uuid, daemonId });
             notify(t("admin.mcsm.instances.actionSuccess", { action }), "success");
         } catch (err) {
-            logger.error(`Instance ${action} failed:`, err);
+            logger.error(err);
             notify(t("admin.mcsm.instances.actionError", { action }), "error");
         } finally {
             setActionLoading((prev) => ({ ...prev, [`${uuid}_${action}`]: false }));
@@ -192,7 +128,7 @@ export default function useMCSMData() {
             const data = await mcsmGet("/admin/instance/outputlog", { uuid, daemonId });
             if (data?.data) setConsoleLog(data.data);
         } catch (err) {
-            logger.error("Failed to fetch output log:", err);
+            logger.error(err);
         }
     }, []);
 
@@ -218,7 +154,7 @@ export default function useMCSMData() {
             await mcsmPost("/admin/instance/command", { command: commandInput }, { uuid, daemonId });
             setCommandInput("");
         } catch (err) {
-            logger.error("Failed to send command:", err);
+            logger.error(err);
             notify(t("admin.mcsm.console.sendError"), "error");
         } finally {
             setSendingCommand(false);
@@ -234,7 +170,7 @@ export default function useMCSMData() {
                 setCurrentPath(target);
             }
         } catch (err) {
-            logger.error("Failed to list files:", err);
+            logger.error(err);
             notify(t("admin.mcsm.files.listError"), "error");
         } finally {
             setFilesLoading(false);
@@ -243,12 +179,18 @@ export default function useMCSMData() {
 
     const readFile = useCallback(async (uuid, daemonId, target) => {
         const data = await mcsmPut("/admin/files/read", { uuid, daemonId, target });
-        return data?.data ?? "";
+        if (typeof data?.data !== "string") throw new Error("Invalid file response");
+        return data.data;
     }, []);
 
     const writeFile = useCallback(async (uuid, daemonId, target, content) => {
-        await mcsmPut("/admin/files/write", { uuid, daemonId, target, content });
-        notify(t("admin.mcsm.files.saveSuccess"), "success");
+        try {
+            await mcsmPut("/admin/files/write", { uuid, daemonId, target, content });
+            notify(t("admin.mcsm.files.saveSuccess"), "success");
+        } catch (error) {
+            notify(t("admin.mcsm.settings.saveError"), "error");
+            throw error;
+        }
     }, [t, notify]);
 
     const createDir = useCallback(async (uuid, daemonId, target) => {
@@ -273,40 +215,18 @@ export default function useMCSMData() {
         if (!configId || !config) return;
         const hidden = Array.isArray(config.hidden_instances) ? [...config.hidden_instances] : [];
         const idx = hidden.indexOf(instanceUuid);
-        if (idx >= 0) {
-            hidden.splice(idx, 1);
-        } else {
-            hidden.push(instanceUuid);
-        }
-        const updated = { ...config, hidden_instances: hidden };
-        try {
-            await pb.collection("mcsm_config").update(configId, updated);
-            setConfig(updated);
-            notify(t("admin.mcsm.settings.saveSuccess"), "success");
-        } catch (err) {
-            logger.error("Failed to toggle hide:", err);
-            notify(t("admin.mcsm.settings.saveError"), "error");
-        }
-    }, [configId, config, t, notify]);
+        if (idx >= 0) hidden.splice(idx, 1);
+        else hidden.push(instanceUuid);
+        await saveDisplayConfig({ ...config, hidden_instances: hidden });
+    }, [configId, config, saveDisplayConfig]);
 
     const handleRenameInstance = useCallback(async (instanceUuid, newName) => {
         if (!configId || !config) return;
         const labels = { ...(config.instance_labels || {}) };
-        if (newName) {
-            labels[instanceUuid] = newName;
-        } else {
-            delete labels[instanceUuid];
-        }
-        const updated = { ...config, instance_labels: labels };
-        try {
-            await pb.collection("mcsm_config").update(configId, updated);
-            setConfig(updated);
-            notify(t("admin.mcsm.settings.saveSuccess"), "success");
-        } catch (err) {
-            logger.error("Failed to rename instance:", err);
-            notify(t("admin.mcsm.settings.saveError"), "error");
-        }
-    }, [configId, config, t, notify]);
+        if (newName) labels[instanceUuid] = newName;
+        else delete labels[instanceUuid];
+        await saveDisplayConfig({ ...config, instance_labels: labels });
+    }, [configId, config, saveDisplayConfig]);
 
     return {
         activeTab, setActiveTab,
