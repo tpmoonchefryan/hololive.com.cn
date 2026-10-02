@@ -1,92 +1,36 @@
 import { X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
+import { openDialog, isBackdropClick, trapDialogTab } from "./dialogLifecycle";
 
-/**
- * 通用模态框组件
- * 
- * @param {boolean} isOpen - 是否显示模态框
- * @param {Function} onClose - 关闭回调函数
- * @param {string} title - 标题（可选）
- * @param {ReactNode} children - 子内容
- * @param {string} size - 尺寸：'sm', 'md', 'lg', 'xl' (默认 'md')
- */
 export default function Modal({ isOpen, onClose, title, children, size = "md" }) {
   const { t } = useTranslation("common");
-  // 阻止背景滚动
+  const dialogRef = useRef(null);
+  const titleId = useId();
   useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => {
-      document.body.style.overflow = "";
-    };
+    if (isOpen) return openDialog(dialogRef.current, document.body);
   }, [isOpen]);
-
-  // ESC 键关闭
-  useEffect(() => {
-    const handleEscape = (e) => {
-      if (e.key === "Escape" && isOpen) {
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleEscape);
-    return () => document.removeEventListener("keydown", handleEscape);
-  }, [isOpen, onClose]);
-
-  if (!isOpen) return null;
-  if (typeof document === "undefined") return null;
-
-  const sizeClasses = {
-    sm: "max-w-md",
-    md: "max-w-2xl",
-    lg: "max-w-4xl",
-    xl: "max-w-6xl",
-  };
-
-  const modalNode = (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center p-4"
-      onClick={(e) => {
-        // 点击背景关闭
-        if (e.target === e.currentTarget) {
-          onClose();
-        }
-      }}
+  if (!isOpen || typeof document === "undefined") return null;
+  const sizes = { sm: "max-w-md", md: "max-w-2xl", lg: "max-w-4xl", xl: "max-w-6xl", full: "max-w-none w-screen h-dvh" };
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={title ? titleId : undefined}
+      aria-label={title ? undefined : t("feedback.confirmTitle")}
+      onKeyDown={trapDialogTab}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (isBackdropClick(event)) onClose(); }}
+      className={`m-auto w-[calc(100%-2rem)] ${sizes[size]} max-h-[calc(100dvh-2rem)] rounded-2xl bg-white p-0 text-slate-900 shadow-xl backdrop:bg-black/50`}
     >
-      {/* 遮罩 */}
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-
-      {/* 模态框内容 */}
-      <div
-        className={`relative w-full ${sizeClasses[size]} bg-white rounded-2xl shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-200`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 头部 */}
-        {title && (
-          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-            <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-              <button
-                type="button"
-                onClick={onClose}
-                className="p-2 rounded-lg hover:bg-slate-100 transition-colors"
-                aria-label={t("actions.close")}
-              >
-              <X className="w-5 h-5 text-slate-600" />
-            </button>
-          </div>
-        )}
-
-        {/* 内容 */}
-        <div className="overflow-y-auto overscroll-contain max-h-[calc(100vh-8rem)]">
-          {children}
-        </div>
+      <div className="flex items-center justify-between gap-4 px-6 py-4 border-b border-slate-200">
+        {title && <h2 id={titleId} className="text-lg font-semibold truncate">{title}</h2>}
+        <button type="button" onClick={onClose} className="ml-auto p-2 rounded-lg hover:bg-slate-100" aria-label={t("actions.close")}>
+          <X className="w-5 h-5 text-slate-600" />
+        </button>
       </div>
-    </div>
-  );
-
-  return createPortal(modalNode, document.body);
+      <div className={`overflow-y-auto overscroll-contain ${size === "full" ? "h-[calc(100dvh-6rem)]" : "max-h-[calc(100dvh-8rem)]"}`}>{children}</div>
+    </dialog>, document.body);
 }

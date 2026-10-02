@@ -1,3 +1,4 @@
+import Modal from "../admin/ui/Modal";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -116,16 +117,6 @@ export function FeedbackProvider({ children }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!confirmState.open) return undefined;
-    const handleEsc = (event) => {
-      if (event.key === "Escape") {
-        closeConfirm(false);
-      }
-    };
-    window.addEventListener("keydown", handleEsc);
-    return () => window.removeEventListener("keydown", handleEsc);
-  }, [confirmState.open, closeConfirm]);
 
   return (
     <FeedbackContext.Provider value={{ notify, confirm }}>
@@ -141,19 +132,8 @@ export function FeedbackProvider({ children }) {
         ))}
       </div>
 
-      {confirmState.open && (
-        <div
-          className="fixed inset-0 z-[130] flex items-center justify-center bg-black/45 px-4"
-          onClick={() => closeConfirm(false)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="feedback-confirm-title"
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3 id="feedback-confirm-title" className="text-base font-semibold text-slate-900">{confirmState.title}</h3>
+      <Modal isOpen={confirmState.open} onClose={() => closeConfirm(false)} title={confirmState.title} size="sm">
+          <div className="p-5">
             {confirmState.message && (
               <p className="mt-2 whitespace-pre-line break-words text-sm text-slate-600">
                 {confirmState.message}
@@ -178,8 +158,7 @@ export function FeedbackProvider({ children }) {
               </button>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
     </FeedbackContext.Provider>
   );
 }

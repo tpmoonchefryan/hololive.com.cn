@@ -15,7 +15,10 @@ export function useCmsSections() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
+    let active = true;
     const fetchSections = async () => {
       try {
         setLoading(true);
@@ -52,19 +55,20 @@ export function useCmsSections() {
           };
         });
         
-        setSections(processedSections);
+        if (active) setSections(processedSections);
       } catch (err) {
         logger.error('Failed to fetch CMS sections:', err);
-        setError(err);
+        if (active) setError(err);
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
 
     fetchSections();
-  }, [i18n.language]);
+    return () => { active = false; };
+  }, [i18n.language, attempt]);
 
-  return { sections, loading, error };
+  return { sections, loading, error, retry: () => setAttempt((value) => value + 1) };
 }
 
 /**
