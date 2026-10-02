@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Outlet,
   useParams,
@@ -44,6 +44,24 @@ export default function AdminLayout() {
   const user = pb.authStore.model;
   const [expandedMenus, setExpandedMenus] = useState({});
   const [loggingOut, setLoggingOut] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const verify = async () => {
+      try {
+        const { record } = await pb.collection("users").authRefresh();
+        if (!record.is_admin || (!record.verified && !record.service_account)) throw new Error("Unauthorized");
+      } catch {
+        if (active) {
+          pb.authStore.clear();
+          navigate(`/${adminKey}/webadmin/login`);
+        }
+      }
+    };
+    verify();
+    window.addEventListener("focus", verify);
+    return () => { active = false; window.removeEventListener("focus", verify); };
+  }, [adminKey, navigate, location.pathname]);
 
   // 处理登出
   const handleLogout = async () => {

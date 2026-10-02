@@ -287,6 +287,8 @@ export default function ServerInfo() {
               </div>
             ) : (
               <iframe
+                sandbox="allow-scripts allow-forms allow-pointer-lock allow-downloads"
+                referrerPolicy="no-referrer"
                 src={selectedMapEmbedUrl}
                 className="w-full h-full border-0"
                 title={selectedMap.name}
@@ -596,6 +598,8 @@ export default function ServerInfo() {
                       </div>
                     ) : (
                       <iframe
+                sandbox="allow-scripts allow-forms allow-pointer-lock allow-downloads"
+                referrerPolicy="no-referrer"
                         src={selectedMapEmbedUrl}
                         className="absolute top-0 left-0 w-full h-full rounded-lg border-0"
                         title={selectedMap.name}
