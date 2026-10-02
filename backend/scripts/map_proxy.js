@@ -67,7 +67,7 @@ const rewriteHtml = (html, target) => {
   const hasBaseTag = /<base\s/i.test(html);
   const withBase = hasBaseTag
     ? html
-    : html.replace(/<head([^>]*)>/i, `<head$1><base href="${proxyPrefix}/">`);
+    : html.replace(/<head([^>]*)>/i, `<head$1><base href="${proxyPrefix}${target.pathname.endsWith("/") ? target.pathname : target.pathname.slice(0, target.pathname.lastIndexOf("/") + 1)}">`);
 
   return withBase
     .replace(
@@ -114,9 +114,6 @@ const filterForwardHeaders = (headers) => {
     "accept",
     "accept-language",
     "cache-control",
-    "if-modified-since",
-    "if-none-match",
-    "range",
     "user-agent",
   ]);
 
@@ -140,6 +137,17 @@ const filterResponseHeaders = (headers) => {
     "transfer-encoding",
     "upgrade",
     "content-length",
+    // fetch decodes gzip/br/deflate. These headers describe upstream bytes.
+    "content-encoding",
+    "content-md5",
+    "digest",
+    "etag",
+    "content-range",
+    "accept-ranges",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-headers",
+    "access-control-allow-methods",
     "content-security-policy",
     "x-frame-options",
     "frame-options",
@@ -199,11 +207,19 @@ const server = http.createServer(async (req, res) => {
 
     const responseHeaders = filterResponseHeaders(upstream.headers);
     responseHeaders["Access-Control-Allow-Origin"] = "*";
+    // Enforce an opaque origin even when the map URL is opened outside our iframe.
+    responseHeaders["Content-Security-Policy"] = "sandbox allow-scripts allow-forms allow-pointer-lock allow-downloads";
+    responseHeaders["X-Content-Type-Options"] = "nosniff";
 
     const location = upstream.headers.get("location");
     if (location) {
       try {
         const redirected = new URL(location, target);
+        if (!allowedOrigins.has(redirected.origin)) {
+          res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "redirect origin is not allowed" }));
+          return;
+        }
         if (allowedOrigins.has(redirected.origin)) {
           responseHeaders.location = `${getProxyPathPrefix(redirected)}${redirected.pathname}${redirected.search}${redirected.hash}`;
         }
@@ -214,6 +230,11 @@ const server = http.createServer(async (req, res) => {
 
     const contentType = upstream.headers.get("content-type") || "";
     if (contentType.includes("text/html")) {
+      if (req.method === "HEAD") {
+        res.writeHead(upstream.status, responseHeaders);
+        res.end();
+        return;
+      }
       const html = await upstream.text();
       const rewritten = rewriteHtml(html, target);
       responseHeaders["content-type"] = "text/html; charset=utf-8";

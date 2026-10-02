@@ -34,6 +34,8 @@ export default function RichTextEditor({ content, onChange, placeholder }) {
       StarterKit.configure({
         // 禁用默认的硬换行，使用段落
         hardBreak: false,
+        // Link is configured explicitly below; avoid duplicate extension registration.
+        link: false,
       }),
       Image.configure({
         inline: true,

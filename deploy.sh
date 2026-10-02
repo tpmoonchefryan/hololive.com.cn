@@ -13,7 +13,8 @@ set -e
 # ==========================================
 DOMAIN="hololive.com.cn"
 EMAIL="ryan.lan_home@outlook.com"
-PB_VERSION="0.26.5"
+PB_VERSION="${PB_VERSION:-0.26.5}"
+case "$PB_VERSION" in 0.26.5|0.34.2) ;; *) echo "Unsupported PocketBase version: $PB_VERSION"; exit 1 ;; esac
 INSTALL_DIR="/var/www/$DOMAIN"
 PB_PORT="8090"
 PB_ADMIN_GATE_PORT="18092"

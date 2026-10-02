@@ -1,3 +1,4 @@
+import { verifyAdminAuth } from "./lib/admin-auth.js";
 import http from "http";
 import { createLogger } from "./logger.js";
 
@@ -84,12 +85,7 @@ async function loadConfig(authHeader) {
 
 // --- PocketBase auth verification ---
 async function verifyPBAuth(authHeader) {
-  if (!authHeader) return false;
-  const res = await fetch(`${PB_URL}/api/collections/users/auth-refresh`, {
-    method: "POST",
-    headers: { Authorization: authHeader },
-  });
-  return res.ok;
+  return verifyAdminAuth(PB_URL, authHeader);
 }
 
 // --- MCSM API helper ---

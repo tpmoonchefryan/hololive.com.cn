@@ -1,3 +1,4 @@
+import { verifyAdminAuth } from "./lib/admin-auth.js";
 import http from "http";
 import { createLogger } from "./logger.js";
 
@@ -409,17 +410,7 @@ function getAuthHeader(req) {
 }
 
 async function verifyPBAuth(authHeader) {
-  if (!authHeader) return false;
-  try {
-    const res = await fetch(`${PB_URL}/api/collections/users/auth-refresh`, {
-      method: "POST",
-      headers: { Authorization: authHeader },
-    });
-    return res.ok;
-  } catch (error) {
-    logger.warn("auth-refresh failed:", error?.message || error);
-    return false;
-  }
+  return verifyAdminAuth(PB_URL, authHeader);
 }
 
 async function loadTranslationConfig(authHeader, overrideConfig = null) {

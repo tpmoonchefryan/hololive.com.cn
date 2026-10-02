@@ -2,8 +2,6 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import pb from "../../lib/pocketbase";
 import { createAppLogger } from "../../lib/appLogger";
-// 注意：ALLOWED_ADMINS 仅用于开发环境的显式回退白名单
-import { ALLOWED_ADMINS } from "../../config/auth_whitelist";
 import { logLogin } from "../../lib/logger";
 import { useTranslation } from "react-i18next";
 import { useUIFeedback } from "../../hooks/useUIFeedback";
@@ -30,7 +28,7 @@ const MicrosoftLogo = ({ className, size = 20 }) => (
 
 /**
  * 后台登录页面
- * 支持 Microsoft OAuth2 登录和本地开发密码登录
+ * 支持 Microsoft OAuth2 和由服务端开关控制的管理员密码登录
  */
 const logger = createAppLogger("AdminLogin");
 
@@ -41,12 +39,10 @@ export default function AdminLogin() {
   const [localLoading, setLocalLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [enableLocalLogin, setEnableLocalLogin] = useState(true); // 默认开启（安全回退）
+  const [enableLocalLogin, setEnableLocalLogin] = useState(false); // 设置缺失时关闭密码入口
   const [loadingSettings, setLoadingSettings] = useState(true);
   const navigate = useNavigate();
-  const allowLocalWhitelistFallback =
-    import.meta.env.DEV &&
-    import.meta.env.VITE_ALLOW_LOCAL_WHITELIST_FALLBACK === "true";
+
 
   // 从数据库读取本地登录开关状态
   useEffect(() => {
@@ -54,11 +50,11 @@ export default function AdminLogin() {
       try {
         setLoadingSettings(true);
         const settings = await pb.collection("system_settings").getFirstListItem("");
-        setEnableLocalLogin(settings?.enable_local_login ?? true);
+        setEnableLocalLogin(settings?.enable_local_login ?? false);
       } catch (error) {
         logger.error("Failed to fetch login setting:", error);
-        // 如果读取失败，默认开启（安全回退，避免管理员被锁在外面）
-        setEnableLocalLogin(true);
+        // 设置未知时关闭密码入口；超管/服务身份保留独立接入路径。
+        setEnableLocalLogin(false);
       } finally {
         setLoadingSettings(false);
       }
@@ -68,53 +64,14 @@ export default function AdminLogin() {
   }, []);
 
   // 白名单验证和跳转的通用逻辑
-  const handleAuthSuccess = async (userEmail, isLocalLogin = false) => {
-    if (!userEmail) {
+  const handleAuthSuccess = async () => {
+    const { record } = await pb.collection("users").authRefresh();
+    if (!record.is_admin || (!record.verified && !record.service_account)) {
       pb.authStore.clear();
-      navigate("/403");
-      return false;
+      throw new Error("Administrator authorization required");
     }
-
-    // 本地登录：优先检查数据库白名单，仅在开发模式显式开启时允许回退
-    if (isLocalLogin) {
-      try {
-        // 优先从数据库 whitelists 集合查询
-        await pb.collection("whitelists").getFirstListItem(
-          `email="${userEmail}"`
-        );
-        // 找到白名单记录，允许登录
-        navigate("../dashboard");
-        return true;
-      } catch (error) {
-        if (allowLocalWhitelistFallback) {
-          logger.warn(
-            "Whitelist DB check failed; using local fallback list in DEV mode."
-          );
-          if (ALLOWED_ADMINS.includes(userEmail)) {
-            navigate("../dashboard");
-            return true;
-          }
-        }
-
-        pb.authStore.clear();
-        throw new Error("Whitelist verification failed", { cause: error });
-      }
-    }
-
-    // SSO 登录：从 whitelists 集合查询
-    try {
-      await pb.collection("whitelists").getFirstListItem(
-        `email="${userEmail}"`
-      );
-      // 找到白名单记录，允许登录
-      navigate("../dashboard");
-      return true;
-    } catch {
-      // 未找到白名单记录，强制登出
-      logger.error("Email not whitelisted");
-      pb.authStore.clear();
-      throw new Error("Email not whitelisted");
-    }
+    navigate("../dashboard");
+    return true;
   };
 
   // Microsoft OAuth2 登录
@@ -171,7 +128,7 @@ export default function AdminLogin() {
       }
 
       // 白名单验证失败
-      if (errorMessage === "Email not whitelisted" || errorMessage?.includes("白名单")) {
+      if (errorMessage === "Administrator authorization required" || errorMessage?.includes("白名单")) {
         notify(t("admin.login.alerts.notWhitelisted"), "error");
         return;
       }
@@ -228,7 +185,7 @@ export default function AdminLogin() {
       // 显示错误提示
       let errorMessage = t("admin.login.alerts.failed");
       if (
-        error?.message === "Email not whitelisted" ||
+        error?.message === "Administrator authorization required" ||
         error?.message === "Whitelist verification failed"
       ) {
         errorMessage = t("admin.login.alerts.notWhitelisted");
@@ -306,7 +263,7 @@ export default function AdminLogin() {
               </div>
               <div className="relative flex justify-center text-xs uppercase">
                 <span className="bg-white/5 px-2 text-gray-500">
-                  {t("admin.login.orDev")}
+                  {t("admin.login.passwordBtn")}
                 </span>
               </div>
             </div>
