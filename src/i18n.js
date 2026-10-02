@@ -5,6 +5,7 @@ const resources = {
   zh: {
     common: {
       serverInfo: '服务器信息',
+      pagination: { label: '分页', prev: '上一页', next: '下一页', info: '第 {{page}} / {{total}} 页 · 共 {{count}} 条' },
       pinned: '置顶',
       icp: '粤ICP备2023071182号-1',
       routeLoading: '加载中...',
@@ -1123,6 +1124,7 @@ const resources = {
   en: {
     common: {
       serverInfo: 'Server Info',
+      pagination: { label: 'Pagination', prev: 'Previous page', next: 'Next page', info: 'Page {{page}} / {{total}} · {{count}} records' },
       pinned: 'Pinned',
       icp: '粤ICP备2023071182号-1',
       routeLoading: 'Loading...',
@@ -2227,6 +2229,7 @@ const resources = {
   ja: {
     common: {
       serverInfo: 'サーバー情報',
+      pagination: { label: 'ページ切替', prev: '前のページ', next: '次のページ', info: '{{page}} / {{total}} ページ · {{count}} 件' },
       pinned: '固定',
       icp: '粤ICP备2023071182号-1',
       routeLoading: '読み込み中...',
@@ -3349,6 +3352,10 @@ const resources = {
     },
   },
 };
+
+for (const locale of Object.values(resources)) {
+  locale.common.backToDocs = locale.docs.common.backToDocs;
+}
 
 i18n.use(initReactI18next).init({
   resources,

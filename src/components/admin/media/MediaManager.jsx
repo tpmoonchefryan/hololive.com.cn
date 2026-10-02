@@ -238,29 +238,33 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
             const thumbUrl = getFileUrl(item, true);
 
             return (
-              <ContentTextButton
+              <div
                 key={item.id}
                 className="group relative aspect-square rounded-xl border border-slate-200 bg-slate-50 overflow-hidden cursor-pointer hover:border-[var(--color-brand-blue)] hover:shadow-md transition-[border-color,box-shadow]"
-                onClick={() => handleFileClick(item)}
-                aria-label={`${t("admin.media.manager.details.title")}: ${fileName || t("admin.media.manager.details.unknown")}`}
               >
-                {fileType === "image" ? (
-                  <img
-                    src={thumbUrl}
-                    alt={fileName}
-                    className="w-full h-full object-cover"
-                    onError={(e) => {
-                      e.target.src = fileUrl;
-                    }}
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-slate-100">
-                    <Icon className="w-12 h-12 text-slate-400" />
-                  </div>
-                )}
+                <ContentTextButton
+                  className="absolute inset-0 w-full h-full focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+                  onClick={() => handleFileClick(item)}
+                  aria-label={`${t("admin.media.manager.details.title")}: ${fileName || t("admin.media.manager.details.unknown")}`}
+                >
+                  {fileType === "image" ? (
+                    <img
+                      src={thumbUrl}
+                      alt={fileName}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.target.src = fileUrl;
+                      }}
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-slate-100">
+                      <Icon className="w-12 h-12 text-slate-400" />
+                    </div>
+                  )}
 
+                </ContentTextButton>
                 {/* 悬停遮罩 */}
-                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                <div className="pointer-events-none absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
                   {!onSelect && (
                     <ContentIconActionButton
                       onClick={(e) => {
@@ -271,17 +275,17 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
                       icon={Trash2}
                       size="sm"
                       iconSize={16}
-                      className="opacity-0 group-hover:opacity-100 rounded-full bg-red-500 text-white hover:bg-red-600 hover:text-white transition-[background-color,opacity]"
+                      className="pointer-events-auto opacity-0 group-hover:opacity-100 focus:opacity-100 rounded-full bg-red-500 text-white hover:bg-red-600 hover:text-white transition-[background-color,opacity]"
                       aria-label={t("admin.media.manager.delete.confirm")}
                     />
                   )}
                 </div>
 
                 {/* 文件名（底部） */}
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
+                <div className="pointer-events-none absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
                   <p className="text-xs text-white truncate">{fileName}</p>
                 </div>
-              </ContentTextButton>
+              </div>
             );
           })}
         </div>
