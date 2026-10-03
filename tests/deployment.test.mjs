@@ -46,8 +46,9 @@ test('first mixed capture is explicit and cannot invent a previous snapshot or h
   const baseline={kind:'mixed',capture:'stopped-backup',sourceRevision:null,retainedHistory:[{path:'backend/pb_migrations/1765100008_add_velocity_advanced.js',sha256:'85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c',mode:0o644}],sourceAbsentHistory:['1770817921_updated_users.js','1770818121_updated_users.js','1770818775_updated_users.js']};
   const first={...config,previousRevision:undefined,baseline};
   assert.equal(validatePlan(first,revision,1).revision,revision);
-  for(const change of [{capture:true},{capture:'online'},{snapshotId:'d'.repeat(64)},{snapshotDirectory:'/fixture/imaginary'},{sourceRevision:oldRevision},{retainedHistory:[]},{sourceAbsentHistory:[]}])assert.throws(()=>validatePlan({...first,baseline:{...baseline,...change}},revision,1));
+  for(const change of [{capture:true},{capture:'online'},{snapshotId:'d'.repeat(64)},{snapshotDirectory:'/fixture/imaginary'},{sourceRevision:oldRevision},{retainedHistory:[]},{sourceAbsentHistory:[]},{retainedHistory:undefined},{sourceAbsentHistory:undefined}])assert.throws(()=>validatePlan({...first,baseline:{...baseline,...change}},revision,1));
   assert.throws(()=>validatePlan({...first,previousRevision:oldRevision},revision,1));
+  for (const field of ['baselineReviewed','serviceIdentityReviewed','restoreRehearsalRequired']) assert.throws(()=>validatePlan({...first,[field]:false},revision,1));
 });
 test('old sync is stopped before guard/PB, consistent backup and rehearsal before writes', async () => {
   const f = fixture(); assert.equal((await deploy(f.adapter, config, revision, 12)).status, 'deployed');
@@ -142,32 +143,90 @@ test('unknown/mutated production migration bytes refuse before touching any arti
 
 // Production-adapter boundary: commands/host facts are simulated, while every
 // control endpoint, alias, artifact and protected file operation is real.
+
+// The existing host-command boundary maps the finite child to isolated files.
+// These responses model root/systemd/kernel facts; they never acquire root or
+// claim execution of Linux freezing, killing or the Python privileged body.
+function finiteHostResponse(request, host) {
+  const { operation } = request, runner = os.userInfo();
+  const state = request.state ?? { changed: false, attempted: [], leaves: {}, directories: {}, frozen: false, killed: false, stopped: false };
+  const reply = (ok, reason) => JSON.stringify({ ok, reason, rootEUID: host.euid ?? 0, runnerUID: host.runnerUID ?? runner.uid, runnerGID: host.runnerGID ?? runner.gid, state });
+  const fail = name => { if (host.fail === name) throw new Error('finite fixture ' + name); };
+  const endpoint = unit => path.join(host.root, 'runtime', unit + '.service.d', '99-hololive-release-guard.conf');
+  const inode = file => { const x = fs.lstatSync(file); return [x.dev, x.ino]; };
+  const content = unit => unit === 'velocity' ? '[Unit]\nRefuseManualStop=yes\n' : '[Unit]\nRefuseManualStart=yes\n[Service]\nRestart=no\nRestartForceExitStatus=\n';
+  try {
+    assert.deepEqual(Object.keys(request).sort(), ['operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','state'].sort());
+    assert.ok(['stop','cleanup-sync','cleanup-java'].includes(operation));
+    fail('root'); fail('runner'); fail('config'); fail('lock');
+    if (host.euid !== undefined && host.euid !== 0) return reply(false, 'finite fixture actual root missing');
+    if (host.runnerUID !== undefined && host.runnerUID !== runner.uid) return reply(false, 'finite fixture wrong runner');
+    const owner=Object.fromEntries(['revision','runNumber','runId','repository','lockIdentity','runnerPID','configSha256'].map(key=>[key,request[key]]));
+    if (operation === 'stop') {
+      state.owner=owner;
+      for (const refusal of ['code','unit','process','shared-group','nested-group','job','file','tmp','bak','async-io','parent','alias','hardlink']) fail(refusal);
+      for (const unit of ['velocity','velocity-sync']) if (fs.existsSync(endpoint(unit))) throw new Error('finite fixture existing runtime leaf');
+      for (const unit of ['velocity','velocity-sync']) {
+        const file = endpoint(unit), directory = path.dirname(file);
+        fs.mkdirSync(directory, { recursive: true }); state.changed = true; state.directories[unit] = inode(directory); state.attempted.push('mkdir-' + unit); fail('directory-' + unit);
+        fs.writeFileSync(file, content(unit), { flag: 'wx', mode: 0o644 }); state.leaves[unit] = inode(file); state.attempted.push('create-' + unit); fail('leaf-' + unit);
+      }
+      state.attempted.push('reload'); fail('reload'); fail('readback');
+      state.attempted.push('cgroup.freeze'); fail('freeze-timeout'); state.frozen = true;
+      for (const refusal of ['frozen-process','frozen-file','frozen-job','frozen-io','thawed']) fail(refusal);
+      state.attempted.push('cgroup.kill'); fail('kill'); state.killed = true; fail('exit-timeout');
+      host.commands.push({ file: 'sudo', args: ['-n','systemctl','stop','velocity-sync'] }); state.stopped = true;
+    } else {
+      assert.deepEqual(state.owner,owner,'Runtime ownership belongs to another run');
+      if(operation==='cleanup-java')fail('cleanup-java');
+      for (const refusal of ['cleanup-guard','cleanup-code','cleanup-unit','cleanup-file','cleanup-job','cleanup-leaf','cleanup-run']) fail(refusal);
+      for (const [unit, id] of Object.entries(state.leaves)) {
+        assert.deepEqual(inode(endpoint(unit)), id, 'foreign/replaced leaf'); assert.equal(fs.readFileSync(endpoint(unit), 'utf8'), content(unit), 'runtime leaf content drift');
+      }
+      const unit = operation === 'cleanup-sync' ? 'velocity-sync' : 'velocity';
+      fs.unlinkSync(endpoint(unit)); delete state.leaves[unit];
+      if (fs.readdirSync(path.dirname(endpoint(unit))).length === 0) { fs.rmdirSync(path.dirname(endpoint(unit))); delete state.directories[unit]; }
+      state.attempted.push('remove-' + unit, 'reload-' + unit); fail('cleanup-readback');
+    }
+    return reply(true);
+  } catch (error) { state.reason = error.message; return reply(false, error.message); }
+}
+
 async function productionFixture(t, callback) {
   const root = temp(t), bundle = path.join(root, 'bundle'), webRoot = path.join(root, 'site');
   fs.mkdirSync(bundle); createBundle(bundle);
-  for (const name of ['site/backend/pb_data', 'site/backend/scripts', 'state', 'backup', 'velocity']) fs.mkdirSync(path.join(root, name), { recursive: true, mode: 0o700 });
+  for (const name of ['site/backend/pb_data', 'site/backend/scripts', 'site/backend/pb_migrations', 'state', 'backup', 'velocity']) fs.mkdirSync(path.join(root, name), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(webRoot, 'backend/pb_data/data.db'), 'retained database');
   fs.writeFileSync(path.join(webRoot, 'backend/.env'), 'retained environment', { mode: 0o600 });
+  for (const name of ['velocity.toml','velocity.jar']) fs.writeFileSync(path.join(root,'velocity',name), 'protected fixture');
   const protectedFile = path.join(root, 'velocity/forwarding.secret'); fs.writeFileSync(protectedFile, 'protected fixture', { mode: 0o600 });
   const bound = { ...config, webRoot, backupRoot: path.join(root, 'backup'), stateRoot: path.join(root, 'state'), velocityRoot: path.join(root, 'velocity'), runnerUser: os.userInfo().username, machineIdSha256: createHash('sha256').update('fixture machine').digest('hex'), repository: 'fixture/deployment', serviceBindings: Object.fromEntries(config.websiteServices.map(unit => [unit, 'WorkingDirectory=' + webRoot + (unit === 'pocketbase' ? '/backend' : '/backend/scripts')])) };
-  const configFile = path.join(root, 'config.json'); fs.writeFileSync(configFile, '{}', { mode: 0o600 });
-  const commands = [], originalRead = fs.readFileSync, originalStat = fs.statSync, originalRealpath = fs.realpathSync, originalExec = cp.execFileSync;
+  fs.writeFileSync(path.join(webRoot, 'backend/scripts/sync_velocity.js'), 'old daemon fixture');
+  bound.finiteStop = { syncCodeSha256: createHash('sha256').update(fs.readFileSync(path.join(webRoot, 'backend/scripts/sync_velocity.js'))).digest('hex') };
+  const configMap = new Map(bound.configurationFiles.map((file, index) => { const local = path.join(root, 'config-' + index); fs.writeFileSync(local, 'fixture config', { mode: 0o600 }); return [file, local]; }));
+  const configFile = path.join(root, 'config.json'); fs.writeFileSync(configFile, JSON.stringify(bound), { mode: 0o600 });
+  const commands = [], originalRead = fs.readFileSync, originalStat = fs.statSync, originalLstat = fs.lstatSync, originalRealpath = fs.realpathSync, originalExec = cp.execFileSync;
   const environment = Object.fromEntries(['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_EVENT_NAME'].map(key => [key, process.env[key]]));
-  fs.readFileSync = (file, ...args) => file === '/etc/machine-id' ? Buffer.from('fixture machine') : originalRead(file, ...args);
-  fs.statSync = (file, ...args) => { const value = originalStat(file, ...args); return file === configFile ? new Proxy(value, { get: (value, key) => key === 'uid' ? 0 : Reflect.get(value, key) }) : value; };
+  fs.readFileSync = (file, ...args) => file === '/etc/machine-id' ? Buffer.from('fixture machine') : originalRead(configMap.get(file) ?? file, ...args);
+  fs.statSync = (file, ...args) => { const value = originalStat(configMap.get(file) ?? file, ...args); return file === configFile ? new Proxy(value, { get: (value, key) => key === 'uid' ? 0 : Reflect.get(value, key) }) : value; };
+  fs.lstatSync = (file, ...args) => originalLstat(configMap.get(file) ?? file, ...args);
+  const host = { root, commands: [] };
   fs.realpathSync = (file, ...args) => bound.configurationFiles.includes(file) ? file : originalRealpath(file, ...args);
-  cp.execFileSync = (file, args) => {
+  cp.execFileSync = (file, args, options) => {
+    if (file === 'sudo' && args[1] === '/usr/bin/python3') { commands.push([file, ...args.slice(0, 3)]); return finiteHostResponse(JSON.parse(options.input), host); }
     commands.push([file, ...args]);
     if (file === 'git' && args[0] === 'ls-remote') return revision + '\trefs/heads/main\n';
     if (file.endsWith('/backend/pocketbase') && args[0] === '--version') return 'pocketbase version 0.26.5\n';
     if (file === 'systemctl' && args[0] === 'is-active') return 'active\n';
-    if (file === 'systemctl' && args[0] === 'show') return (args[1] === 'velocity' ? bound.velocityServiceBinding : bound.serviceBindings[args[1]]) + '\n';
+    if (file === 'systemctl' && args[0] === 'show') return (args[1] === 'velocity' && args.includes('MainPID') ? 'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active' : args[1] === 'velocity' ? bound.velocityServiceBinding : bound.serviceBindings[args[1]]) + '\n';
+    if(file==='ss') return 'LISTEN 0 100 127.0.0.1:25565 0.0.0.0:*\n';
+    if(file==='sudo'&&args[1]==='systemctl') return '';
     throw new Error('External command refused by isolated test');
   };
   Object.assign(process.env, { GITHUB_REPOSITORY: bound.repository, GITHUB_RUN_ID: '123', GITHUB_EVENT_NAME: 'workflow_dispatch' }); syncBuiltinESMExports();
-  try { await callback({ root, bundle, webRoot, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
+  try { await callback({ root, bundle, webRoot, host, configFile, configMap, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
   finally {
-    fs.readFileSync = originalRead; fs.statSync = originalStat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
+    fs.readFileSync = originalRead; fs.statSync = originalStat; fs.lstatSync = originalLstat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
     for (const [key, value] of Object.entries(environment)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 }
@@ -456,6 +515,7 @@ async function fixture(version,binary, suffix = '') {
   const forward=rawExec(binary,['migrate','up','--dir',path.join(work,'backend/pb_data'),'--migrationsDir',path.join(bundle,'backend/pb_migrations'),'--hooksDir',path.join(bundle,'backend/pb_hooks')],{encoding:'utf8'});assert.doesNotMatch(forward,/Failed|Error:/);fs.writeFileSync(path.join(local,'actual-forward.stdout'),forward,{mode:0o600});
   sql(path.join(work,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('update users set is_admin=1,service_account=? where id=?',(int(i['role']=='service'),i['id'])) for i in json.loads(sys.argv[2])];c.commit()",[JSON.stringify(identities)]);
   config.recoveryWorkingCopy=work;
+  config.finiteStop={syncCodeSha256:sha(fs.readFileSync(path.join(webRoot,'backend/scripts/sync_velocity.js')))};write(configFile,config);
   return {local,webRoot,config,configFile,configMap,identities,ordinary,post,settings,base,binary,commands:[],running:null};
 }
 
@@ -468,6 +528,7 @@ fs.existsSync=(file)=>originals.existsSync(bound?.configMap.get(file)??file);
 fs.lstatSync=(file,...args)=>originals.lstatSync(bound?.configMap.get(file)??file,...args);
 fs.cpSync=(from,to,...args)=>originals.cpSync(bound?.configMap.get(from)??from,to,...args);
 cp.execFileSync=(file,args,options)=>{
+  if(file==='sudo'&&args[1]==='/usr/bin/python3') return finiteHostResponse(JSON.parse(options.input), {root:bound.local,commands:bound.commands,fail:bound.finiteFailure});
   bound.commands.push({file,args});
   if(file==='python3'||file===bound.binary||file===path.join(bound.webRoot,'backend/pocketbase'))return rawExec(file,args,options);
   if(file==='git'&&args[0]==='ls-remote')return candidate+'\trefs/heads/main\n';
@@ -481,7 +542,7 @@ cp.execFileSync=(file,args,options)=>{
   throw new Error('Unapproved external command refused: '+file);
 };syncBuiltinESMExports();
 const environment={...process.env};Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
-const adapter=(run=6)=>productionAdapter(bundle,bound.config,candidate,run,bound.configFile);
+const adapter=(run=6)=>{write(bound.configFile,bound.config);return productionAdapter(bundle,bound.config,candidate,run,bound.configFile);};
 function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
 function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
@@ -620,21 +681,25 @@ try{
   }
   // Fresh first capture never initializes a prior snapshot. Every scenario has
   // its own actual PB database, permission, state and private evidence root.
-  for (const [version,binary] of binaries) for (const scenario of ['preflight-history','preflight-bytes','preflight-unknown','seal-failure','rehearsal-failure','binding-drift','install-drift','first-success','full-success']) {
+  for (const [version,binary] of binaries) for (const scenario of ['preflight-history','preflight-bytes','preflight-unknown','preflight-mode','preflight-retained-unapplied','preflight-unknown-ledger','preflight-placeholder','seal-failure','rehearsal-failure','binding-drift','install-drift','poststop-ledger','poststop-migration-bytes','poststop-migration-mode','poststop-config-bytes','poststop-config-mode','poststop-config-owner','backup-component','backup-db','backup-media','backup-config','backup-config-mode','backup-config-owner','backup-seal-write','snapshot-raw','snapshot-config','snapshot-component','cleanup-guard','cleanup-code','cleanup-unit','cleanup-file','cleanup-job','cleanup-java','cleanup-leaf','cleanup-run','cleanup-readback','first-success','full-success']) {
     bound=await fixture(version,binary,'-'+scenario);
     bound.config.baseline={kind:'mixed',capture:'stopped-backup',sourceRevision:null,retainedHistory:[{path:extra,sha256:sha(retainedBytes),mode:0o644}],sourceAbsentHistory:absent};
     delete bound.config.previousRevision;
     const javaBefore=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
+    if(scenario==='preflight-mode')fs.chmodSync(path.join(bound.webRoot,extra),0o600);
+    if(scenario==='preflight-retained-unapplied')sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('delete from _migrations where file=?',(sys.argv[2],));c.commit()",[path.basename(extra)]);
+    if(scenario==='preflight-unknown-ledger')sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('insert into _migrations(file,applied) values (?,1)',('unknown_actual.js',));c.commit()");
+    if(scenario==='preflight-placeholder')fs.writeFileSync(path.join(bound.webRoot,'backend/pb_migrations',absent[0]),'invented placeholder');
     if(scenario.startsWith('preflight-')) {
       if(scenario==='preflight-bytes')fs.writeFileSync(path.join(bound.webRoot,extra),'changed retained bytes');
       else if(scenario==='preflight-unknown')fs.writeFileSync(path.join(bound.webRoot,'backend/pb_migrations/unknown.js'),'unknown source');
-      else sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('delete from _migrations where file=?',(sys.argv[2],));c.commit()",[absent[0]]);
-      const result=await attempt(()=>deploy(adapter(),bound.config,candidate,6));assert.equal(result.accepted,false);assert.match(result.error,/Source-absent ledger|Unknown or modified|Retained snapshot bytes/);
+      else if(scenario==='preflight-history')sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('delete from _migrations where file=?',(sys.argv[2],));c.commit()",[absent[0]]);
+      const result=await attempt(()=>deploy(adapter(),bound.config,candidate,6));assert.equal(result.accepted,false);assert.match(result.error,/Source-absent ledger|Unknown or modified|Retained snapshot bytes|Retained migration is not applied|Unknown applied historical/);
       assert.equal(bound.commands.some(c=>c.file==='sudo'),false);assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),false);
       assert.deepEqual(fs.readdirSync(bound.config.backupRoot),[]);assert.equal(fs.existsSync(path.join(bound.config.stateRoot,'deployment.json')),false);
     } else {
       const successful=scenario==='first-success'||scenario==='full-success';
-      if(successful) {
+      if(successful||scenario.startsWith('cleanup-')) {
         // A separately prepared synthetic source already has approved roles.
         // This does not grant production users or make a pre-stop snapshot.
         fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});copyWithModes(path.join(bound.config.recoveryWorkingCopy,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
@@ -645,29 +710,62 @@ try{
         fs.unlinkSync(path.join(bound.webRoot,extra));sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('delete from _migrations where file=?',(f,)) for f in json.loads(sys.argv[2])];c.commit()",[JSON.stringify([path.basename(extra),...absent])]);
         delete bound.config.baseline;bound.config.previousRevision=oldRevision;delete bound.config.recoveryWorkingCopy;
       }
+      if(scenario.startsWith('cleanup-')&&!['cleanup-leaf','cleanup-run'].includes(scenario))bound.finiteFailure=scenario;
       if(scenario==='rehearsal-failure')bound.config.recoveryWorkingCopy=bound.webRoot;
       const actual=adapter(), originalBaseline=actual.baseline, originalBackup=actual.backup;
-      actual.backup=()=>{const stops=bound.commands.filter(c=>c.file==='sudo'&&c.args[2]==='stop').map(c=>c.args[3]);assert.deepEqual(stops,['velocity-sync','pocketbase']);assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);const backup=originalBackup();if(scenario==='seal-failure'){const manifest=read(path.join(backup,'backup.json'));manifest.captureBinding.runId='wrong-run';write(path.join(backup,'backup.json'),manifest);}return backup;};
-      if(scenario==='binding-drift'||scenario==='install-drift')actual.baseline=backup=>{originalBaseline(backup);if(scenario==='binding-drift')process.env.GITHUB_RUN_ID='6007';else fs.writeFileSync(path.join(bound.webRoot,'dist/index.html'),'unapproved target drift');};
+      if(['cleanup-leaf','cleanup-run'].includes(scenario)){const originalHealth=actual.health;actual.health=async()=>{await originalHealth();if(scenario==='cleanup-run')process.env.GITHUB_RUN_ID='different-run';else {const leaf=path.join(bound.local,'runtime/velocity-sync.service.d/99-hololive-release-guard.conf');const old=fs.readFileSync(leaf);fs.renameSync(leaf,leaf+'.foreign');fs.writeFileSync(leaf,old);}};}
+      const originalVerify=actual.verify;
+      actual.verify=()=>{originalVerify();
+        if(scenario==='poststop-ledger')sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update _migrations set applied=applied+1 where file=?',(sys.argv[2],));c.commit()",[path.basename(extra)]);
+        if(scenario==='poststop-migration-bytes')fs.appendFileSync(path.join(bound.webRoot,extra),'\n// unexpected');
+        if(scenario==='poststop-migration-mode')fs.chmodSync(path.join(bound.webRoot,extra),0o600);
+        if(scenario==='poststop-config-bytes')fs.appendFileSync(bound.configMap.get(bound.config.nginxSiteFile),'drift');
+        if(scenario==='poststop-config-mode')fs.chmodSync(bound.configMap.get(bound.config.nginxSiteFile),0o640);
+        if(scenario==='poststop-config-owner'){const previous=fs.lstatSync;fs.lstatSync=(file,...args)=>{const value=previous(file,...args);return file===bound.config.nginxSiteFile?new Proxy(value,{get:(v,k)=>k==='uid'?v.uid+1:Reflect.get(v,k)}):value;};}
+      };
+      actual.backup=()=>{const stops=bound.commands.filter(c=>c.file==='sudo'&&c.args[2]==='stop').map(c=>c.args[3]);assert.deepEqual(stops,['velocity-sync','pocketbase']);assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);const originalCopy=fs.cpSync, originalWrite=fs.writeFileSync, originalChmod=fs.chmodSync;
+        fs.cpSync=(from,to,...args)=>{const result=originalCopy(from,to,...args);
+          if(scenario==='backup-component'&&to.endsWith('/application/dist'))fs.rmSync(to,{recursive:true});
+          if(scenario==='backup-db'&&to.endsWith('/application/backend/pb_data'))fs.unlinkSync(path.join(to,'data.db'));
+          if(scenario==='backup-media'&&to.endsWith('/application/backend/pb_data'))fs.rmSync(path.join(to,'storage'),{recursive:true,force:true});
+          if(to.includes('/configuration/')&&path.basename(to)===path.basename(bound.config.nginxSiteFile)){
+            if(scenario==='backup-config')fs.appendFileSync(to,'corrupt copied bytes');
+            if(scenario==='backup-config-mode')fs.chmodSync(to,0o640);
+          }
+          if(scenario==='backup-config-owner'&&to.includes('/configuration/')){const prior=fs.lstatSync;fs.lstatSync=(file,...a)=>{const value=prior(file,...a);return file===bound.config.nginxSiteFile?new Proxy(value,{get:(v,k)=>k==='uid'?v.uid+1:Reflect.get(v,k)}):value;};}
+          return result;
+        };
+        fs.chmodSync=(file,mode)=>originalChmod(file,scenario==='backup-config-mode'&&String(file).includes('/configuration/')&&path.basename(file)===path.basename(bound.config.nginxSiteFile)?0o640:mode);
+        fs.writeFileSync=(file,...args)=>{if(scenario==='backup-seal-write'&&String(file).endsWith('/backup.json'))throw new Error('injected seal write');return originalWrite(file,...args);};
+        let backup;try{backup=originalBackup();}finally{fs.cpSync=originalCopy;fs.writeFileSync=originalWrite;fs.chmodSync=originalChmod;}
+        if(scenario==='seal-failure'){const manifest=read(path.join(backup,'backup.json'));manifest.captureBinding.runId='wrong-run';write(path.join(backup,'backup.json'),manifest);}return backup;};
+      if(['binding-drift','install-drift','snapshot-raw','snapshot-config','snapshot-component'].includes(scenario))actual.baseline=backup=>{originalBaseline(backup);if(scenario==='binding-drift')process.env.GITHUB_RUN_ID='6007';else if(scenario==='install-drift')fs.writeFileSync(path.join(bound.webRoot,'dist/index.html'),'unapproved target drift');else if(scenario==='snapshot-raw')fs.appendFileSync(path.join(backup,'application/backend/pb_data/data.db'),'drift');else if(scenario==='snapshot-config')fs.appendFileSync(path.join(backup,'configuration',bound.config.nginxSiteFile.slice(1)),'drift');else fs.rmSync(path.join(backup,'application/dist'),{recursive:true});};
       const result=await attempt(()=>deploy(actual,bound.config,candidate,6));process.env.GITHUB_RUN_ID='6006';
       assert.equal(result.accepted,successful,result.error);
       const state=read(path.join(bound.config.stateRoot,'deployment.json'));assert.equal(state.status,successful?'deployed':'failed');
       assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);
+      if(scenario.startsWith('poststop-')||scenario.startsWith('backup-')) {
+        assert.equal(result.accepted,false);assert.equal(state.status,'failed');assert.equal(bound.commands.some(c=>c.file==='sudo'&&['start','restart'].includes(c.args[2])),false);
+        assert.equal(bound.commands.some(c=>c.file===path.join(bound.webRoot,'backend/pocketbase')&&c.args[0]==='migrate'),false);
+        fs.statSync=(file,...args)=>{const value=originals.statSync(bound?.configMap.get(file)??file,...args);return file===bound?.configFile?new Proxy(value,{get:(v,k)=>k==='uid'?0:Reflect.get(v,k)}):value;};fs.lstatSync=(file,...args)=>originals.lstatSync(bound?.configMap.get(file)??file,...args);
+        observe('capture-'+scenario+'-'+version,'actual preflight/capture input drift or copy/seal failure refused',{passed:true,fixtureRoot:bound.local});continue;
+      }
       assert.equal(fs.readdirSync(bound.config.backupRoot).length,1);
       const raw=read(path.join(state.backup,'backup.json'));
       if(scenario!=='full-success'&&scenario!=='seal-failure') {assert.deepEqual(raw.captureBinding,{revision:candidate,runNumber:6,runId:'6006',repository:bound.config.repository,snapshotDirectory:state.backup});assert.equal(bound.config.baseline.snapshotId,undefined);}
       const sealed=fs.readFileSync(path.join(state.backup,'backup.json')), permissionFile=path.join(state.backup,'expected-recovery-contract.json'), permission=fs.existsSync(permissionFile)?fs.readFileSync(permissionFile):null;
       if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
       const commandsBefore=bound.commands.length;
-      const retry=await attempt(()=>deploy(adapter(),bound.config,candidate,6));assert.equal(retry.accepted,false);assert.match(retry.error,/Older\/repeated run or unresolved failed deployment/);
+      const retry=await attempt(()=>deploy(adapter(successful?6:7),bound.config,candidate,successful?6:7));assert.equal(retry.accepted,false);assert.match(retry.error,/Older\/repeated run or unresolved failed deployment/);
       assert.equal(bound.commands.slice(commandsBefore).some(c=>c.file==='sudo'),false);assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
       if(successful) {
         process.env.GITHUB_RUN_ID='6007';
+        bound.config.finiteStop.syncCodeSha256=sha(fs.readFileSync(path.join(bound.webRoot,'backend/scripts/sync_velocity.js')));
         const next=await deploy(adapter(7),bound.config,candidate,7);assert.equal(next.status,'deployed');assert.notEqual(next.backup,state.backup);assert.equal(fs.readdirSync(bound.config.backupRoot).length,2);
         assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
         if(bound.running){const service=await bound.running;await service.close();bound.running=null;}process.env.GITHUB_RUN_ID='6006';
       }
-      if(!successful)assert.equal(bound.commands.some(c=>c.file==='sudo'&&['start','restart'].includes(c.args[2])),false);
+      if(!successful&&!scenario.startsWith('cleanup-'))assert.equal(bound.commands.some(c=>c.file==='sudo'&&['start','restart'].includes(c.args[2])),false);
     }
     assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),javaBefore);
     observe('capture-'+scenario+'-'+version,'first/full capture, stop order, bindings, failed-state and permission preservation',{passed:true,fixtureRoot:bound.local});
@@ -693,3 +791,62 @@ c=sqlite3.connect(sys.argv[1]);c.execute('pragma journal_mode=WAL');c.execute('p
     assert.deepEqual(readMigrationLedger(root),[['committed-in-wal.js',1]]);
   } finally {writer.kill();await new Promise(resolve=>writer.once('close',resolve));}
 });
+
+
+for (const refusal of ['root','runner','config','lock','code','unit','process','shared-group','nested-group','job','file','tmp','bak','async-io','parent','alias','hardlink']) test('finite stop prewrite refusal: '+refusal, async t => productionFixture(t, async f => {
+  f.host.fail=refusal;
+  await assert.rejects(deploy(f.adapter,f.config,revision,2),/finite fixture/);
+  assert.equal(fs.existsSync(f.state),false);assert.equal(fs.existsSync(f.guard),false);
+  assert.equal(fs.existsSync(path.join(f.root,'runtime')),false);
+  assert.equal(f.host.commands.length,0);assert.deepEqual(fs.readdirSync(f.config.backupRoot),[]);
+}));
+for (const refusal of ['directory-velocity','leaf-velocity','leaf-velocity-sync','reload','readback','freeze-timeout','frozen-process','frozen-file','frozen-job','frozen-io','thawed','kill','exit-timeout']) test('finite stop partial state survives before stop returns: '+refusal, async t => productionFixture(t, async f => {
+  f.host.fail=refusal;
+  await assert.rejects(deploy(f.adapter,f.config,revision,2),/finite fixture/);
+  const failed=JSON.parse(fs.readFileSync(f.state));assert.equal(failed.status,'failed');
+  assert.equal(failed.maintenance.changed,true);assert.equal(failed.maintenance.stopped,false);
+  assert.equal(failed.servicesMayBeStopped,refusal==='exit-timeout');assert.equal(fs.existsSync(f.guard),false);
+  assert.equal(f.host.commands.length,0);assert.deepEqual(fs.readdirSync(f.config.backupRoot),[]);
+  assert.equal(fs.existsSync(path.join(f.root,'runtime/velocity.service.d')),true);
+  const retained=fs.readFileSync(f.state);f.host.fail=undefined;
+  await assert.rejects(deploy(productionAdapter(f.bundle,f.config,revision,3,f.configFile),f.config,revision,3),/unresolved failed/);
+  assert.deepEqual(fs.readFileSync(f.state),retained);assert.equal(f.host.commands.length,0);
+}));
+test('finite stop success retains protection until actual install/migration/authentication', async t => productionFixture(t, f => {
+  f.adapter.verify();f.adapter.lock();f.adapter.assertCurrent();f.adapter.velocity();
+  try {
+    f.adapter.stop('velocity-sync');const scope=f.adapter.maintenance();
+    assert.equal(scope.frozen,true);assert.equal(scope.killed,true);assert.equal(scope.stopped,true);
+    assert.deepEqual(f.host.commands.map(x=>x.args),[['-n','systemctl','stop','velocity-sync']]);
+    assert.ok(scope.attempted.indexOf('reload')<scope.attempted.indexOf('cgroup.freeze'));
+    assert.ok(scope.attempted.indexOf('cgroup.freeze')<scope.attempted.indexOf('cgroup.kill'));
+    f.adapter.guard();assert.throws(()=>f.adapter.start('velocity-sync'),/requires installed/);assert.throws(()=>f.adapter.start('velocity-sync'),/installed\/migrated\/authenticated/);
+    assert.equal(Object.keys(f.adapter.maintenance().leaves).length,2);
+    assert.equal(fs.existsSync(f.guard),true);
+  } finally { f.adapter.unlock(); }
+}));
+test('unavailable finite child records uncertainty without claiming services stopped', async t => productionFixture(t, async f => {
+  const original=cp.execFileSync;cp.execFileSync=(file,args,options)=>{if(file==='sudo'&&args[1]==='/usr/bin/python3')throw new Error('child result lost');return original(file,args,options);};syncBuiltinESMExports();
+  try {await assert.rejects(deploy(f.adapter,f.config,revision,2),/child result lost/);const failed=JSON.parse(fs.readFileSync(f.state));assert.equal(failed.maintenance.uncertain,true);assert.equal(failed.servicesMayBeStopped,true);}
+  finally {cp.execFileSync=original;syncBuiltinESMExports();}
+}));
+
+
+test('fixed Python child rejects extra fields, unknown operation and actual unprivileged identity before writes', async t => productionFixture(t, f => {
+  f.adapter.verify();f.adapter.lock();f.adapter.assertCurrent();f.adapter.velocity();
+  const original=cp.execFileSync;
+  cp.execFileSync=(file,args,options)=>{
+    if(file!=='sudo'||args[1]!=='/usr/bin/python3')return original(file,args,options);
+    const request=JSON.parse(options.input), source=args[4];
+    for(const changed of [{...request,operation:'arbitrary-command'},{...request,command:'touch /not-authorized'},request]){
+      // euid/SUDO_USER are the real isolated worker values, never a claimed root.
+      const output=f.executeLocal('python3',['-c',source],{input:JSON.stringify(changed),encoding:'utf8',env:{...process.env,SUDO_USER:'invalid-finite-test-runner'},timeout:30000});
+      const result=JSON.parse(output);assert.equal(result.ok,false);assert.equal(result.state.changed,false);
+      assert.equal(Object.keys(result.state.leaves).length,0);
+      assert.match(result.reason,/Unknown finite|actual root|Unsafe root config|Wrong actual sudo runner/);
+    }
+    return finiteHostResponse(request,f.host);
+  };syncBuiltinESMExports();
+  try {f.adapter.stop('velocity-sync');assert.equal(f.adapter.maintenance().stopped,true);}
+  finally {cp.execFileSync=original;syncBuiltinESMExports();f.adapter.unlock();}
+}));

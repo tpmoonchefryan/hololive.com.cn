@@ -31,7 +31,7 @@ HololiveCN MC 服务器官网与管理后台项目。
 ### 后台功能
 
 - 隐藏入口 + 双重鉴权：
-  - `/:adminKey/webadmin` 路径校验（`system_settings.admin_entrance_key`）
+  - `/:adminKey/webadmin` 路径校验（`system_settings.admin_entrance_key_hash`）
   - PocketBase 登录态校验
 - 内容管理：
   - 文章管理（多语言、封面、置顶、富文本）
@@ -41,8 +41,8 @@ HololiveCN MC 服务器官网与管理后台项目。
   - 服务器地图管理
   - 服务器信息字段管理
 - 账号与安全：
-  - SSO 白名单（`whitelists`）
-  - 本地管理员账号（`users`）
+  - 业务邮箱资料（`whitelists`，不授予管理权限）
+  - 可信供应的管理员与独立服务身份（`users`）
   - 本地登录开关（`system_settings.enable_local_login`）
 - 系统设置：
   - 统计脚本（Google/Baidu）
@@ -161,13 +161,12 @@ npm run dev
 
 ### 6.6 首次后台登录要点
 
-1. 进入 PocketBase 管理面板：`http://127.0.0.1:8090/_/`
-2. 确认已存在可登录的 `users` 账号
-3. 在 `whitelists` 集合加入允许访问后台的邮箱
-4. 在 `system_settings`（ID=`1`）读取 `admin_entrance_key`
-5. 访问：`http://127.0.0.1:5173/<admin_entrance_key>/webadmin/login`
+1. 由获准的可信供应者核实 `users` 人类身份，设置 `is_admin=true`、`verified=true`，保持 `service_account=false`。
+2. 使用持有人私下保管的入口 Key 访问 `/<adminKey>/webadmin/login`。数据库仅存 `system_settings.admin_entrance_key_hash`；已删除的明文 Key 不能读回。遗失时由获准管理员走现有入口设置功能重设。
+3. Microsoft OAuth 登录后仍由服务端检查上述管理员资格。`whitelists` 是业务资料，新增邮箱不会获得管理权。
+4. 人类密码认证还要求 `system_settings.enable_local_login=true`；关闭或设置缺失时 API 也拒绝人类密码登录。不要为部署认证临时打开该开关。
 
-注意：仓库当前不提供固定默认后台账号密码。
+服务使用另外供应的 `users` 身份，要求 `is_admin=true`、`service_account=true` 和各自独立凭据。真实身份与角色供应须取得相应授权；仓库没有固定默认账号密码。
 
 ## 7. 环境变量
 
@@ -186,7 +185,7 @@ npm run dev
 | 变量 | 作用 |
 |---|---|
 | `PB_URL` | PocketBase 地址（默认 `http://127.0.0.1:8090`） |
-| `PB_EMAIL` / `PB_PASS` | `velocity-sync` 登录 PocketBase 必填凭据 |
+| `PB_EMAIL` / `PB_PASS` | `velocity-sync` 独立 `users` 服务身份凭据（`is_admin=true`、`service_account=true`） |
 | `VELOCITY_DIR` | Velocity 安装目录（默认 `/opt/velocity`） |
 | `VELOCITY_OWNER` | Velocity 文件属主（默认 `ubuntu:ubuntu`） |
 | `MAP_PROXY_PORT` | 地图代理端口（默认 `18090`） |
@@ -244,19 +243,21 @@ npm run check:bundle  # 构建体积预算检查
 | `velocity` | 25577（默认） | Minecraft 代理端口（由配置决定） |
 | `velocity-sync` | - | 守护进程，不对外开放端口 |
 
+维护由实际 runner 执行，仅两份临时 runtime 保护及同步 cgroup 操作使用部署脚本内固定的 root 子调用。同步冻结、核对、终止后才写持久 guard、停 PB 并做唯一一致备份；新候选迁移、实际身份认证及保护核对通过后在原启动点清本次临时保护。失败保留保护和真实部分范围。具体字段与恢复条件见 [DEPLOY.md](DEPLOY.md) 和 [RUNNER_SETUP.md](RUNNER_SETUP.md)。真实身份、凭据、root 配置、私有目录、EnvFile 与 Actions 输入仍须按目标绑定；库存和本地夹具不证明生产连续性。
+
 ## 11. 安全与运维提示
 
-- 后台入口 Key 存于数据库，不要写死在代码或公开文档。
-- SSO 和本地登录都受白名单/账号策略约束，请最小化授权。
+- 数据库仅保存入口 Key 的 SHA-256 摘要 `admin_entrance_key_hash`。明文由持有人私下保管，不能从数据库读回。
+- OAuth 和密码会话均复核可信 `users` 管理资格；`whitelists` 不授予管理权。人类密码登录另受 `enable_local_login` 控制。
 - `map-proxy` 仅允许转发 `server_maps` 中登记的目标源，避免开放代理风险。
-- `mcsm-proxy` 公共接口有速率限制，管理接口要求 PocketBase 有效登录态。
+- `mcsm-proxy` 公共接口有速率限制，管理接口复核 PocketBase 会话及服务端管理员资格。
 - `audit_logs` 已接入关键后台动作记录，建议定期归档与审计。
 
 ## 12. 常见问题
 
 ### 访问后台返回 404
 
-`/:adminKey/webadmin` 中的 `adminKey` 与 `system_settings.admin_entrance_key` 不一致。
+`/:adminKey/webadmin` 中的 Key 经 SHA-256 处理后与 `system_settings.admin_entrance_key_hash` 不匹配。明文已移除，不能从数据库读回；遗失时通过获准的入口设置流程重设。路径通过后，登录仍须满足服务端管理员条件。
 
 ### 地图无法在 HTTPS 页面内嵌
 
@@ -285,10 +286,10 @@ npm run check:bundle  # 构建体积预算检查
 
 PocketBase 支持基准为 **0.26.5 和 0.34.2**；部署读取实际主机版本，不设下载或升级默认值；升级前须另行批准并在隔离副本执行迁移重放。Windows 或 Linux 使用同版本官方二进制；测试通过 `PB_TEST_BINARY_026` / `PB_TEST_BINARY_034` 指定文件。
 
-管理员授权由超管供应 `users.is_admin=true`，并验证身份后设 `verified=true`。无人根据邮箱白名单自动升级；既有 whitelists 只作为业务资料。服务账号由超管另设 `service_account=true`，使用独立凭据并可通过撤销 `is_admin` 立即停止管理访问。普通 users 创建、修改、删除由超管管理，OAuth 新身份仍由可信供应流程建立，不能自行提升管理员。
+管理员授权由获准的可信供应者通过超管供应 `users.is_admin=true`，并验证身份后设 `verified=true`。无人根据邮箱白名单自动升级；既有 whitelists 只作为业务资料。服务账号由超管另设 `service_account=true`，使用独立凭据并可通过撤销 `is_admin` 立即停止管理访问。普通 users 创建、修改、删除由超管管理，OAuth 新身份仍由可信供应流程建立，不能自行提升管理员。
 
 `enable_local_login` 仅控制已授权人类管理员的密码认证；关闭时 API 同样拒绝，Microsoft OAuth 与显式供应的服务账号路径保留。设置缺失时密码入口关闭。部署必须一并包含 `backend/pb_hooks`；管理代理每次请求重新检查服务端授权，不缓存权限。
 
 空库在 1765100006 执行前追加 1765100000 兼容迁移，按扁平属性预置两个 select 字段；原历史迁移文件保持原字节；已应用迁移的库通过追加迁移规范字段约束，不删历史、不改已有数据。先备份并验证隔离副本和实际迁移历史，再由另获授权的生产操作应用。回退优先恢复验证过的数据库备份；安全迁移 down 不恢复宽松权限。真实管理员/服务身份保留名单须由维护者核实，本地夹具不代表生产名单。
 
-MCSM 公开状态与 Velocity Sync 的 `PB_EMAIL` / `PB_PASS` 必须属于 `users` 集合中 `is_admin=true` 且 `service_account=true` 的独立服务身份，不再接受超管凭据。两者共用登录/刷新检查；Velocity 每次同步、订阅回调及状态更新都复核权限。关闭人类密码登录不关闭服务身份；撤销任一服务权限后拒绝后续动作。生产切换前须由维护者在既定部署阶段核实已有服务身份与凭据，本地验证不会创建生产账号。
+MCSM 公开状态与 Velocity Sync 各自使用独立 `PB_EMAIL` / `PB_PASS`，必须属于 `users` 集合中 `is_admin=true` 且 `service_account=true` 的独立服务身份，不再接受超管凭据。两者共用登录/刷新检查；Velocity 每次同步、订阅回调及状态更新都复核权限。关闭人类密码登录不关闭服务身份；撤销任一服务权限后拒绝后续动作。生产切换前须由维护者在既定部署阶段核实已有服务身份与凭据，本地验证不会创建生产账号。

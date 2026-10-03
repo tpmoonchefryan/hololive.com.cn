@@ -156,7 +156,8 @@ export async function deploy(adapter, config, revision, runNumber) {
     await adapter.record({ ...plan, backup, status: 'deployed', velocityProtected: true });
     return { status: 'deployed', revision, backup };
   } catch (error) {
-    if (stopped) await adapter.failure({ status: 'failed', revision, backup: backup ?? null, servicesMayBeStopped: true, reason: error.message });
+    const maintenance = adapter.maintenance?.();
+    if (stopped || maintenance?.changed || maintenance?.uncertain) await adapter.failure({ status: 'failed', revision, backup: backup ?? null, servicesMayBeStopped: stopped || maintenance?.stopped === true || maintenance?.killed === true || maintenance?.uncertain === true, maintenance: maintenance ?? null, reason: error.message });
     throw error;
   } finally { await adapter.unlock(); }
 }
@@ -536,12 +537,202 @@ export function restoreSafeRecovery(safe, destination, revision) {
   return { ...result, recoveryId: manifest.recoveryId, sourceSnapshotId: manifest.sourceSnapshotId, oldDaemonStarted: false };
 }
 
+// Fixed, shell-free child for the two approved runtime leaves and bound sync cgroup.
+// No caller-selected script, command, output path, unit or sysfs endpoint.
+const finiteRootSource = String.raw`import os,sys,json,stat,hashlib,pwd,subprocess,time,fcntl,array
+r=json.loads(sys.stdin.read()); result=r.get('state') or {'changed':False,'attempted':[],'leaves':{},'directories':{},'frozen':False,'killed':False,'stopped':False}
+def require(v,m):
+ if not v: raise RuntimeError(m)
+def real(p):
+ require(os.path.isabs(p) and os.path.realpath(p)==p,'Aliased finite endpoint'); return p
+def identity(p):
+ s=os.lstat(p); require(not stat.S_ISLNK(s.st_mode),'Linked finite endpoint'); return [s.st_dev,s.st_ino,s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink]
+def read(p):
+ real(p); fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+ try:
+  s=os.fstat(fd); require(stat.S_ISREG(s.st_mode) and s.st_nlink==1,'Nonregular finite endpoint')
+  with os.fdopen(fd,'rb',closefd=False) as f: b=f.read()
+  require(identity(p)==[s.st_dev,s.st_ino,s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink],'Endpoint replacement'); return b
+ finally: os.close(fd)
+def digest(b): return hashlib.sha256(b).hexdigest()
+def file_flags(p):
+ real(p); fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+ try:
+  value=array.array('L',[0]); fcntl.ioctl(fd,0x80086601,value,True); return value[0]
+ finally: os.close(fd)
+def ctl(args): return subprocess.check_output(['/usr/bin/systemctl']+args,text=True,timeout=10).strip()
+def props(unit,names):
+ out=ctl(['show',unit]+sum((['-p',n] for n in names),[])); return dict(line.split('=',1) for line in out.splitlines())
+marker_names=['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState','ControlGroup']
+sync_names=marker_names+['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf']
+leaf_name='99-hololive-release-guard.conf'
+contents={'velocity':'[Unit]\nRefuseManualStop=yes\n','velocity-sync':'[Unit]\nRefuseManualStart=yes\n[Service]\nRestart=no\nRestartForceExitStatus=\n'}
+leaves={u:'/run/systemd/system/'+u+'.service.d/'+leaf_name for u in contents}
+def unchanged():
+ require(identity(r['configFile'])==r['configIdentity'] and digest(read(r['configFile']))==r['configSha256'],'Config drift')
+ require(identity(lock)==r['lockIdentity'],'Lock inode drift')
+ require(json.loads(read(lock))=={'revision':r['revision'],'runNumber':r['runNumber'],'pid':r['runnerPID']},'Lock run drift')
+ require(digest(read(candidate_manifest))==r['candidateManifestSha256'],'Candidate drift')
+def java():
+ value=props('velocity',marker_names); require(value['ActiveState']=='active','Java inactive')
+ require(value==result['java'],'Java startup/group drift')
+ rows=ctl(['list-jobs','--no-pager','--no-legend','--plain']).splitlines()
+ require(not any(any(unit in row.split() for unit in ['velocity.service','velocity-sync.service']) for row in rows),'Velocity job in flight')
+ files=[]
+ for name in config['protectedVelocityFiles']:
+  require(not name.startswith('/') and all(x not in ['', '.', '..'] for x in name.split('/')),'Unsafe protected name')
+  f=real(config['velocityRoot']+'/'+name); files.append([name,identity(f),digest(read(f)),file_flags(f)])
+ require(files==result['files'],'Protected Velocity file drift')
+ for name in ['velocity.jar.tmp','velocity.jar.bak']: require(not os.path.lexists(config['velocityRoot']+'/'+name),'Transient JAR present')
+ listeners=subprocess.check_output(['/usr/bin/ss','-lnt'],text=True,timeout=10)
+ require(all(':'+str(port)+' ' in listeners for port in config['velocityPorts']),'Java listener missing')
+def group_path(group):
+ require(group.startswith('/') and group!='/' and all(x not in ['', '.', '..'] for x in group[1:].split('/')),'Unsafe cgroup')
+ return real('/sys/fs/cgroup'+group)
+def members(group):
+ values=[]
+ for root,dirs,files in os.walk(group):
+  real(root)
+  values+= [int(x) for x in read(root+'/cgroup.procs').split()]
+ return sorted(set(values))
+def process_binding(group,code_hash=None):
+ value=props('velocity-sync',sync_names)
+ require(value==result['sync'],'Sync unit/start/group drift')
+ ids=members(group); require(ids==[int(value['MainPID'])],'Unexpected sync member/descendant')
+ bindings=[]
+ for pid in ids:
+  base='/proc/'+str(pid)
+  status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
+  require([int(x) for x in status['Uid'].split()]==[pwd.getpwnam(value['User'] or 'root').pw_uid]*4,'Sync process UID mismatch')
+  require(os.path.realpath(base+'/exe')=='/usr/bin/node','Unexpected sync executable')
+  require(os.path.realpath(base+'/cwd')==config['webRoot']+'/backend/scripts','Unexpected sync cwd')
+  args=read(base+'/cmdline').split(b'\0'); require(args[:2]==[b'/usr/bin/node',b'sync_velocity.js'],'Unexpected sync command')
+  groups=read(base+'/cgroup').decode().splitlines(); require('0::'+value['ControlGroup'] in groups,'Process cgroup mismatch')
+  # Thread-specific fd tables also cover unshared descriptor tables.
+  for tid in os.listdir(base+'/task'):
+   for fd in os.listdir(base+'/task/'+tid+'/fd'):
+    target=os.readlink(base+'/task/'+tid+'/fd/'+fd)
+    require(not ('io_uring' in target or '[aio]' in target),'Asynchronous kernel I/O descriptor')
+    require(not target.startswith(config['velocityRoot']+'/'),'Open protected Velocity file')
+  bindings.append([pid,read(base+'/stat').decode().rsplit(')',1)[1].split()[19]])
+ require(digest(read(config['webRoot']+'/backend/scripts/sync_velocity.js'))==(code_hash or config['finiteStop']['syncCodeSha256']),'Sync code drift')
+ return bindings
+def frozen(group): return dict(x.split() for x in read(group+'/cgroup.events').decode().splitlines()).get('frozen')=='1'
+def wait_for(fn,message):
+ end=time.monotonic()+10
+ while not fn():
+  require(time.monotonic()<end,message); time.sleep(.02)
+def own_leaves():
+ for unit,owned in result['leaves'].items():
+  require(identity(leaves[unit])==owned and read(leaves[unit]).decode()==contents[unit],'Foreign/replaced runtime leaf')
+ for unit,owned in result.get('parents',{}).items():
+  if owned is not None and unit in result['leaves']: require(identity(os.path.dirname(leaves[unit]))==owned,'Runtime parent replaced')
+ for unit,owned in result['directories'].items(): require(identity(os.path.dirname(leaves[unit]))==owned,'Runtime directory replaced')
+def write_sys(group,name):
+ unchanged(); require(group_path(result['sync']['ControlGroup'])==group,'Cgroup path drift')
+ require(identity(group)==result['groupIdentity'],'Cgroup inode drift')
+ result['attempted'].append(name); result['changed']=True
+ fd=os.open(real(group+'/'+name),os.O_WRONLY|os.O_NOFOLLOW)
+ try: os.write(fd,b'1')
+ finally: os.close(fd)
+def effective():
+ return {'velocity':props('velocity',['RefuseManualStop']),'velocity-sync':props('velocity-sync',['RefuseManualStart','Restart','RestartForceExitStatus'])}
+def observations():
+ result['observedSync']=props('velocity-sync',marker_names); result['effectiveProperties']=effective()
+ if 'sync' in result:
+  current=group_path(result['sync']['ControlGroup'])
+  result['frozenObserved']=frozen(current) if os.path.exists(current+'/cgroup.events') else None
+  result['membersObserved']=members(current) if os.path.exists(current+'/cgroup.procs') else []
+def remove(unit):
+ unchanged(); own_leaves(); java(); file=leaves[unit]
+ result['attempted'].append('remove-'+unit); os.unlink(file); del result['leaves'][unit]
+ if unit in result['directories']:
+  directory=os.path.dirname(file)
+  if not os.listdir(directory): os.rmdir(directory); del result['directories'][unit]
+ ctl(['daemon-reload']); now=effective()
+ require(now[unit]==result['originalProperties'][unit],'Runtime properties not restored')
+try:
+ require(set(r)=={'operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','state'},'Unknown finite request field')
+ require(r['operation'] in ['stop','cleanup-sync','cleanup-java'],'Unknown finite operation')
+ require(os.geteuid()==0,'Finite child requires actual root')
+ config=json.loads(read(real(r['configFile']))); require(identity(r['configFile'])[2]==0 and identity(r['configFile'])[4]&0o022==0,'Unsafe root config')
+ runner=pwd.getpwnam(config['runnerUser']); require(os.environ.get('SUDO_USER')==config['runnerUser'] and runner.pw_uid==r['runnerUID'] and runner.pw_gid==r['runnerGID'],'Wrong actual sudo runner')
+ require(config['approvedRevision']==r['revision'] and config['repository']==r['repository'] and str(r['runId']).isdigit(),'Wrong candidate/run/repository')
+ require(digest(read('/etc/machine-id'))==config['machineIdSha256'],'Wrong root host')
+ roots=[real(config[k]) for k in ['webRoot','stateRoot','backupRoot','velocityRoot']]
+ require(all(a!='/' and not(a==b or a.startswith(b+'/') or b.startswith(a+'/')) for i,a in enumerate(roots) for b in roots[i+1:]),'Overlapping finite roots')
+ lock=real(config['stateRoot']+'/deployment.lock'); candidate_manifest=real(r['bundle']+'/release.json'); unchanged()
+ require(json.loads(read(candidate_manifest))['revision']==r['revision'],'Wrong candidate manifest')
+ result=r['state'] if r['state'] else result
+ owner={k:r[k] for k in ['revision','runNumber','runId','repository','lockIdentity','runnerPID','configSha256']}
+ if r['operation']=='stop':
+  result['owner']=owner
+  result['java']=props('velocity',marker_names)
+  require(r['velocityEvidence'] and all(result['java'].get(k)==v for k,v in dict(line.split('=',1) for line in r['velocityEvidence']['service'].splitlines()).items()),'Java drift since outer pre-stop baseline')
+  result['sync']=props('velocity-sync',sync_names)
+  require(result['sync']['ActiveState']=='active' and result['sync']['WorkingDirectory']==config['webRoot']+'/backend/scripts','Unexpected sync unit')
+  require(all(not value for value in props('velocity-sync',['ExecStop','ExecStopPost']).values()),'Unapproved sync stop command')
+  bindings=props('velocity-sync',['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf'])
+  require('\n'.join(k+'='+v for k,v in bindings.items())==config['serviceBindings']['velocity-sync'],'Sync service binding drift')
+  require(result['java']['ControlGroup']!=result['sync']['ControlGroup'],'Shared Java/sync group')
+  group=group_path(result['sync']['ControlGroup']); jgroup=group_path(result['java']['ControlGroup'])
+  require(not(group.startswith(jgroup+'/') or jgroup.startswith(group+'/')),'Nested Java/sync group')
+  result['groupIdentity']=identity(group)
+  require(not frozen(group),'Sync already frozen')
+  result['files']=[[n,identity(real(config['velocityRoot']+'/'+n)),digest(read(config['velocityRoot']+'/'+n)),file_flags(config['velocityRoot']+'/'+n)] for n in config['protectedVelocityFiles']]
+  require(all(any(f[0]==entry['path'] and f[2]==entry.get('sha256') and f[1][4]==entry.get('mode') for f in result['files']) for entry in r['velocityEvidence']['files']),'Java files drift since outer pre-stop baseline')
+  java(); result['processes']=process_binding(group); result['originalProperties']=effective()
+  require(props('velocity',['Requires','BindsTo','PartOf'])==dict(line.split('=',1) for line in config['velocityServiceBinding'].splitlines()),'Java dependency drift')
+  real('/run/systemd/system'); require(identity('/run/systemd/system')[2]==0 and identity('/run/systemd/system')[4]&0o022==0,'Unsafe runtime parent')
+  for unit,file in leaves.items():
+   directory=os.path.dirname(file); require(not os.path.lexists(file),'Existing runtime leaf')
+   if os.path.lexists(directory): real(directory); require(identity(directory)[2]==0 and identity(directory)[4]&0o022==0,'Unsafe runtime directory')
+   result.setdefault('parents',{})[unit]=identity(directory) if os.path.exists(directory) else None
+  for unit,file in leaves.items():
+   unchanged(); java(); directory=os.path.dirname(file)
+   if result['parents'][unit] is not None: require(identity(directory)==result['parents'][unit],'Runtime parent drift')
+   if not os.path.exists(directory):
+    result['attempted'].append('mkdir-'+unit); os.mkdir(directory,0o755); result['changed']=True; result['directories'][unit]=identity(directory)
+   result['attempted'].append('create-'+unit); fd=os.open(file,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o644); result['changed']=True; result['leaves'][unit]=identity(file)
+   try: os.write(fd,contents[unit].encode()); os.fsync(fd)
+   finally: os.close(fd)
+  own_leaves(); result['attempted'].append('reload'); ctl(['daemon-reload'])
+  require(effective()=={'velocity':{'RefuseManualStop':'yes'},'velocity-sync':{'RefuseManualStart':'yes','Restart':'no','RestartForceExitStatus':''}},'Runtime protection not effective')
+  java(); write_sys(group,'cgroup.freeze'); wait_for(lambda:frozen(group),'Sync freeze timed out'); result['frozen']=True
+  java(); require(process_binding(group)==result['processes'],'Frozen process identity drift'); own_leaves()
+  require(frozen(group),'Sync thawed before kill'); java(); require(frozen(group),'Sync thawed at kill boundary')
+  write_sys(group,'cgroup.kill'); result['killed']=True; wait_for(lambda:not members(group),'Sync exit timed out')
+  java(); ctl(['stop','velocity-sync']); result['stopped']=True
+ else:
+  require(result.get('owner')==owner,'Runtime ownership belongs to another run')
+  require(result['stopped'] and result['changed'],'Missing original stop ownership'); own_leaves(); java()
+  guard=read(config['webRoot']+'/backend/.velocity-maintenance'); require(guard,'Persistent maintenance guard absent')
+  script=config['webRoot']+'/backend/scripts/sync_velocity.js'; candidate=read(r['bundle']+'/backend/scripts/sync_velocity.js')
+  require(read(script)==candidate and b'.velocity-maintenance' in candidate,'Guard-aware installed candidate mismatch')
+  bindings=props('velocity-sync',['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf'])
+  require('\n'.join(k+'='+v for k,v in bindings.items())==config['serviceBindings']['velocity-sync'],'New sync unit binding drift')
+  if r['operation']=='cleanup-java':
+   result['sync']=props('velocity-sync',sync_names); require(result['sync']['ActiveState']=='active','New sync not active')
+   new_group=group_path(result['sync']['ControlGroup']); java_group=group_path(result['java']['ControlGroup'])
+   require(new_group!=java_group and not(new_group.startswith(java_group+'/') or java_group.startswith(new_group+'/')),'New sync shares Java group')
+   process_binding(new_group,digest(candidate))
+  remove('velocity-sync' if r['operation']=='cleanup-sync' else 'velocity')
+ observations()
+ print(json.dumps({'ok':True,'rootEUID':os.geteuid(),'runnerUID':runner.pw_uid,'runnerGID':runner.pw_gid,'state':result}))
+except Exception as e:
+ # Partial writes and attempted operations survive even when stop never returns.
+ result['reason']=str(e)
+ try: observations()
+ except Exception as observation: result['observationError']=str(observation)
+ print(json.dumps({'ok':False,'rootEUID':os.geteuid(),'state':result,'reason':str(e)}))
+`;
+
 export function productionAdapter(bundle, config, revision, runNumber, configFile) {
   const state = path.join(config.stateRoot, 'deployment.json');
   const lock = path.join(config.stateRoot, 'deployment.lock');
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
   const pb = path.join(config.webRoot, 'backend/pocketbase');
-  let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger;
+  let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger, preflightSources, configIdentity, configSha256, maintenance = null, installed = false, migrated = false, authenticated = false, velocityBaseline;
   const firstCapture = config.baseline?.capture === 'stopped-backup';
   const captureDescriptor = firstCapture ? JSON.stringify(config.baseline) : null;
   const captureBinding = directory => ({ revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, snapshotDirectory: directory });
@@ -557,15 +748,44 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     return controlPath(file);
   };
   const writeControl = (file, value) => { boundControl(file); controlWrite(file, value, boundControl); };
+  const sourceBindings = () => ({
+    migrations: fs.existsSync(path.join(config.webRoot, 'backend/pb_migrations')) ? inventory(config.webRoot, ['backend/pb_migrations']) : [],
+    configuration: config.configurationFiles.map(file => { const stat = fs.lstatSync(file); check(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, 'Unsafe declared configuration'); return { path: file, sha256: sha(fs.readFileSync(file)), mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid }; }),
+  });
+  const assertSources = () => { if (preflightSources) check(JSON.stringify(sourceBindings()) === JSON.stringify(preflightSources), 'Migration/configuration changed since preflight'); };
+  const finiteRoot = operation => {
+    check(/^[a-f0-9]{64}$/.test(config.finiteStop?.syncCodeSha256 ?? ''), 'Missing current finite sync code binding');
+    check(lockFd !== undefined && configIdentity && configSha256, 'Finite stop requires verified config and active lock');
+    const lockStat = boundControl(lock), opened = fs.fstatSync(lockFd);
+    check(lockStat && opened.dev === lockStat.dev && opened.ino === lockStat.ino, 'Finite stop lock inode drift');
+    check(sha(fs.readFileSync(configFile)) === configSha256, 'Finite stop config drift');
+    check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? ''), 'Finite child current Actions binding drift');
+    verifyBundle(bundle, revision);
+    const identity = stat => [stat.dev, stat.ino, stat.uid, stat.gid, stat.mode & 0o7777, stat.nlink];
+    const runner = os.userInfo();
+    check(runner.username === config.runnerUser && runner.uid !== 0, 'Finite stop requires actual nonroot runner');
+    const request = { operation, configFile, configIdentity, configSha256, lockIdentity: identity(opened), revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, runnerPID: process.pid, runnerUID: runner.uid, runnerGID: runner.gid, bundle, candidateManifestSha256: sha(fs.readFileSync(path.join(bundle, 'release.json'))), velocityEvidence: velocityBaseline ?? null, state: maintenance };
+    let result;
+    try { result = JSON.parse(execFileSync('sudo', ['-n', '/usr/bin/python3', '-I', '-c', finiteRootSource], { input: JSON.stringify(request), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000 })); }
+    catch (error) { maintenance = { ...(maintenance ?? {}), uncertain: true, operation, reason: 'Finite child result unavailable: ' + error.message }; throw error; }
+    maintenance = result.ok ? result.state : { ...(maintenance ?? {}), ...result.state, changed: maintenance?.changed === true || result.state?.changed === true }; 
+    check(result.rootEUID === 0 && result.ok && result.runnerUID === runner.uid && result.runnerGID === runner.gid, result.reason ?? 'Finite root/runner binding refused');
+    check(maintenance && typeof maintenance.changed === 'boolean', 'Missing finite maintenance state');
+    return maintenance;
+  };
   const systemctl = (action, unit) => {
     check(config.websiteServices.includes(unit) && units.includes(unit), 'Service outside whitelist');
     command('sudo', ['-n', 'systemctl', action, unit]);
   };
-  const velocity = () => ({
-    service: command('systemctl', ['show', 'velocity', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'NRestarts', '-p', 'ActiveState']),
-    files: inventory(config.velocityRoot, config.protectedVelocityFiles),
-    listeners: command('ss', ['-lnt']),
-  });
+  const velocity = () => {
+    const value = {
+      service: command('systemctl', ['show', 'velocity', '-p', 'MainPID', '-p', 'ExecMainStartTimestampMonotonic', '-p', 'NRestarts', '-p', 'ActiveState']),
+      files: inventory(config.velocityRoot, config.protectedVelocityFiles),
+      listeners: command('ss', ['-lnt']),
+    };
+    velocityBaseline ??= value;
+    return value;
+  };
   const assertCurrent = () => {
     check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
     oldState = controlRead(state, boundControl);
@@ -605,9 +825,14 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
         }
       }
       verifyInstallTargets(config.webRoot, config.configurationFiles);
+      preflightSources = sourceBindings();
       for (const endpoint of [state, guard, lock]) boundControl(endpoint);
       check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? '') && ['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'Missing actual Actions run/repository binding');
+      assertRealPath(configFile);
       const configStat = fs.statSync(configFile);
+      check(fs.lstatSync(configFile).isFile() && configStat.nlink === 1, 'Invalid production config endpoint');
+      configIdentity = [configStat.dev, configStat.ino, configStat.uid, configStat.gid, configStat.mode & 0o7777, configStat.nlink];
+      configSha256 = sha(fs.readFileSync(configFile));
       check(configStat.uid === 0 && (configStat.mode & 0o022) === 0, 'Production config must be root-owned and not group/world writable');
       for (const root of [config.webRoot, config.backupRoot, config.stateRoot, config.velocityRoot]) assertRealPath(root);
       for (const root of [config.backupRoot, config.stateRoot]) check((fs.statSync(root).mode & 0o077) === 0, 'Private backup/state directory permissions required');
@@ -629,17 +854,25 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     } },
     assertCurrent,
     velocity,
-    stop: systemctl.bind(null, 'stop'),
+    maintenance: () => maintenance,
+    stop: unit => unit === 'velocity-sync' ? finiteRoot('stop') : systemctl('stop', unit),
     guard: () => writeControl(guard, 'Website maintenance: explicit release of Velocity synchronization requires separate authorization.\n'),
     backup: () => {
       if (firstCapture) check(!captured && onlineLedger && JSON.stringify(config.baseline) === captureDescriptor, 'First capture requires verified unchanged descriptor and one backup');
+      assertSources();
       backupPath = fs.mkdtempSync(path.join(config.backupRoot, `run-${runNumber}-`));
       fs.chmodSync(backupPath, 0o700);
       const snapshot = snapshotApplication(config.webRoot, backupPath);
+      check(JSON.stringify(inventory(config.webRoot, snapshot.present)) === JSON.stringify(snapshot.application), 'Application capture drift/incomplete copy');
       copyPaths('/', path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
       const contract = checkDatabases(path.join(backupPath, 'application/backend/pb_data'));
       const configuration = inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
       const ownership = config.configurationFiles.map(file => { const stat = fs.statSync(file); return { path: file.slice(1), uid: stat.uid, gid: stat.gid }; });
+      assertSources();
+      if (preflightSources) check(JSON.stringify(fs.existsSync(path.join(backupPath, 'application/backend/pb_migrations')) ? inventory(path.join(backupPath, 'application'), ['backend/pb_migrations']) : []) === JSON.stringify(preflightSources.migrations), 'Migration capture drift');
+      check(JSON.stringify(configuration) === JSON.stringify(inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)))), 'Configuration capture drift');
+      for (const item of preflightSources?.configuration ?? []) { const copied = path.join(backupPath, 'configuration', item.path.slice(1)), stat = fs.statSync(copied); check(sha(fs.readFileSync(copied)) === item.sha256 && (stat.mode & 0o777) === item.mode, 'Configuration capture ownership/content drift'); }
+      if (preflightSources) check(JSON.stringify(ownership) === JSON.stringify(preflightSources.configuration.map(item => ({ path: item.path.slice(1), uid: item.uid, gid: item.gid }))), 'Configuration source ownership drift');
       const value = { revision: config.baseline?.kind === 'mixed' ? null : oldState?.revision ?? config.previousRevision, ...snapshot, configuration, ownership, contract, retainedHistory: config.baseline?.retainedHistory ?? [], sourceAbsentHistory: config.baseline?.sourceAbsentHistory ?? [] };
       if (firstCapture) {
         verifyMixedHistory(bundle, path.join(backupPath, 'application'), config.baseline, contract['data.db'].migrations);
@@ -671,9 +904,16 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision);
     },
     baseline: backup => { assertCaptured(backup); writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))); },
-    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); assertCaptured(backupPath); installBundle(bundle, config.webRoot, revision, effectiveBaseline, backupPath); },
-    migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); verifyRecoverySecurity(config.webRoot, config.recoveryIdentities); const expected = json(path.join(backupPath, 'expected-recovery-contract.json')); verifyRecoveryContract(config.webRoot, expected.expectedContract, json(path.join(backupPath, 'backup.json')).contract); },
-    start: unit => systemctl(unit === 'pocketbase' || unit === 'velocity-sync' ? 'start' : 'restart', unit),
+    install: () => { assertSources(); verifyInstallTargets(config.webRoot, config.configurationFiles); assertCaptured(backupPath); installBundle(bundle, config.webRoot, revision, effectiveBaseline, backupPath); installed = true; },
+    migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); verifyRecoverySecurity(config.webRoot, config.recoveryIdentities); const expected = json(path.join(backupPath, 'expected-recovery-contract.json')); verifyRecoveryContract(config.webRoot, expected.expectedContract, json(path.join(backupPath, 'backup.json')).contract); migrated = true; },
+    start: unit => {
+      if (unit === 'velocity-sync') {
+        check(installed && migrated && authenticated, 'Sync cleanup requires installed/migrated/authenticated target');
+        finiteRoot('cleanup-sync');
+        systemctl('start', unit);
+        finiteRoot('cleanup-java');
+      } else systemctl(unit === 'pocketbase' ? 'start' : 'restart', unit);
+    },
     health: async () => {
       for (let i = 0; i < 30; i++) {
         try { const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) }); const data = await response.json(); if (response.ok && data.code === 200) break; } catch { /* retry bounded startup */ }
@@ -681,7 +921,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       }
       const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) });
       check(response.ok && (await response.json()).code === 200, 'PocketBase startup health failed');
-      await authenticateTarget();
+      await authenticateTarget(); authenticated = true;
     },
     assertVelocity: before => {
       const after = velocity();
