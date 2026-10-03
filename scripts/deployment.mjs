@@ -36,7 +36,7 @@ export function serviceFacts(raw) {
     configuration[name] = []; runtime[name] = [];
     let rest = properties[name];
     while (rest) {
-      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0/0) \}(?: |$)/.exec(rest);
+      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0\/0) \}(?: |$)/.exec(rest);
       check(match && path.isAbsolute(match[1]) && !/[\\"'\t\n]/.test(match[2]), 'Ambiguous service command');
       const argv = match[2].split(' ');
       check(argv.every(Boolean) && /^\[[^\[\]]+\]$/.test(match[4]) && /^\[[^\[\]]+\]$/.test(match[5]) && ['(null)', 'exited', 'killed', 'dumped'].includes(match[7]), 'Ambiguous service argv/runtime');

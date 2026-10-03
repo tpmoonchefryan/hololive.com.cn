@@ -464,7 +464,7 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
     assert.deepEqual(fs.readFileSync(path.join(f.webRoot,extra)),bytes);assert.equal(fs.readFileSync(path.join(f.webRoot,'backend/.env'),'utf8'),'retained environment');
     f.adapter.record({status:'deployed',revision,runNumber:2,backup});const state=JSON.parse(fs.readFileSync(f.state));assert.equal(state.baseline,raw.snapshotId);assert.equal(state.candidateManifest.revision,revision);assert.deepEqual(state.retainedHistory,raw.retainedHistory);
     // Unknown ledger fails preflight without service commands or application replacement.
-    raw.contract['data.db'].migrations.push(['unknown-applied.js',1]);raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));f.config.baseline.snapshotId=raw.snapshotId;assert.throws(()=>f.adapter.verify(),/contract drift|Target changed/);
+    raw.contract['data.db'].migrations.push(['unknown-applied.js',1]);raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));f.config.baseline.snapshotId=raw.snapshotId;assert.throws(()=>productionAdapter(f.bundle,f.config,revision,state.runNumber+1,f.configFile).verify(),/contract drift|Target changed/);
   } finally {
     cp.execFileSync=commandOverride;syncBuiltinESMExports();
     if(pb.service.child.exitCode===null&&pb.service.child.signalCode===null)await pb.close();
