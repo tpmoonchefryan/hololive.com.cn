@@ -344,6 +344,7 @@ function assertSnapshotTarget(backup, webRoot) {
 function verifyRecoverySecurity(directory, identities) {
   check(Array.isArray(identities) && identities.length > 0 && identities.some(item => item.role === 'admin') && identities.some(item => item.role === 'service'), 'Missing approved recovery identities');
   check(identities.every(item => typeof item.id === 'string' && /^[a-z0-9]{15}$/.test(item.id) && ['admin', 'service'].includes(item.role)), 'Invalid recovery identities');
+  check(new Set(identities.map(item => item.id)).size === identities.length, 'Duplicate recovery identity');
   // Read actual isolated SQLite schema/flags. No account creation or role grant.
   const script = `import sqlite3,json,sys
 import tempfile,shutil,pathlib,contextlib,atexit
@@ -386,7 +387,7 @@ def observed(file):
  return sqlite3.connect(str(target))
 old=observed(sys.argv[1])
 new=observed(sys.argv[2])
-approved={item['id'] for item in json.loads(sys.argv[3])}
+approved={item['id']:item['role'] for item in json.loads(sys.argv[3])}
 for (table,) in old.execute("select name from sqlite_master where type='table' and name not in ('_migrations','_collections','_params') and name not like 'sqlite_%'"):
  quote=lambda x:'"'+x.replace('"','""')+'"'
  before=[r[1] for r in old.execute('pragma table_info('+quote(table)+')')]
@@ -402,10 +403,13 @@ for (table,) in old.execute("select name from sqlite_master where type='table' a
   assert all(row[index] in originalIds or row[index] in approved for row in derived),'Unapproved added identity'
   derived=[row for row in derived if row[index] in originalIds]
   for flag in ['is_admin','service_account']:
-   if flag in before:
-    q='select id,'+quote(flag)+' from users'
-    oldFlags=dict(old.execute(q));newFlags=dict(new.execute(q))
-    assert all(key in approved or value==newFlags.get(key) for key,value in oldFlags.items()),'Unapproved role change'
+   q='select id,'+quote(flag)+' from users'
+   oldFlags=dict(old.execute(q)) if flag in before else {key:0 for key in originalIds}
+   newFlags=dict(new.execute(q))
+   assert all(bool(value)==bool(newFlags.get(key)) for key,value in oldFlags.items() if key not in approved),'Unapproved role change'
+  for key,role in approved.items():
+   row=new.execute('select is_admin,service_account from users where id=?',(key,)).fetchone()
+   assert row and bool(row[0]) and bool(row[1])==(role=='service'),'Recovery identity role mismatch'
  assert normalize(original)==normalize(derived),'Derived record/content mismatch: '+table
 print('verified')`;
   check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? [])]) === 'verified', 'Derived source mismatch');
@@ -413,11 +417,50 @@ print('verified')`;
   const raw = names.filter(name => fs.existsSync(path.join(rawDirectory, name)));
   check(JSON.stringify(inventory(rawDirectory, raw)) === JSON.stringify(inventory(migratedDirectory, raw)), 'Derived media mismatch');
 }
-export function createSafeRecovery(backup, migrated, bundle, revision, identities) {
+// PB generates field identifiers and migration timestamps on isolated replay.
+// Normalize only those generated values; retain every business constraint/rule
+// and every migration file. Original ledger rows must remain byte-for-byte.
+function recoveryContract(directory) {
+  const script = `import sqlite3,json,sys
+c=sqlite3.connect(sys.argv[1])
+columns=[r[1] for r in c.execute('pragma table_info(_collections)')]
+collections=[]
+for row in c.execute('select * from _collections order by name'):
+ item=dict(zip(columns,row))
+ for key in ['created','updated']:item.pop(key,None)
+ if 'fields' in item:
+  fields=json.loads(item['fields'])
+  for field in fields:field.pop('id',None)
+  item['fields']=fields
+ for key in ['indexes','options']:
+  if key in item and isinstance(item[key],str):
+   try:item[key]=json.loads(item[key])
+   except ValueError:pass
+ collections.append(item)
+schema=list(c.execute("select type,name,tbl_name,sql from sqlite_master where name not like 'sqlite_%' order by type,name"))
+print(json.dumps({'collections':collections,'schema':schema,'migrations':sorted(r[0] for r in c.execute('select file from _migrations'))},sort_keys=True))`;
+  return JSON.parse(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db')]));
+}
+function verifyRecoveryContract(directory, expected, rawContract) {
+  check(JSON.stringify(recoveryContract(directory)) === JSON.stringify(expected), 'Recovery candidate contract mismatch');
+  const actual = checkDatabases(path.join(directory, 'backend/pb_data'))['data.db'].migrations;
+  check(rawContract['data.db'].migrations.every(row => actual.some(current => JSON.stringify(current) === JSON.stringify(row))), 'Original migration ledger changed');
+}
+export function createSafeRecovery(backup, migrated, bundle, revision, identities, expectedDirectory) {
   const raw = verifySnapshot(backup);
   verifyBundle(bundle, revision);
   verifyDerivedData(path.join(backup, 'application'), migrated, identities);
   verifyRecoverySecurity(migrated, identities);
+  if (!expectedDirectory) {
+    expectedDirectory = path.join(backup, 'candidate-contract-rehearsal');
+    restoreBackup(backup, expectedDirectory);
+    const output = command(path.join(expectedDirectory, 'backend/pocketbase'), ['migrate', 'up', '--dir', path.join(expectedDirectory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
+    check(!/Failed|Error:/i.test(output), 'Isolated migration failed');
+  }
+  check(expectedDirectory === path.join(backup, 'rehearsal') || expectedDirectory === path.join(backup, 'candidate-contract-rehearsal'), 'Unbound recovery expectation');
+  const expectedContract = recoveryContract(expectedDirectory);
+  verifyRecoveryContract(migrated, expectedContract, raw.contract);
+  writeJSON(path.join(backup, 'expected-recovery-contract.json'), { sourceSnapshotId: raw.snapshotId, revision, candidateFiles: verifyBundle(bundle, revision).files, expectedContract });
   const safe = path.join(backup, 'safe-recovery');
   check(!fs.existsSync(safe), 'Safe recovery destination exists');
   // Candidate app and forward-migrated data, never the permissive raw app.
@@ -429,7 +472,7 @@ export function createSafeRecovery(backup, migrated, bundle, revision, identitie
   const present = [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'];
   const manifest = { revision, sourceSnapshotId: raw.snapshotId, present, missing: [], application: inventory(path.join(safe, 'application'), present),
     configuration: raw.configuration, ownership: raw.ownership, contract: checkDatabases(path.join(safe, 'application/backend/pb_data')),
-    retainedHistory: raw.retainedHistory, sourceAbsentHistory: raw.sourceAbsentHistory, identities, candidateFiles: verifyBundle(bundle, revision).files };
+    retainedHistory: raw.retainedHistory, sourceAbsentHistory: raw.sourceAbsentHistory, expectedContract, identities, candidateFiles: verifyBundle(bundle, revision).files };
   manifest.snapshotId = snapshotIdentity(manifest);
   manifest.recoveryId = sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: raw.snapshotId, identities, candidateFiles: manifest.candidateFiles }));
   writeJSON(path.join(safe, 'backup.json'), manifest);
@@ -441,9 +484,15 @@ export function restoreSafeRecovery(safe, destination, revision) {
   check(manifest.recoveryId === sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: manifest.sourceSnapshotId, identities: manifest.identities, candidateFiles: manifest.candidateFiles })), 'Recovery identity binding mismatch');
   const app = manifest.application.filter(item => !item.path.startsWith('backend/pb_data') && item.path !== 'backend/pocketbase' && !(manifest.retainedHistory ?? []).some(old => old.path === item.path));
   check(JSON.stringify(app) === JSON.stringify(manifest.candidateFiles), 'Recovery candidate mismatch');
+  const source = verifySnapshot(path.dirname(safe));
+  const expectation = json(path.join(path.dirname(safe), 'expected-recovery-contract.json'));
+  check(source.snapshotId === manifest.sourceSnapshotId && expectation.sourceSnapshotId === source.snapshotId && expectation.revision === revision && JSON.stringify(expectation.candidateFiles) === JSON.stringify(manifest.candidateFiles) && JSON.stringify(expectation.expectedContract) === JSON.stringify(manifest.expectedContract), 'Recovery expected contract binding mismatch');
+  verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), manifest.identities);
+  verifyRecoveryContract(path.join(safe, 'application'), expectation.expectedContract, source.contract);
   verifyRecoverySecurity(path.join(safe, 'application'), manifest.identities);
   const result = restoreBackup(safe, destination);
   verifyRecoverySecurity(destination, manifest.identities);
+  verifyRecoveryContract(destination, expectation.expectedContract, source.contract);
   return { ...result, recoveryId: manifest.recoveryId, sourceSnapshotId: manifest.sourceSnapshotId, oldDaemonStarted: false };
 }
 
@@ -473,6 +522,24 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
     oldState = controlRead(state, boundControl);
     check(!oldState || (oldState.status === 'deployed' && runNumber > oldState.runNumber), 'Older/repeated run or unresolved failed deployment');
+  };
+  const authenticateTarget = async () => {
+    const identities = config.recoveryIdentities;
+    check(Array.isArray(config.targetAuthentication) && config.targetAuthentication.length === identities.length, 'Missing target authentication bindings');
+    const base = new URL(config.pocketbaseHealthUrl).origin;
+    for (const item of identities) {
+      const binding = config.targetAuthentication.find(value => value.id === item.id && value.role === item.role);
+      check(binding && ['admin', 'service'].includes(binding.role), 'Missing target credential binding');
+      const token = typeof binding.tokenEnv === 'string' && process.env[binding.tokenEnv];
+      const password = typeof binding.passwordEnv === 'string' && process.env[binding.passwordEnv];
+      check(Boolean(token) !== Boolean(password) && (token || typeof binding.identity === 'string'), 'Missing target credential binding');
+      const response = await fetch(base + '/api/collections/users/' + (token ? 'auth-refresh' : 'auth-with-password'), { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: token } : {}) }, ...(token ? {} : { body: JSON.stringify({ identity: binding.identity, password }) }), signal: AbortSignal.timeout(3000) });
+      const data = await response.json();
+      check(response.ok && data.record?.id === item.id && data.record.is_admin === true && data.record.service_account === (item.role === 'service') && (item.role === 'service' || data.record.verified === true), 'Target authentication failed');
+      const read = await fetch(base + '/api/collections/velocity_settings/records', { headers: { Authorization: data.token }, signal: AbortSignal.timeout(3000) });
+      check(read.ok && Array.isArray((await read.json()).items), 'Target protected read failed');
+    }
+    for (const unit of config.websiteServices.filter(unit => /velocity-sync|mcsm/.test(unit))) check(config.targetAuthentication.some(item => item.role === 'service' && item.services?.includes(unit)), 'Missing dependent service authentication binding');
   };
   const migrateCopy = directory => command(pb, ['migrate', 'up', '--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
   return {
@@ -542,19 +609,21 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       writeJSON(path.join(backup, 'isolated-migrated-contract.json'), checkDatabases(path.join(isolated, 'backend/pb_data')));
       // A migration rehearsal never promotes raw permissive data to safe recovery.
       // The approved identities must already exist in the derived database.
-      const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities);
+      const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities, isolated);
       restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision);
     },
     baseline: backup => writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))),
     install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); installBundle(bundle, config.webRoot, revision, config.baseline, backupPath); },
-    migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); },
+    migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); verifyRecoverySecurity(config.webRoot, config.recoveryIdentities); const expected = json(path.join(backupPath, 'expected-recovery-contract.json')); verifyRecoveryContract(config.webRoot, expected.expectedContract, json(path.join(backupPath, 'backup.json')).contract); },
     start: unit => systemctl(unit === 'pocketbase' || unit === 'velocity-sync' ? 'start' : 'restart', unit),
     health: async () => {
       for (let i = 0; i < 30; i++) {
-        try { const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) }); const data = await response.json(); if (response.ok && data.code === 200) return; } catch { /* retry bounded startup */ }
+        try { const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) }); const data = await response.json(); if (response.ok && data.code === 200) break; } catch { /* retry bounded startup */ }
         await new Promise(resolve => setTimeout(resolve, 500));
       }
-      refuse('PocketBase startup health failed');
+      const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) });
+      check(response.ok && (await response.json()).code === 200, 'PocketBase startup health failed');
+      await authenticateTarget();
     },
     assertVelocity: before => {
       const after = velocity();

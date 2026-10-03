@@ -137,3 +137,28 @@ service authentication, Java/player continuity, or production authorization.
 An explicitly supplied private `recoveryWorkingCopy` can carry previously authorized identity provisioning inside the existing rehearsal step. Source records, relationships and media must match the raw snapshot; only roster-bound identity additions and role changes are allowed. The tool verifies these changes and never creates accounts or changes flags. Without such a verified copy or already valid roles, rehearsal fails. SQLite inspection uses private disposable DB/WAL copies so reading a stopped WAL-mode snapshot never creates sidecars in the immutable original.
 
 The governed local verification supplies `PB_RETAINED_HISTORY_FILE` pointing to the private exact historical byte evidence. That file is read as a retained-byte fixture and never executed or included in candidate source. Without the private input the exact-history adapter proof is skipped and its mixed-history result is not verifiable. Normal PB schema and safe-recovery tests still run. Text conversion saves existing records through PocketBase, so its normal `updated` timestamp may advance; content, IDs and relationships are preserved.
+
+Safe recovery compares the derived database with the candidate migration result
+from the same stopped snapshot and PB binary. Collection types, field constraints,
+select values, rules, indexes and the complete migration ledger must match. Only
+PB generated field IDs and collection timestamps are normalized; original ledger
+rows remain exact. Recovery retains the source snapshot and its independent
+expected contract. Missing migrations or changed constraints fail generation and
+restoration. Existing users whose old schema lacks authorization flags are treated
+as having no such privilege; changes are limited to the explicit approved ID and
+role list. Verification never creates users or grants roles.
+
+The actual deployment target must meet this contract and its approved roles after
+migration, before PocketBase starts. After PocketBase health succeeds, actual users
+authentication and protected reads must succeed before dependent services start.
+`targetAuthentication` contains the approved `id`, `role`, and either `tokenEnv`
+(an existing users token, refreshed on the target) or `identity` plus `passwordEnv`.
+Values are supplied privately through the runner environment. Service entries also
+list the exact dependent units in `services`, including Velocity synchronization
+and MCSM when present. Superuser credentials and another working copy cannot
+replace these checks. The existing human login switch remains effective; a closed
+password login requires an already authorized token path. Failed roles or
+credentials retain the maintenance guard and produce a failed deployment record;
+PocketBase may already have started when authentication fails, while remaining
+dependent services stay stopped. Actual provisioning and production actions still
+require the existing separate authorization.

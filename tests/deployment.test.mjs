@@ -6,7 +6,7 @@ import os from 'node:os';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
-import { pocketbase, binaries, root as projectRoot } from './helpers/pocketbase.mjs';
+import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
 import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const config = {
@@ -364,3 +364,221 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
     if(pb.service.child.exitCode===null&&pb.service.child.signalCode===null)await pb.close();
   }
 }));
+
+// Retained independent acceptance fixtures now exercise the fixed production
+// entry, both PB versions, and the actual users authentication/API boundary.
+test('safe recovery and deployment validate actual contracts, unlisted roles and target authentication on both PB versions', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async () => {
+const evidence = fs.mkdtempSync(path.join(projectRoot, '.context/rework-epic005-003/adapter-')), project = projectRoot;
+const candidate = revision;
+const extra = 'backend/pb_migrations/1765100008_add_velocity_advanced.js';
+const absent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1770818775_updated_users.js'];
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const root = fs.realpathSync(fs.mkdtempSync(path.join(evidence, 'independent-')));
+const observations = [];
+const mkdir = file => fs.mkdirSync(file, { recursive: true, mode: 0o700 });
+const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+const rawExec = cp.execFileSync;
+function copyWithModes(from,to,options) {
+  fs.cpSync(from,to,options);
+  const preserve=(source,target)=>{const info=fs.lstatSync(source);if(info.isSymbolicLink())return;fs.chmodSync(target,info.mode&0o777);if(info.isDirectory())for(const name of fs.readdirSync(source))preserve(path.join(source,name),path.join(target,name));};
+  preserve(from,to);
+}
+
+function sql(file, source, args = []) { return rawExec('python3', ['-c', source, file, ...args], {encoding:'utf8'}).trim(); }
+const names = fs.readdirSync(path.join(project, 'backend/pb_migrations')).filter(x=>x.endsWith('.js')).sort();
+const beforeNames = names.filter(x=>x<'1789999999');
+const retainedBytes = fs.readFileSync(path.join(project,'.context/epic005/private/unknown-migration.js'));
+assert.equal(sha(retainedBytes),'85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c');
+const bundle = path.join(root,'bundle');mkdir(bundle);
+for(const name of ['dist','backend/pb_migrations','backend/pb_hooks','backend/scripts']) copyWithModes(path.join(project,name),path.join(bundle,name),{recursive:true,preserveTimestamps:true,verbatimSymlinks:true});
+for(const name of ['package.json','package-lock.json'])fs.copyFileSync(path.join(project,name),path.join(bundle,name));
+for(const name of ['@iarna/toml','pocketbase','eventsource']){mkdir(path.dirname(path.join(bundle,'node_modules',name)));copyWithModes(path.join(project,'node_modules',name),path.join(bundle,'node_modules',name),{recursive:true,verbatimSymlinks:true});}
+write(path.join(bundle,'release.json'),{revision:candidate,paths:artifactPaths,files:inventory(bundle)});verifyBundle(bundle,candidate);
+
+async function request(base, route, token, method='GET', body) {
+  const response=await fetch(base+route,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:token}:{})},...(body?{body:JSON.stringify(body)}:{})});
+  return {status:response.status,data:await response.json()};
+}
+async function fixture(version,binary) {
+  const local=path.join(root,'PB'+version);mkdir(local);
+  const webRoot=path.join(local,'site');mkdir(webRoot);
+  copyWithModes(bundle,webRoot,{recursive:true,verbatimSymlinks:true});
+  // Exact pre-upgrade application migration inventory; hooks were absent on the
+  // observed target. Synthetic records are created through real PB APIs.
+  for(const name of names.filter(x=>!beforeNames.includes(x)))fs.unlinkSync(path.join(webRoot,'backend/pb_migrations',name));
+  fs.renameSync(path.join(webRoot,'backend/pb_hooks'),path.join(local,'uninstalled-candidate-hooks'));
+  fs.copyFileSync(binary,path.join(webRoot,'backend/pocketbase'));
+  const common=['--dir',path.join(webRoot,'backend/pb_data'),'--migrationsDir',path.join(webRoot,'backend/pb_migrations'),'--hooksDir',path.join(local,'uninstalled-candidate-hooks')];
+  const migration=rawExec(binary,['migrate','up',...common],{encoding:'utf8'});assert.doesNotMatch(migration,/Failed|Error:/);
+  rawExec(binary,['superuser','upsert','probe@example.invalid','Disposable-Only-2026!',...common],{encoding:'utf8'});
+  const port=await unusedPort(),base='http://127.0.0.1:'+port;
+  const service=await startOwned(binary,['serve','--automigrate=false','--http','127.0.0.1:'+port,...common]);
+  let identities,ordinary,post,settings;
+  try{
+    await waitFor(base+'/api/health',service);
+    const auth=await request(base,'/api/collections/_superusers/auth-with-password',null,'POST',{identity:'probe@example.invalid',password:'Disposable-Only-2026!'});assert.equal(auth.status,200);const token=auth.data.token;
+    const users=[];
+    for(const role of ['admin','service','ordinary']){
+      const r=await request(base,'/api/collections/users/records',token,'POST',{email:role+'@example.invalid',password:'Disposable-Only-2026!',passwordConfirm:'Disposable-Only-2026!',verified:true});assert.equal(r.status,200,JSON.stringify(r));users.push({id:r.data.id,role});
+    }
+    identities=users.filter(x=>x.role!=='ordinary');ordinary=users.find(x=>x.role==='ordinary');
+    const created=await request(base,'/api/collections/posts/records',token,'POST',{title:{zh:'anonymous retained draft'},content:{zh:'<p>draft preserved</p>'},is_public:false});assert.equal(created.status,200,JSON.stringify(created));post=created.data.id;
+    const collection=await request(base,'/api/collections/velocity_settings',token);assert.equal(collection.status,200);
+    const missing=['player_info_forwarding_mode','ping_passthrough','compression_threshold','compression_level','login_ratelimit'];
+    const reduced=await request(base,'/api/collections/velocity_settings',token,'PATCH',{fields:collection.data.fields.filter(x=>!missing.includes(x.name))});assert.equal(reduced.status,200,JSON.stringify(reduced));
+    const text=await request(base,'/api/collections/velocity_settings',token,'PATCH',{fields:[...reduced.data.fields,{name:'player_info_forwarding_mode',type:'text'},{name:'ping_passthrough',type:'text'}]});assert.equal(text.status,200,JSON.stringify(text));
+    const listing=await request(base,'/api/collections/velocity_settings/records',token);settings=listing.data.items[0].id;
+    const values=await request(base,'/api/collections/velocity_settings/records/'+settings,token,'PATCH',{player_info_forwarding_mode:'legacy',ping_passthrough:'ALL',connection_timeout:4321});assert.equal(values.status,200,JSON.stringify(values));
+  }finally{await service.close();}
+  const db=path.join(webRoot,'backend/pb_data/data.db');
+  assert.equal(sql(db,"import sqlite3,sys; c=sqlite3.connect(sys.argv[1]);print(int(any(r[1]=='is_admin' for r in c.execute('pragma table_info(users)'))))"),'0');
+  fs.writeFileSync(path.join(webRoot,extra),retainedBytes,{mode:0o644});
+  sql(db,"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('insert into _migrations(file,applied) values (?,?)',(f,1)) for f in json.loads(sys.argv[2])];c.commit()",[JSON.stringify([path.basename(extra),...absent])]);
+  mkdir(path.join(webRoot,'backend/pb_data/storage'));fs.writeFileSync(path.join(webRoot,'backend/pb_data/storage/sample.bin'),'anonymous media');
+  for(const name of ['.env','backend/.env'])fs.writeFileSync(path.join(webRoot,name),'DISPOSABLE=1\n',{mode:0o600});
+  fs.writeFileSync(path.join(webRoot,'unrelated.txt'),'preserved');
+  for(const name of ['state','backup','velocity','external-config'])mkdir(path.join(local,name));
+  for(const name of ['velocity.toml','velocity.jar','forwarding.secret'])fs.writeFileSync(path.join(local,'velocity',name),'unchanged disposable Java fixture',{mode:0o600});
+  const configFiles=['/etc/systemd/system/pocketbase.service','/etc/systemd/system/velocity-sync.service','/etc/nginx/sites-available/acceptance006',path.join(webRoot,'.env'),path.join(webRoot,'backend/.env')];
+  const configMap=new Map();for(const file of configFiles.filter(x=>x.startsWith('/etc/'))){const localFile=path.join(local,'external-config',path.basename(file));fs.writeFileSync(localFile,'DISPOSABLE_CONFIG='+path.basename(file)+'\n',{mode:0o600});configMap.set(file,localFile);}
+  const config={approvedRevision:candidate,repository:'fixture/acceptance006',webRoot,backupRoot:path.join(local,'backup'),stateRoot:path.join(local,'state'),velocityRoot:path.join(local,'velocity'),pocketbaseVersion:version,machineIdSha256:sha('isolated machine'),runnerUser:os.userInfo().username,websiteServices:['pocketbase','velocity-sync'],serviceBindings:{pocketbase:'WorkingDirectory='+webRoot+'/backend', 'velocity-sync':'WorkingDirectory='+webRoot+'/backend/scripts'},velocityServiceBinding:'Requires=\nBindsTo=\nPartOf=',protectedVelocityFiles:['velocity.toml','velocity.jar','forwarding.secret'],velocityPorts:[25565],configurationFiles:configFiles,nginxSiteFile:configFiles[2],pocketbaseHealthUrl:base+'/api/health',baselineReviewed:true,serviceIdentityReviewed:true,restoreRehearsalRequired:true,recoveryIdentities:identities,previousRevision:'b'.repeat(40)};
+  const configFile=path.join(local,'config.json');write(configFile,config);
+  const work=path.join(local,'approved-working');mkdir(path.join(work,'backend'));
+  copyWithModes(path.join(webRoot,'backend/pb_data'),path.join(work,'backend/pb_data'),{recursive:true});
+  const forward=rawExec(binary,['migrate','up','--dir',path.join(work,'backend/pb_data'),'--migrationsDir',path.join(bundle,'backend/pb_migrations'),'--hooksDir',path.join(bundle,'backend/pb_hooks')],{encoding:'utf8'});assert.doesNotMatch(forward,/Failed|Error:/);fs.writeFileSync(path.join(local,'actual-forward.stdout'),forward,{mode:0o600});
+  sql(path.join(work,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('update users set is_admin=1,service_account=? where id=?',(int(i['role']=='service'),i['id'])) for i in json.loads(sys.argv[2])];c.commit()",[JSON.stringify(identities)]);
+  config.recoveryWorkingCopy=work;
+  return {local,webRoot,config,configFile,configMap,identities,ordinary,post,settings,base,binary,commands:[],running:null};
+}
+
+const originals={readFileSync:fs.readFileSync,statSync:fs.statSync,lstatSync:fs.lstatSync,existsSync:fs.existsSync,realpathSync:fs.realpathSync,cpSync:fs.cpSync};
+let bound;
+fs.readFileSync=(file,...args)=>file==='/etc/machine-id'?Buffer.from('isolated machine'):originals.readFileSync(bound?.configMap.get(file)??file,...args);
+fs.statSync=(file,...args)=>{const s=originals.statSync(bound?.configMap.get(file)??file,...args);return file===bound?.configFile?new Proxy(s,{get:(s,k)=>k==='uid'?0:Reflect.get(s,k)}):s;};
+fs.realpathSync=(file,...args)=>bound?.configMap.has(file)?file:originals.realpathSync(file,...args);
+fs.existsSync=(file)=>originals.existsSync(bound?.configMap.get(file)??file);
+fs.lstatSync=(file,...args)=>originals.lstatSync(bound?.configMap.get(file)??file,...args);
+fs.cpSync=(from,to,...args)=>originals.cpSync(bound?.configMap.get(from)??from,to,...args);
+cp.execFileSync=(file,args,options)=>{
+  bound.commands.push({file,args});
+  if(file==='python3'||file===bound.binary||file===path.join(bound.webRoot,'backend/pocketbase'))return rawExec(file,args,options);
+  if(file==='git'&&args[0]==='ls-remote')return candidate+'\trefs/heads/main\n';
+  if(file==='systemctl'&&args[0]==='is-active')return 'active\n';
+  if(file==='systemctl'&&args[0]==='show')return (args[1]==='velocity'&&args.includes('MainPID')?'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active':args[1]==='velocity'?bound.config.velocityServiceBinding:bound.config.serviceBindings[args[1]])+'\n';
+  if(file==='ss')return 'LISTEN 0 100 127.0.0.1:25565 0.0.0.0:*\n';
+  if(file==='sudo'&&args[1]==='systemctl'){
+    if(args[2]==='start'&&args[3]==='pocketbase')bound.running=startOwned(bound.binary,['serve','--automigrate=false','--http',new URL(bound.base).host,'--dir',path.join(bound.webRoot,'backend/pb_data'),'--migrationsDir',path.join(bound.webRoot,'backend/pb_migrations'),'--hooksDir',path.join(bound.webRoot,'backend/pb_hooks')]);
+    return '';
+  }
+  throw new Error('Unapproved external command refused: '+file);
+};syncBuiltinESMExports();
+const environment={...process.env};Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
+const adapter=()=>productionAdapter(bundle,bound.config,candidate,6,bound.configFile);
+function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
+function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
+const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
+try{
+  for(const [version,binary] of binaries){
+    bound=await fixture(version,binary);initializeBaseline();adapter().verify();
+    const newBackup=()=>adapter().backup();
+    // Success is exercised through the unchanged native rehearsal. Config copy
+    // paths map only finite external fixtures; SQLite/PB/file operations are real.
+    let backup=newBackup();const good=await attempt(()=>adapter().rehearse(backup));assert.equal(good.accepted,true,good.error);
+    const m=read(path.join(backup,'safe-recovery/backup.json'));
+    observe('P01-positive-'+version,'valid raw/derived recovery accepted',{passed:true,rawSnapshotId:bound.config.baseline.snapshotId,safeRecoveryId:m.recoveryId,sourceSnapshotId:m.sourceSnapshotId,actualPBForward:true,configurationFiles:m.configuration.length,fixtureRoot:bound.local});
+    const wrong=path.join(bound.local,'wrong-content');copyWithModes(bound.config.recoveryWorkingCopy,wrong,{recursive:true});sql(path.join(wrong,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update posts set content=?',('{\"zh\":\"lost\"}',));c.commit()");
+    const approvedWork=bound.config.recoveryWorkingCopy;bound.config.recoveryWorkingCopy=wrong;backup=newBackup();let result=await attempt(()=>adapter().rehearse(backup));assert.equal(result.accepted,false);observe('P02-content-drift-'+version,'content mismatch rejected',{passed:true,error:result.error});
+    const promoted=path.join(bound.local,'unapproved-promotion');copyWithModes(approvedWork,promoted,{recursive:true});sql(path.join(promoted,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set is_admin=1 where id=?',(sys.argv[2],));c.commit()",[bound.ordinary.id]);bound.config.recoveryWorkingCopy=promoted;backup=newBackup();result=await attempt(()=>adapter().rehearse(backup));
+    assert.equal(result.accepted,false,result.error);
+    let recoveredPromotion=null;
+    if(result.accepted){const recovered=path.join(bound.local,'unapproved-restored');restoreSafeRecovery(path.join(backup,'safe-recovery'),recovered,candidate);recoveredPromotion=Number(sql(path.join(recovered,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);print(c.execute('select is_admin from users where id=?',(sys.argv[2],)).fetchone()[0])",[bound.ordinary.id]));}
+    observe('P03-unapproved-role-'+version,'unlisted preexisting user promotion rejected',{passed:!result.accepted,accepted:result.accepted,error:result.error??null,ordinaryId:bound.ordinary.id,approvedIds:bound.identities.map(x=>x.id),restoredUnapprovedIsAdmin:recoveredPromotion,backup});
+    // Service elevation is rejected independently of administrator elevation.
+    const promotedService=path.join(bound.local,'unapproved-service');copyWithModes(approvedWork,promotedService,{recursive:true});
+    sql(path.join(promotedService,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set service_account=1 where id=?',(sys.argv[2],));c.commit()",[bound.ordinary.id]);
+    bound.config.recoveryWorkingCopy=promotedService;result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);
+    const wrongRole=path.join(bound.local,'wrong-role');copyWithModes(approvedWork,wrongRole,{recursive:true});
+    sql(path.join(wrongRole,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set service_account=1 where id=?',(sys.argv[2],));c.commit()",[bound.identities.find(x=>x.role==='admin').id]);
+    bound.config.recoveryWorkingCopy=wrongRole;result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);
+    const stale=path.join(bound.local,'incompatible-working');copyWithModes(approvedWork,stale,{recursive:true});sql(path.join(stale,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);c.execute('delete from _migrations where file=?',('1790000001_schema_velocity_normalize_runtime_fields.js',));c.commit()");
+    bound.config.recoveryWorkingCopy=stale;result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);
+    const drift=path.join(bound.local,'field-drift');copyWithModes(approvedWork,drift,{recursive:true});
+    sql(path.join(drift,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);row=c.execute('select id,fields from _collections where name=?',('velocity_settings',)).fetchone();fields=json.loads(row[1]);[(f.update(min=None,max=None)) for f in fields if f.get('name')=='connection_timeout'];c.execute('update _collections set fields=? where id=?',(json.dumps(fields),row[0]));c.commit()");
+    bound.config.recoveryWorkingCopy=drift;backup=newBackup();result=await attempt(()=>adapter().rehearse(backup));assert.equal(result.accepted,false,result.error);observe('P04-incompatible-contract-'+version,'missing applied candidate migration and constraint drift rejected',{passed:!result.accepted,accepted:result.accepted,error:result.error??null,backup});
+    bound.config.recoveryWorkingCopy=approvedWork;
+    for(const defect of ['ledger','constraint','role']){
+      const rawBackup=newBackup();adapter().rehearse(rawBackup);const safe=path.join(rawBackup,'safe-recovery');
+      const alteration=defect==='ledger'?"c.execute('delete from _migrations where file=?',('1790000001_schema_velocity_normalize_runtime_fields.js',))":defect==='role'?"c.execute('update users set is_admin=1 where id=?',(sys.argv[2],))":"row=c.execute('select id,fields from _collections where name=?',('velocity_settings',)).fetchone();fields=json.loads(row[1]);[(f.update(min=None,max=None)) for f in fields if f.get('name')=='connection_timeout'];c.execute('update _collections set fields=? where id=?',(json.dumps(fields),row[0]))";
+      sql(path.join(safe,'application/backend/pb_data/data.db'),'import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);'+alteration+';c.commit()',[bound.ordinary.id]);
+      const forged=read(path.join(safe,'backup.json'));forged.application=inventory(path.join(safe,'application'),forged.present);forged.contract=checkDatabases(path.join(safe,'application/backend/pb_data'));forged.snapshotId=snapshotIdentity(forged);forged.recoveryId=sha(JSON.stringify({snapshotId:forged.snapshotId,sourceSnapshotId:forged.sourceSnapshotId,identities:forged.identities,candidateFiles:forged.candidateFiles}));write(path.join(safe,'backup.json'),forged);
+      assert.throws(()=>restoreSafeRecovery(safe,path.join(bound.local,'forged-'+defect),candidate),/Recovery candidate contract mismatch|Unapproved role change/);
+    }
+    const beforeInventory=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
+    const outcome=await attempt(()=>deploy(adapter(),bound.config,candidate,6));
+    assert.equal(outcome.accepted,false,outcome.error);
+    assert.equal(bound.commands.some(c=>c.file==='sudo'&&c.args[2]==='start'),false);
+    assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);
+    let roles=null,authorizedReads=null;
+    if(outcome.accepted){
+      roles=JSON.parse(sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);print(json.dumps([c.execute('select id,is_admin,service_account from users where id=?',(i['id'],)).fetchone() for i in json.loads(sys.argv[2])]))",[JSON.stringify(bound.identities)]));
+      authorizedReads=[];
+      for(const who of bound.identities){const auth=await request(bound.base,'/api/collections/users/auth-with-password',null,'POST',{identity:who.role+'@example.invalid',password:'Disposable-Only-2026!'});const data=auth.status===200?await request(bound.base,'/api/collections/velocity_settings/records',auth.data.token):auth;authorizedReads.push({role:who.role,authStatus:auth.status,readStatus:data.status,records:data.data.items?.length??null});}
+    }
+    observe('P05-live-identity-'+version,'missing approved live roles stop before dependent services/deployed',{passed:!outcome.accepted,accepted:outcome.accepted,error:outcome.error??null,status:outcome.value?.status??null,liveRoles:roles,authorizedReads,services:bound.commands.filter(c=>c.file==='sudo'),javaFixtureBytesRetained:JSON.stringify(beforeInventory)===JSON.stringify(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles)),state:fs.existsSync(path.join(bound.config.stateRoot,'deployment.json'))?read(path.join(bound.config.stateRoot,'deployment.json')).status:null});
+    // Existing-field baseline: restore the approved synthetic role-bearing data,
+    // then exercise the complete actual target authentication and start path.
+    const safeRestore=path.join(bound.local,'approved-target');
+    restoreSafeRecovery(path.join(read(path.join(bound.config.stateRoot,'deployment.json')).backup,'safe-recovery'),safeRestore,candidate);
+    fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
+    copyWithModes(path.join(safeRestore,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
+    bound.config.targetAuthentication=bound.identities.map(item=>({...item,identity:item.role+'@example.invalid',passwordEnv:'DISPOSABLE_TARGET_PASSWORD',...(item.role==='service'?{services:['velocity-sync']}: {})}));
+    process.env.DISPOSABLE_TARGET_PASSWORD='incorrect disposable password';
+    bound.config.stateRoot=path.join(bound.local,'auth-failure-state');mkdir(bound.config.stateRoot);initializeBaseline();bound.commands=[];
+    const authFailure=await attempt(()=>deploy(adapter(),bound.config,candidate,6));
+    assert.equal(authFailure.accepted,false,authFailure.error);
+    assert.match(authFailure.error,/Target authentication failed/);
+    assert.equal(bound.commands.some(c=>c.file==='sudo'&&c.args[2]==='start'&&c.args[3]==='velocity-sync'),false);
+    assert.equal(read(path.join(bound.config.stateRoot,'deployment.json')).status,'failed');
+    if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
+    process.env.DISPOSABLE_TARGET_PASSWORD='Disposable-Only-2026!';bound.config.stateRoot=path.join(bound.local,'success-state');mkdir(bound.config.stateRoot);initializeBaseline();bound.commands=[];
+    const success=await deploy(adapter(),bound.config,candidate,6);
+    assert.equal(success.status,'deployed');
+    assert.equal(bound.commands.some(c=>c.file==='sudo'&&c.args[2]==='start'&&c.args[3]==='velocity-sync'),true);
+    assert.equal(read(path.join(bound.config.stateRoot,'deployment.json')).status,'deployed');
+    for(const who of [...bound.identities,bound.ordinary]){
+      const auth=await request(bound.base,'/api/collections/users/auth-with-password',null,'POST',{identity:who.role+'@example.invalid',password:'Disposable-Only-2026!'});
+      assert.equal(auth.status,who.role==='ordinary'?403:200);
+      if(auth.status===200){assert.equal((await request(bound.base,'/api/collections/velocity_settings/records',auth.data.token)).status,200);assert.equal((await request(bound.base,'/api/collections/posts/records',auth.data.token)).data.items.length,1);}
+    }
+    const superAuth=await request(bound.base,'/api/collections/_superusers/auth-with-password',null,'POST',{identity:'probe@example.invalid',password:'Disposable-Only-2026!'});assert.equal(superAuth.status,200);
+    const impersonation=await request(bound.base,'/api/collections/users/impersonate/'+bound.ordinary.id,superAuth.data.token,'POST',{duration:600});assert.equal(impersonation.status,200);
+    for(const collection of ['velocity_settings','posts']){const ordinaryRead=await request(bound.base,'/api/collections/'+collection+'/records',impersonation.data.token);assert.equal(ordinaryRead.status,200);assert.equal(ordinaryRead.data.items.length,0);}
+    const toggle=await request(bound.base,'/api/collections/system_settings/records',superAuth.data.token);assert.equal(toggle.data.items[0].enable_local_login,true);
+    const human=bound.identities.find(item=>item.role==='admin');
+    const humanLogin=await request(bound.base,'/api/collections/users/auth-with-password',null,'POST',{identity:'admin@example.invalid',password:'Disposable-Only-2026!'});assert.equal(humanLogin.status,200);
+    const closeLogin=await request(bound.base,'/api/collections/system_settings/records/'+toggle.data.items[0].id,superAuth.data.token,'PATCH',{enable_local_login:false});assert.equal(closeLogin.status,200);
+    assert.equal((await request(bound.base,'/api/collections/users/auth-with-password',null,'POST',{identity:'admin@example.invalid',password:'Disposable-Only-2026!'})).status,403);
+    process.env.DISPOSABLE_HUMAN_TOKEN=humanLogin.data.token;
+    bound.config.targetAuthentication=bound.config.targetAuthentication.map(item=>item.id===human.id?{id:item.id,role:item.role,tokenEnv:'DISPOSABLE_HUMAN_TOKEN'}:item);
+    await adapter().health();
+    assert.equal((await request(bound.base,'/api/collections/system_settings/records',superAuth.data.token)).data.items[0].enable_local_login,false);
+    assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),beforeInventory);
+    if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
+    // Existing authorization fields cannot make an unlisted promotion acceptable.
+    bound.config.stateRoot=path.join(bound.local,'existing-state');mkdir(bound.config.stateRoot);fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});copyWithModes(path.join(safeRestore,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});initializeBaseline();
+    const existing=path.join(bound.local,'existing-promoted');copyWithModes(bound.config.recoveryWorkingCopy,existing,{recursive:true});
+    sql(path.join(existing,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set is_admin=1 where id=?',(sys.argv[2],));c.commit()",[bound.ordinary.id]);
+    bound.config.recoveryWorkingCopy=existing;result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);assert.match(result.error,/Unapproved role change/);
+    sql(path.join(existing,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set is_admin=0,service_account=1 where id=?',(sys.argv[2],));c.commit()",[bound.ordinary.id]);result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);assert.match(result.error,/Unapproved role change/);
+    observe('P06-authentication-'+version,'actual target rejects credentials then admits valid identities',{passed:true});
+  }
+}finally{
+  if(bound?.running){const service=await bound.running;await service.close();}
+  Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];
+}
+write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,isolation:'original productionAdapter/deploy and actual PB/file/SQLite operations; only finite host/service/command/external config bindings substituted; synthetic identities and anonymous records',observations});
+console.log(JSON.stringify({observations:observations.length,passed:observations.filter(x=>x.passed).length,failed:observations.filter(x=>!x.passed).length,root,production:false}));
+process.exitCode=observations.every(x=>x.passed)?0:1;
+
+});
