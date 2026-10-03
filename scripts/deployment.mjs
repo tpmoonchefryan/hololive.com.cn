@@ -41,11 +41,45 @@ export function inventory(root, names = artifactPaths) {
   return records;
 }
 
+// Only a bundle uses the delivery closure. Backup/Velocity inventories have
+// their own explicit names and must not inherit the application whitelist.
+function verifyArtifactLinks(root, records) {
+  const entries = new Map(records.map(record => [record.path, record]));
+  const structural = new Set(artifactPaths.flatMap(name => name.split('/').slice(0, -1).map((_, i) => name.split('/').slice(0, i + 1).join('/'))));
+  const resolve = (relative, seen = new Set()) => {
+    check(safeRelative(relative), 'Artifact link outside delivery closure');
+    const parts = relative.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const prefix = parts.slice(0, i).join('/'), entry = entries.get(prefix);
+      check(entry || structural.has(prefix), 'Artifact link references undelivered path: ' + prefix);
+      if (entry?.link !== undefined) {
+        check(!seen.has(prefix), 'Cyclic artifact link');
+        const next = new Set(seen); next.add(prefix);
+        const target = path.posix.normalize(path.posix.join(path.posix.dirname(prefix), entry.link, ...parts.slice(i)));
+        return resolve(target, next);
+      }
+      if (i < parts.length) check(entry?.directory || structural.has(prefix), 'Artifact link traverses non-directory');
+    }
+    check(entries.has(relative), 'Artifact link references undelivered directory');
+    return relative;
+  };
+  for (const entry of records) {
+    check(!entry.path.split('/').some(name => name === '.env' || name.startsWith('.env.')), 'Environment cannot be a release artifact');
+    if (entry.link !== undefined) {
+      resolve(entry.path);
+      const real = path.relative(path.resolve(root), fs.realpathSync(path.join(root, entry.path))).split(path.sep).join('/');
+      check(real === resolve(entry.path), 'Artifact link resolution differs from delivery closure');
+    }
+  }
+}
+
 export function verifyBundle(root, revision) {
   const manifest = json(path.join(root, 'release.json'));
   check(manifest.revision === revision && /^[a-f0-9]{40}$/.test(revision), 'Revision mismatch');
   check(JSON.stringify(manifest.paths) === JSON.stringify(artifactPaths), 'Incomplete artifact whitelist');
-  check(JSON.stringify(inventory(root)) === JSON.stringify(manifest.files), 'Artifact content mismatch');
+  const files = inventory(root);
+  check(JSON.stringify(files) === JSON.stringify(manifest.files), 'Artifact content mismatch');
+  verifyArtifactLinks(root, files);
   for (const required of ['dist/index.html', 'backend/pb_hooks', 'backend/pb_migrations', 'backend/scripts/sync_velocity.js', 'node_modules/@iarna/toml/package.json', 'node_modules/pocketbase/package.json', 'node_modules/eventsource/package.json']) check(fs.existsSync(path.join(root, required)), 'Missing runtime artifact: ' + required);
   const lock = json(path.join(root, 'package-lock.json'));
   for (const name of ['@iarna/toml', 'pocketbase', 'eventsource']) check(json(path.join(root, 'node_modules', name, 'package.json')).version === lock.packages['node_modules/' + name].version, 'Unlocked runtime dependency');
@@ -66,7 +100,7 @@ export function validatePlan(config, revision, runNumber) {
   check(config.machineIdSha256?.match(/^[a-f0-9]{64}$/) && typeof config.runnerUser === 'string', 'Missing machine/runner binding');
   check(Array.isArray(config.websiteServices) && config.websiteServices.includes('pocketbase') && config.websiteServices.includes('velocity-sync'), 'Missing website/sync quiescence binding');
   check(new Set(config.websiteServices).size === config.websiteServices.length && config.websiteServices.every(unit => units.includes(unit)), 'Unapproved service');
-  const configurationWhitelist = [path.join(config.webRoot, 'backend/.env'), path.join(config.webRoot, '.env'), ...units.map(unit => '/etc/systemd/system/' + unit + '.service'), ...units.map(unit => '/etc/default/' + unit), config.nginxSiteFile];
+  const configurationWhitelist = [path.join(config.webRoot, 'backend/.env'), path.join(config.webRoot, '.env'), path.join(config.webRoot, 'backend/scripts/.env'), ...units.map(unit => '/etc/systemd/system/' + unit + '.service'), ...units.map(unit => '/etc/default/' + unit), config.nginxSiteFile];
   check(typeof config.nginxSiteFile === 'string' && config.nginxSiteFile.startsWith('/etc/nginx/sites-available/') && !config.nginxSiteFile.split('/').includes('..'), 'Missing inventoried nginx config');
   check(Array.isArray(config.configurationFiles) && config.configurationFiles.length > 0 && config.configurationFiles.every(file => typeof file === 'string' && path.isAbsolute(file) && configurationWhitelist.includes(file)), 'Missing limited configuration inventory');
 check(config.serviceBindings && config.websiteServices.every(unit => typeof config.serviceBindings[unit] === 'string'), 'Missing actual service command/working directory bindings');
@@ -121,6 +155,59 @@ export async function deploy(adapter, config, revision, runNumber) {
 function assertRealPath(file) {
   check(fs.realpathSync(file) === path.resolve(file), 'Symlink or unresolved production binding');
 }
+const lstatOptional = file => { try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+// Finite maintenance endpoints: inspect missing leaves too, never follow a
+// control alias, and do not truncate until the opened inode has been checked.
+function controlPath(file) {
+  assertRealPath(path.dirname(file));
+  const stat = lstatOptional(file);
+  check(!stat || (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (stat.mode & 0o077) === 0), 'Unsafe maintenance control endpoint');
+  return stat;
+}
+function controlRead(file) {
+  const before = controlPath(file);
+  if (!before) return null;
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const opened = fs.fstatSync(fd), current = controlPath(file);
+    check(current && opened.dev === current.dev && opened.ino === current.ino && opened.ino === before.ino, 'Maintenance endpoint changed during read');
+    return JSON.parse(fs.readFileSync(fd, 'utf8'));
+  } finally { fs.closeSync(fd); }
+}
+function controlWrite(file, value) {
+  const before = controlPath(file);
+  const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
+  try {
+    const opened = fs.fstatSync(fd), current = controlPath(file);
+    check(current && opened.isFile() && opened.nlink === 1 && opened.dev === current.dev && opened.ino === current.ino && (!before || opened.ino === before.ino), 'Maintenance endpoint changed during write');
+    fs.fchmodSync(fd, 0o600);
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, value);
+  } finally { fs.closeSync(fd); }
+}
+
+// Inventory all replacements before deleting the first artifact. Runtime
+// environment overlap is deliberately refused rather than silently migrated.
+function verifyInstallTargets(webRoot, configurationFiles = []) {
+  assertRealPath(webRoot);
+  for (const name of artifactPaths) {
+    const dest = path.join(webRoot, name);
+    assertRealPath(path.dirname(dest));
+    const stat = lstatOptional(dest);
+    if (stat) assertRealPath(dest);
+    for (const file of configurationFiles) check(file !== dest && !file.startsWith(dest + path.sep), 'Runtime configuration overlaps replaced artifact');
+    const inspect = directory => {
+      const info = fs.lstatSync(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) return;
+      for (const name of fs.readdirSync(directory)) {
+        check(name !== '.env' && !name.startsWith('.env.'), 'Runtime environment overlaps replaced artifact');
+        const child = path.join(directory, name), childInfo = fs.lstatSync(child);
+        if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) inspect(child);
+      }
+    };
+    if (stat) inspect(dest);
+  }
+}
 function checkDatabases(directory) {
   // Metadata only, never records/tokens. Run on a stopped snapshot, read-only.
   const script = `import sqlite3,json,pathlib,sys\np=pathlib.Path(sys.argv[1])\nout={}\nfor f in sorted(p.glob('*.db')):\n c=sqlite3.connect(f.as_uri()+'?mode=ro',uri=True)\n q=c.execute('pragma quick_check').fetchall()\n assert q==[('ok',)],str(f)+' integrity failure'\n tables=[r[0] for r in c.execute("select name from sqlite_master where type='table' order by name")]\n out[f.name]={'integrity':'ok','tables':{t:{'count':c.execute('select count(*) from "'+t.replace('"','""')+'"').fetchone()[0],'fields':[r[1:3] for r in c.execute('pragma table_info("'+t.replace('"','""')+'")')]} for t in tables}}\n if '_migrations' in tables: out[f.name]['migrations']=list(c.execute('select * from _migrations'))\n if '_collections' in tables: out[f.name]['collectionContract']=list(c.execute('select * from _collections'))\n c.close()\nassert 'data.db' in out,'Missing data database'\nprint(json.dumps(out))`;
@@ -157,13 +244,16 @@ export function installBundle(bundle, webRoot, revision) {
   const manifest = verifyBundle(bundle, revision);
   assertRealPath(webRoot);
   verifyImmutableMigrations(bundle, webRoot);
+  verifyInstallTargets(webRoot);
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
     if (fs.existsSync(dest)) assertRealPath(dest);
     fs.rmSync(dest, { recursive: true, force: true });
     copyPaths(bundle, webRoot, [name]);
   }
-  check(JSON.stringify(inventory(webRoot)) === JSON.stringify(manifest.files), 'Installed artifact mismatch');
+  const installed = inventory(webRoot);
+  check(JSON.stringify(installed) === JSON.stringify(manifest.files), 'Installed artifact mismatch');
+  verifyArtifactLinks(webRoot, installed);
 }
 
 export function snapshotApplication(webRoot, backup) {
@@ -179,6 +269,13 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
   const pb = path.join(config.webRoot, 'backend/pocketbase');
   let lockFd, backupPath, oldState;
+  const controlParents = new Map([state, guard, lock].map(file => [path.dirname(file), fs.lstatSync(path.dirname(file))]));
+  const boundControl = file => {
+    const parent = path.dirname(file), expected = controlParents.get(parent), current = fs.lstatSync(parent);
+    check(expected && current.dev === expected.dev && current.ino === expected.ino, 'Maintenance parent binding changed');
+    return controlPath(file);
+  };
+  const writeControl = (file, value) => { boundControl(file); controlWrite(file, value); }; 
   const systemctl = (action, unit) => {
     check(config.websiteServices.includes(unit) && units.includes(unit), 'Service outside whitelist');
     command('sudo', ['-n', 'systemctl', action, unit]);
@@ -190,7 +287,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   });
   const assertCurrent = () => {
     check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
-    oldState = fs.existsSync(state) ? json(state) : null;
+    boundControl(state); oldState = controlRead(state);
     check(!oldState || (oldState.status === 'deployed' && runNumber > oldState.runNumber), 'Older/repeated run or unresolved failed deployment');
   };
   const migrateCopy = directory => command(pb, ['migrate', 'up', '--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
@@ -198,6 +295,8 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     verify: () => {
       verifyBundle(bundle, revision);
       verifyImmutableMigrations(bundle, config.webRoot);
+      verifyInstallTargets(config.webRoot, config.configurationFiles);
+      for (const endpoint of [state, guard, lock]) boundControl(endpoint);
       check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? '') && ['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'Missing actual Actions run/repository binding');
       const configStat = fs.statSync(configFile);
       check(configStat.uid === 0 && (configStat.mode & 0o022) === 0, 'Production config must be root-owned and not group/world writable');
@@ -214,12 +313,15 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       }
       for (const file of config.configurationFiles) assertRealPath(file);
     },
-    lock: () => { lockFd = fs.openSync(lock, 'wx', 0o600); fs.writeFileSync(lockFd, JSON.stringify({ revision, runNumber, pid: process.pid })); },
-    unlock: () => { if (lockFd !== undefined) { fs.closeSync(lockFd); fs.unlinkSync(lock); } },
+    lock: () => { boundControl(lock); lockFd = fs.openSync(lock, 'wx', 0o600); fs.writeFileSync(lockFd, JSON.stringify({ revision, runNumber, pid: process.pid })); },
+    unlock: () => { if (lockFd !== undefined) {
+      try { const current = boundControl(lock), opened = fs.fstatSync(lockFd); check(current && current.dev === opened.dev && current.ino === opened.ino, 'Maintenance lock changed'); fs.unlinkSync(lock); }
+      finally { fs.closeSync(lockFd); lockFd = undefined; }
+    } },
     assertCurrent,
     velocity,
     stop: systemctl.bind(null, 'stop'),
-    guard: () => fs.writeFileSync(guard, 'Website maintenance: explicit release of Velocity synchronization requires separate authorization.\n', { mode: 0o600 }),
+    guard: () => writeControl(guard, 'Website maintenance: explicit release of Velocity synchronization requires separate authorization.\n'),
     backup: () => {
       backupPath = fs.mkdtempSync(path.join(config.backupRoot, `run-${runNumber}-`));
       fs.chmodSync(backupPath, 0o700);
@@ -242,7 +344,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       writeJSON(path.join(backup, 'isolated-migrated-contract.json'), checkDatabases(path.join(isolated, 'backend/pb_data')));
     },
     baseline: backup => writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))),
-    install: () => installBundle(bundle, config.webRoot, revision),
+    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); installBundle(bundle, config.webRoot, revision); },
     migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); },
     start: unit => systemctl(unit === 'pocketbase' || unit === 'velocity-sync' ? 'start' : 'restart', unit),
     health: async () => {
@@ -260,8 +362,8 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       check(config.velocityPorts?.length > 0, 'Velocity port inventory missing');
       writeJSON(path.join(backupPath, 'velocity-continuity.json'), { before, after });
     },
-    record: value => writeJSON(state, { ...value, runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }),
-    failure: value => writeJSON(state, { ...value, runNumber, failedAt: new Date().toISOString() }),
+    record: value => writeControl(state, JSON.stringify( { ...value, runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n'),
+    failure: value => writeControl(state, JSON.stringify({ ...value, runNumber, failedAt: new Date().toISOString() }) + '\n'),
   };
 }
 

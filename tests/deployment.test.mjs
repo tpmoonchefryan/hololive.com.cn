@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations } from '../scripts/deployment.mjs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { createHash } from 'node:crypto';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const config = {
   approvedRevision: revision, previousRevision: oldRevision,
@@ -128,3 +131,111 @@ test('unknown/mutated production migration bytes refuse before touching any arti
   fs.writeFileSync(path.join(live, 'backend/pb_migrations/123_schema.js'), 'candidate migration');
   installBundle(bundle, live, revision); assert.equal(fs.readFileSync(path.join(live, 'dist/index.html'), 'utf8'), 'candidate frontend');
 });
+
+// Production-adapter boundary: commands/host facts are simulated, while every
+// control endpoint, alias, artifact and protected file operation is real.
+async function productionFixture(t, callback) {
+  const root = temp(t), bundle = path.join(root, 'bundle'), webRoot = path.join(root, 'site');
+  fs.mkdirSync(bundle); createBundle(bundle);
+  for (const name of ['site/backend/pb_data', 'site/backend/scripts', 'state', 'backup', 'velocity']) fs.mkdirSync(path.join(root, name), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(webRoot, 'backend/pb_data/data.db'), 'retained database');
+  fs.writeFileSync(path.join(webRoot, 'backend/.env'), 'retained environment', { mode: 0o600 });
+  const protectedFile = path.join(root, 'velocity/forwarding.secret'); fs.writeFileSync(protectedFile, 'protected fixture', { mode: 0o600 });
+  const bound = { ...config, webRoot, backupRoot: path.join(root, 'backup'), stateRoot: path.join(root, 'state'), velocityRoot: path.join(root, 'velocity'), runnerUser: os.userInfo().username, machineIdSha256: createHash('sha256').update('fixture machine').digest('hex'), repository: 'fixture/deployment', serviceBindings: Object.fromEntries(config.websiteServices.map(unit => [unit, 'WorkingDirectory=' + webRoot + (unit === 'pocketbase' ? '/backend' : '/backend/scripts')])) };
+  const configFile = path.join(root, 'config.json'); fs.writeFileSync(configFile, '{}', { mode: 0o600 });
+  const commands = [], originalRead = fs.readFileSync, originalStat = fs.statSync, originalRealpath = fs.realpathSync, originalExec = cp.execFileSync;
+  const environment = Object.fromEntries(['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_EVENT_NAME'].map(key => [key, process.env[key]]));
+  fs.readFileSync = (file, ...args) => file === '/etc/machine-id' ? Buffer.from('fixture machine') : originalRead(file, ...args);
+  fs.statSync = (file, ...args) => { const value = originalStat(file, ...args); return file === configFile ? new Proxy(value, { get: (value, key) => key === 'uid' ? 0 : Reflect.get(value, key) }) : value; };
+  fs.realpathSync = (file, ...args) => bound.configurationFiles.includes(file) ? file : originalRealpath(file, ...args);
+  cp.execFileSync = (file, args) => {
+    commands.push([file, ...args]);
+    if (file === 'git' && args[0] === 'ls-remote') return revision + '\trefs/heads/main\n';
+    if (file.endsWith('/backend/pocketbase') && args[0] === '--version') return 'pocketbase version 0.26.5\n';
+    if (file === 'systemctl' && args[0] === 'is-active') return 'active\n';
+    if (file === 'systemctl' && args[0] === 'show') return (args[1] === 'velocity' ? bound.velocityServiceBinding : bound.serviceBindings[args[1]]) + '\n';
+    throw new Error('External command refused by isolated test');
+  };
+  Object.assign(process.env, { GITHUB_REPOSITORY: bound.repository, GITHUB_RUN_ID: '123', GITHUB_EVENT_NAME: 'workflow_dispatch' }); syncBuiltinESMExports();
+  try { await callback({ root, bundle, webRoot, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
+  finally {
+    fs.readFileSync = originalRead; fs.statSync = originalStat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
+    for (const [key, value] of Object.entries(environment)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+}
+for (const endpoint of ['guard', 'state']) for (const kind of ['direct', 'chain', 'dangling']) test(`production ${endpoint} ${kind} alias refuses preflight and actual operations`, async t => productionFixture(t, f => {
+  const target = kind === 'dangling' ? path.join(f.root, 'velocity/missing') : f.protectedFile;
+  if (kind === 'chain') { fs.symlinkSync(target, path.join(f.root, 'velocity/alias')); fs.symlinkSync(path.join(f.root, 'velocity/alias'), f[endpoint]); }
+  else fs.symlinkSync(target, f[endpoint]);
+  assert.throws(() => f.adapter.verify(), /control endpoint/);
+  assert.equal(f.commands.length, 0);
+  for (const operation of endpoint === 'guard' ? [() => f.adapter.guard()] : [() => f.adapter.assertCurrent(), () => f.adapter.record({ status: 'deployed' }), () => f.adapter.failure({ status: 'failed' })]) assert.throws(operation, /control endpoint/);
+  assert.equal(fs.readFileSync(f.protectedFile, 'utf8'), 'protected fixture');
+  assert.equal(fs.existsSync(path.join(f.root, 'velocity/missing')), false);
+}));
+for (const endpoint of ['guard', 'state']) test(`production ${endpoint} parent alias after preflight refuses writes`, async t => productionFixture(t, f => {
+  f.adapter.verify();
+  const parent = path.dirname(f[endpoint]), moved = parent + '-original'; fs.renameSync(parent, moved); fs.symlinkSync(f.config.velocityRoot, parent);
+  const name = path.basename(f[endpoint]); fs.writeFileSync(path.join(f.config.velocityRoot, name), 'protected parent fixture', { mode: 0o600 });
+  const operations = endpoint === 'guard' ? [() => f.adapter.guard()] : [() => f.adapter.record({ status: 'deployed' }), () => f.adapter.failure({ status: 'failed' }), () => f.adapter.assertCurrent()];
+  for (const operation of operations) assert.throws(operation, /Symlink|parent binding/);
+  assert.equal(fs.readFileSync(path.join(f.config.velocityRoot, name), 'utf8'), 'protected parent fixture');
+}));
+for (const operation of ['record', 'failure', 'guard']) test(`${operation} refuses a leaf alias introduced after verify`, async t => productionFixture(t, f => {
+  f.adapter.verify(); const endpoint = operation === 'guard' ? f.guard : f.state;
+  fs.symlinkSync(f.protectedFile, endpoint);
+  assert.throws(() => f.adapter[operation]({ status: operation === 'record' ? 'deployed' : 'failed' }), /control endpoint/);
+  assert.equal(fs.readFileSync(f.protectedFile, 'utf8'), 'protected fixture');
+}));
+test('ordinary production control endpoints create/update private state and preserve lock ordering', async t => productionFixture(t, f => {
+  f.adapter.verify(); f.adapter.lock(); f.adapter.assertCurrent(); f.adapter.guard();
+  f.adapter.record({ status: 'deployed', revision, runNumber: 2 });
+  assert.equal(JSON.parse(fs.readFileSync(f.state)).status, 'deployed');
+  assert.throws(() => f.adapter.assertCurrent(), /Older\/repeated/);
+  f.adapter.failure({ status: 'failed', revision });
+  assert.equal(JSON.parse(fs.readFileSync(f.state)).status, 'failed');
+  for (const file of [f.state, f.guard]) assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  f.adapter.unlock(); assert.equal(fs.existsSync(path.join(f.config.stateRoot, 'deployment.lock')), false);
+}));
+test('actual production preflight/install refuse nested runtime environment without deleting any artifact', async t => productionFixture(t, f => {
+  const nested = path.join(f.webRoot, 'backend/scripts/.env'); fs.writeFileSync(nested, 'private nested environment', { mode: 0o600 });
+  fs.mkdirSync(path.join(f.webRoot, 'dist')); fs.writeFileSync(path.join(f.webRoot, 'dist/old.js'), 'old frontend');
+  assert.throws(() => f.adapter.verify(), /environment overlaps/); assert.equal(f.commands.length, 0);
+  assert.throws(() => f.adapter.install(), /environment overlaps/);
+  assert.equal(fs.readFileSync(nested, 'utf8'), 'private nested environment'); assert.equal(fs.statSync(nested).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(path.join(f.webRoot, 'dist/old.js'), 'utf8'), 'old frontend');
+  assert.equal(fs.existsSync(f.state), false);
+}));
+test('all replacement aliases including dangling later targets refuse before dist deletion', t => {
+  for (const dangling of [false, true]) {
+    const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live'); fs.mkdirSync(bundle); createBundle(bundle);
+    fs.mkdirSync(path.join(live, 'dist'), { recursive: true }); fs.mkdirSync(path.join(live, 'backend')); fs.writeFileSync(path.join(live, 'dist/old.js'), 'old frontend');
+    fs.symlinkSync(dangling ? path.join(root, 'missing') : bundle, path.join(live, 'node_modules'));
+    assert.throws(() => installBundle(bundle, live, revision), /Symlink|ENOENT/);
+    assert.equal(fs.readFileSync(path.join(live, 'dist/old.js'), 'utf8'), 'old frontend');
+  }
+});
+test('sealed bundle links cannot borrow undelivered private files through direct, chained or directory aliases', t => {
+  for (const kind of ['direct', 'chain', 'directory']) {
+    const root = temp(t); createBundle(root); fs.writeFileSync(path.join(root, 'backend/.env'), 'builder-only private file');
+    if (kind === 'directory') fs.symlinkSync('../backend', path.join(root, 'dist/alias'));
+    else { fs.symlinkSync('../backend/.env', path.join(root, 'dist/alias')); if (kind === 'chain') fs.symlinkSync('alias', path.join(root, 'dist/chain')); }
+    fs.writeFileSync(path.join(root, 'release.json'), JSON.stringify({ revision, paths: artifactPaths, files: inventory(root) }));
+    assert.throws(() => verifyBundle(root, revision), /delivery closure|undelivered/);
+  }
+});
+test('legitimate package directory and .bin links keep the same declared targets after real install', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live'); fs.mkdirSync(bundle); createBundle(bundle); fs.mkdirSync(path.join(live, 'backend'), { recursive: true });
+  fs.writeFileSync(path.join(bundle, 'node_modules/pocketbase/cli.js'), 'package executable', { mode: 0o755 }); fs.mkdirSync(path.join(bundle, 'node_modules/.bin')); fs.symlinkSync('../pocketbase/cli.js', path.join(bundle, 'node_modules/.bin/pb'));
+  fs.writeFileSync(path.join(bundle, 'release.json'), JSON.stringify({ revision, paths: artifactPaths, files: inventory(bundle) }));
+  verifyBundle(bundle, revision); installBundle(bundle, live, revision);
+  assert.equal(fs.realpathSync(path.join(live, 'node_modules/.bin/pb')), path.join(live, 'node_modules/pocketbase/cli.js'));
+  assert.equal(fs.statSync(path.join(live, 'node_modules/.bin/pb')).mode & 0o777, 0o755);
+});
+
+test('ordinary parent replacement after preflight cannot fabricate deployed state', async t => productionFixture(t, f => {
+  f.adapter.verify(); const parent = path.dirname(f.state); fs.renameSync(parent, parent + '-original'); fs.mkdirSync(parent, { mode: 0o700 });
+  assert.throws(() => f.adapter.record({ status: 'deployed' }), /parent binding/);
+  assert.throws(() => f.adapter.failure({ status: 'failed' }), /parent binding/);
+  assert.equal(fs.existsSync(f.state), false);
+}));
