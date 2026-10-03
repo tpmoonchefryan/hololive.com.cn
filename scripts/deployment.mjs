@@ -129,9 +129,17 @@ function copyPaths(from, to, names) {
   }
 }
 
+export function verifyImmutableMigrations(bundle, webRoot) {
+  const directory = path.join(webRoot, 'backend/pb_migrations');
+  if (!fs.existsSync(directory)) return;
+  const source = new Map(inventory(bundle, ['backend/pb_migrations']).map(record => [record.path, record]));
+  for (const record of inventory(webRoot, ['backend/pb_migrations'])) check(JSON.stringify(source.get(record.path)) === JSON.stringify(record), 'Unknown or modified production migration: ' + record.path);
+}
+
 export function installBundle(bundle, webRoot, revision) {
   const manifest = verifyBundle(bundle, revision);
   assertRealPath(webRoot);
+  verifyImmutableMigrations(bundle, webRoot);
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
     if (fs.existsSync(dest)) assertRealPath(dest);
@@ -172,6 +180,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   return {
     verify: () => {
       verifyBundle(bundle, revision);
+      verifyImmutableMigrations(bundle, config.webRoot);
       check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? '') && ['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'Missing actual Actions run/repository binding');
       const configStat = fs.statSync(configFile);
       check(configStat.uid === 0 && (configStat.mode & 0o022) === 0, 'Production config must be root-owned and not group/world writable');
