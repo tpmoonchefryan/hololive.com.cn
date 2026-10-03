@@ -59,11 +59,9 @@ jobs:
         run: |
           set -euo pipefail
           bundle="$(mktemp -d "$RUNNER_TEMP/hololive-release.XXXXXX")"
-          cp package.json package-lock.json "$bundle/"
+          git archive "$DEPLOY_REVISION" package.json package-lock.json backend/pb_migrations backend/pb_hooks backend/scripts | tar -x -C "$bundle"
           npm ci --prefix "$bundle" --omit=dev --ignore-scripts --registry=https://registry.npmjs.org
           cp -a dist "$bundle/"
-          mkdir "$bundle/backend"
-          cp -a backend/pb_migrations backend/pb_hooks backend/scripts "$bundle/backend/"
           node scripts/deployment.mjs bundle "$bundle" "$DEPLOY_REVISION"
           printf 'DEPLOY_BUNDLE=%s\n' "$bundle" >> "$GITHUB_ENV"
 
