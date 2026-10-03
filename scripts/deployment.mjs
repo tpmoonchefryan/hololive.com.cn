@@ -18,6 +18,56 @@ const safeRelative = name => typeof name === 'string' && !path.isAbsolute(name) 
 const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const writeJSON = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
 
+// systemctl's command values combine immutable configuration and execution
+// records. Only the documented, unambiguous representation is admitted.
+const executionNames = ['ExecCondition', 'ExecStartPre', 'ExecStart', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'];
+const serviceNames = [...executionNames, 'WorkingDirectory', 'User', 'Group', 'EnvironmentFiles', 'Requires', 'BindsTo', 'PartOf'];
+export function serviceFacts(raw) {
+  const properties = {};
+  for (const line of raw.split('\n')) {
+    const at = line.indexOf('=');
+    check(at > 0 && !Object.hasOwn(properties, line.slice(0, at)), 'Missing/duplicate service property');
+    properties[line.slice(0, at)] = line.slice(at + 1);
+  }
+  check(Object.keys(properties).length === serviceNames.length && serviceNames.every(name => Object.hasOwn(properties, name)), 'Unknown/missing service property');
+  const configuration = {}, runtime = {};
+  for (const name of serviceNames) {
+    if (!executionNames.includes(name)) { configuration[name] = properties[name]; continue; }
+    configuration[name] = []; runtime[name] = [];
+    let rest = properties[name];
+    while (rest) {
+      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+) \}(?: |$)/.exec(rest);
+      check(match && path.isAbsolute(match[1]) && !/[\\"'\t\n]/.test(match[2]), 'Ambiguous service command');
+      const argv = match[2].split(' ');
+      check(argv.every(Boolean) && /^\[[^\[\]]+\]$/.test(match[4]) && /^\[[^\[\]]+\]$/.test(match[5]) && ['(null)', 'exited', 'killed', 'dumped'].includes(match[7]), 'Ambiguous service argv/runtime');
+      const configured = { path: match[1], argv, ignore_errors: match[3] };
+      check(!configuration[name].some(item => JSON.stringify(item) === JSON.stringify(configured)), 'Duplicate service command');
+      configuration[name].push(configured);
+      runtime[name].push({ start_time: match[4], stop_time: match[5], pid: match[6], code: match[7], status: match[8] });
+      rest = rest.slice(match[0].length);
+    }
+  }
+  check(configuration.ExecStart.length === 1, 'Missing/ambiguous ExecStart');
+  const environment = [];
+  let rest = configuration.EnvironmentFiles;
+  while (rest) {
+    const match = /^(\/[^\s\\()]+) \(ignore_errors=(yes|no)\)(?: |$)/.exec(rest);
+    check(match && path.resolve(match[1]) === match[1] && !environment.some(item => item.path === match[1]), 'Ambiguous EnvironmentFiles');
+    environment.push({ path: match[1], ignore_errors: match[2] }); rest = rest.slice(match[0].length);
+  }
+  return { configuration, runtime, environment };
+}
+const showService = unit => command('systemctl', ['show', unit, ...serviceNames.flatMap(name => ['-p', name])]);
+function serviceEnvironment(facts, config) {
+  return facts.environment.map(item => {
+    check(config.configurationFiles.includes(item.path), 'EnvironmentFile outside approved configuration inventory');
+    assertRealPath(item.path);
+    const stat = fs.lstatSync(item.path);
+    check(stat.isFile() && stat.nlink === 1, 'Unsafe EnvironmentFile');
+    return { ...item, sha256: sha(fs.readFileSync(item.path)), mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
+  });
+}
+
 export function inventory(root, names = artifactPaths) {
   const records = [];
   const walk = relative => {
@@ -539,7 +589,7 @@ export function restoreSafeRecovery(safe, destination, revision) {
 
 // Fixed, shell-free child for the two approved runtime leaves and bound sync cgroup.
 // No caller-selected script, command, output path, unit or sysfs endpoint.
-const finiteRootSource = String.raw`import os,sys,json,stat,hashlib,pwd,subprocess,time,fcntl,array
+const finiteRootSource = String.raw`import os,sys,json,stat,hashlib,pwd,subprocess,time,fcntl,array,re,grp
 r=json.loads(sys.stdin.read()); result=r.get('state') or {'changed':False,'attempted':[],'leaves':{},'directories':{},'frozen':False,'killed':False,'stopped':False}
 def require(v,m):
  if not v: raise RuntimeError(m)
@@ -562,9 +612,80 @@ def file_flags(p):
  finally: os.close(fd)
 def ctl(args): return subprocess.check_output(['/usr/bin/systemctl']+args,text=True,timeout=10).strip()
 def props(unit,names):
- out=ctl(['show',unit]+sum((['-p',n] for n in names),[])); return dict(line.split('=',1) for line in out.splitlines())
+ out=ctl(['show',unit]+sum((['-p',n] for n in names),[])); rows=[line.split('=',1) for line in out.splitlines()]
+ require(all(len(row)==2 for row in rows) and len(rows)==len(names) and len(set(row[0] for row in rows))==len(names) and set(row[0] for row in rows)==set(names),'Missing/duplicate/unknown unit property'); return dict(rows)
 marker_names=['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState','ControlGroup']
-sync_names=marker_names+['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf']
+execution_names=['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost']
+service_names=execution_names+['WorkingDirectory','User','Group','EnvironmentFiles','Requires','BindsTo','PartOf']
+sync_names=marker_names+service_names
+def facts(value):
+ configuration={}; runtime={}
+ for name in service_names:
+  require(name in value,'Missing configured property')
+  if name not in execution_names: configuration[name]=value[name]; continue
+  configuration[name]=[]; runtime[name]=[]; rest=value[name]
+  while rest:
+   m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+) \}(?: |$)',rest)
+   require(m and os.path.isabs(m[1]) and not any(c in m[2] for c in ['\\','"',"'",'\t','\n']),'Ambiguous service command')
+   argv=m[2].split(' '); require(all(argv) and re.fullmatch(r'\[[^\[\]]+\]',m[4]) and re.fullmatch(r'\[[^\[\]]+\]',m[5]) and m[7] in ['(null)','exited','killed','dumped'],'Ambiguous service argv/runtime')
+   command={'path':m[1],'argv':argv,'ignore_errors':m[3]}; require(command not in configuration[name],'Duplicate service command'); configuration[name].append(command)
+   runtime[name].append(dict(zip(['start_time','stop_time','pid','code','status'],[m[i] for i in range(4,9)])))
+   rest=rest[m.end():]
+ require(len(configuration['ExecStart'])==1,'Missing/ambiguous ExecStart')
+ environment=[]; rest=configuration['EnvironmentFiles']
+ while rest:
+  m=re.match(r'(/[^\s\\()]+) \(ignore_errors=(yes|no)\)(?: |$)',rest)
+  require(m and os.path.normpath(m[1])==m[1] and not any(x['path']==m[1] for x in environment),'Ambiguous EnvironmentFiles')
+  f=real(m[1]); require(f in config['configurationFiles'],'EnvironmentFile outside approved configuration inventory')
+  i=identity(f); environment.append({'path':f,'ignore_errors':m[2],'sha256':digest(read(f)),'mode':i[4],'uid':i[2],'gid':i[3]}); rest=rest[m.end():]
+ return {'configuration':configuration,'runtime':runtime,'environment':environment}
+def configured(unit,value=None):
+ value=value or props(unit,service_names); actual=facts(value); expected=r['serviceEvidence'][unit]
+ if unit in config['websiteServices']:
+  rows=[line.split('=',1) for line in config['serviceBindings'][unit].splitlines()]
+  require(all(len(row)==2 for row in rows) and len(rows)==len(service_names) and set(row[0] for row in rows)==set(service_names),'Malformed approved service binding')
+  require(actual['configuration']==facts(dict(rows))['configuration'],'Root-approved service configuration drift')
+ require(actual['configuration']==expected['configuration'] and actual['environment']==expected['environment'],'Configured service/environment drift: '+unit)
+ return actual
+def running(value):
+ actual=facts(value); record=actual['runtime']['ExecStart'][0]
+ require(value['ActiveState']=='active' and int(value['MainPID'])>0 and record['pid']==value['MainPID'] and record['start_time']!='[n/a]' and record['stop_time']=='[n/a]' and record['code']=='(null)' and record['status']=='0','ExecStart running phase mismatch')
+ for name in execution_names:
+  if name=='ExecStart': continue
+  for configured_command,execution in zip(actual['configuration'][name],actual['runtime'][name]):
+   dormant=execution=={'start_time':'[n/a]','stop_time':'[n/a]','pid':'0','code':'(null)','status':'0'}
+   completed=int(execution['pid'])>0 and execution['start_time']!='[n/a]' and execution['stop_time']!='[n/a]' and execution['code']=='exited' and (execution['status']=='0' or configured_command['ignore_errors']=='yes')
+   require(dormant or completed,'Auxiliary command runtime phase mismatch')
+ return record
+def service_phases(phase):
+ current={}
+ for unit in config['websiteServices']:
+  if unit=='velocity-sync': continue
+  value=props(unit,marker_names+service_names); actual=configured(unit,value); running(value)
+  pid=value['MainPID']; base='/proc/'+pid; command=actual['configuration']['ExecStart'][0]
+  require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and os.path.realpath(base+'/cwd')==value['WorkingDirectory'],'Website process executable/directory drift')
+  argv=read(base+'/cmdline').split(b'\0'); require(argv[-1]==b'' and argv[:-1]==[x.encode() for x in command['argv']],'Website process argv drift')
+  require('0::'+value['ControlGroup'] in read(base+'/cgroup').decode().splitlines(),'Website process group drift')
+  status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
+  user=pwd.getpwnam(value['User'] or 'root'); group=grp.getgrnam(value['Group']).gr_gid if value['Group'] else user.pw_gid
+  require([int(x) for x in status['Uid'].split()]==[user.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[group]*4,'Website process user/group drift')
+  observed={'properties':value,'processStart':read(base+'/stat').decode().rsplit(')',1)[1].split()[19]}; current[unit]=observed
+  if phase=='stop': require(actual['runtime']==r['serviceEvidence'][unit]['runtime'],'Website runtime drift since preflight')
+  elif unit=='pocketbase' and phase=='cleanup-sync':
+   old=result['servicePhases']['stop'][unit]['properties']
+   require(value['ExecMainStartTimestampMonotonic']!=old['ExecMainStartTimestampMonotonic'] and actual['runtime']['ExecStart'][0]['start_time']!=facts(old)['runtime']['ExecStart'][0]['start_time'] and value['NRestarts']==old['NRestarts'],'PocketBase target startup phase drift')
+  else:
+   previous='cleanup-sync' if phase=='cleanup-java' else 'stop'
+   require(observed==result['servicePhases'][previous][unit],'Website runtime/start/group drift')
+ result.setdefault('servicePhases',{})[phase]=current
+def stopped(value):
+ actual=configured('velocity-sync',value); record=actual['runtime']['ExecStart'][0]; old=facts(result['sync'])['runtime']['ExecStart'][0]
+ require(value['ActiveState']=='inactive' and value['MainPID']=='0' and value['ExecMainStartTimestampMonotonic']==result['sync']['ExecMainStartTimestampMonotonic'] and value['NRestarts']==result['sync']['NRestarts'],'Stopped sync marker drift')
+ require(record['pid']==old['pid'] and record['start_time']==old['start_time'] and record['stop_time']!='[n/a]' and (record['code'],record['status']) in [('killed','9'),('exited','0')],'ExecStart stopped phase mismatch')
+ require(all(actual['runtime'][name]==facts(result['sync'])['runtime'][name] for name in execution_names if name!='ExecStart'),'Stopped auxiliary runtime drift')
+ old_group=group_path(result['sync']['ControlGroup']); require(not os.path.exists(old_group+'/cgroup.procs') or not members(old_group),'Old sync group not empty')
+ return actual
+
 leaf_name='99-hololive-release-guard.conf'
 contents={'velocity':'[Unit]\nRefuseManualStop=yes\n','velocity-sync':'[Unit]\nRefuseManualStart=yes\n[Service]\nRestart=no\nRestartForceExitStatus=\n'}
 leaves={u:'/run/systemd/system/'+u+'.service.d/'+leaf_name for u in contents}
@@ -575,6 +696,14 @@ def unchanged():
  require(digest(read(candidate_manifest))==r['candidateManifestSha256'],'Candidate drift')
 def java():
  value=props('velocity',marker_names); require(value['ActiveState']=='active','Java inactive')
+ java_facts=configured('velocity'); require(java_facts['runtime']==r['serviceEvidence']['velocity']['runtime'],'Java command runtime drift')
+ require(props('velocity',['Requires','BindsTo','PartOf'])==dict(line.split('=',1) for line in config['velocityServiceBinding'].splitlines()),'Java dependency drift')
+ running(dict(value,**props('velocity',service_names)))
+ base='/proc/'+value['MainPID']; command=java_facts['configuration']['ExecStart'][0]
+ actual=[read(base+'/stat').decode().rsplit(')',1)[1].split()[19],os.path.realpath(base+'/exe'),read(base+'/cmdline').split(b'\0')[:-1]]
+ require(actual[1]==os.path.realpath(command['path']) and actual[2]==[x.encode() for x in command['argv']] and '0::'+value['ControlGroup'] in read(base+'/cgroup').decode().splitlines(),'Java process command/group drift')
+ if 'javaProcess' not in result: result['javaProcess']=[actual[0],actual[1],[x.decode() for x in actual[2]]]
+ require(result['javaProcess']==[actual[0],actual[1],[x.decode() for x in actual[2]]],'Java process start drift')
  require(value==result['java'],'Java startup/group drift')
  rows=ctl(['list-jobs','--no-pager','--no-legend','--plain']).splitlines()
  require(not any(any(unit in row.split() for unit in ['velocity.service','velocity-sync.service']) for row in rows),'Velocity job in flight')
@@ -597,16 +726,19 @@ def members(group):
  return sorted(set(values))
 def process_binding(group,code_hash=None):
  value=props('velocity-sync',sync_names)
- require(value==result['sync'],'Sync unit/start/group drift')
+ require(value==result['sync'],'Sync unit/start/group drift'); configured('velocity-sync',value); running(value)
  ids=members(group); require(ids==[int(value['MainPID'])],'Unexpected sync member/descendant')
  bindings=[]
  for pid in ids:
   base='/proc/'+str(pid)
   status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
   require([int(x) for x in status['Uid'].split()]==[pwd.getpwnam(value['User'] or 'root').pw_uid]*4,'Sync process UID mismatch')
-  require(os.path.realpath(base+'/exe')=='/usr/bin/node','Unexpected sync executable')
+  require(os.path.realpath(base+'/exe')=='/usr/bin/node' and facts(value)['configuration']['ExecStart'][0]['path']=='/usr/bin/node','Unexpected sync executable')
+  expected_gid=grp.getgrnam(value['Group']).gr_gid if value['Group'] else pwd.getpwnam(value['User'] or 'root').pw_gid
+  require([int(x) for x in status['Gid'].split()]==[expected_gid]*4,'Sync process GID mismatch')
   require(os.path.realpath(base+'/cwd')==config['webRoot']+'/backend/scripts','Unexpected sync cwd')
-  args=read(base+'/cmdline').split(b'\0'); require(args[:2]==[b'/usr/bin/node',b'sync_velocity.js'],'Unexpected sync command')
+  args=read(base+'/cmdline').split(b'\0'); require(args[-1]==b'','Unterminated sync command'); args=args[:-1]
+  require(args==[x.encode() for x in facts(value)['configuration']['ExecStart'][0]['argv']],'Unexpected sync command')
   groups=read(base+'/cgroup').decode().splitlines(); require('0::'+value['ControlGroup'] in groups,'Process cgroup mismatch')
   # Thread-specific fd tables also cover unshared descriptor tables.
   for tid in os.listdir(base+'/task'):
@@ -652,7 +784,7 @@ def remove(unit):
  ctl(['daemon-reload']); now=effective()
  require(now[unit]==result['originalProperties'][unit],'Runtime properties not restored')
 try:
- require(set(r)=={'operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','state'},'Unknown finite request field')
+ require(set(r)=={'operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','serviceEvidence','state'},'Unknown finite request field')
  require(r['operation'] in ['stop','cleanup-sync','cleanup-java'],'Unknown finite operation')
  require(os.geteuid()==0,'Finite child requires actual root')
  config=json.loads(read(real(r['configFile']))); require(identity(r['configFile'])[2]==0 and identity(r['configFile'])[4]&0o022==0,'Unsafe root config')
@@ -664,16 +796,19 @@ try:
  lock=real(config['stateRoot']+'/deployment.lock'); candidate_manifest=real(r['bundle']+'/release.json'); unchanged()
  require(json.loads(read(candidate_manifest))['revision']==r['revision'],'Wrong candidate manifest')
  result=r['state'] if r['state'] else result
+ require(set(r['serviceEvidence'])==set(config['websiteServices']+['velocity']),'Missing/unknown service evidence')
+ for unit in config['websiteServices']+['velocity']: configured(unit)
  owner={k:r[k] for k in ['revision','runNumber','runId','repository','lockIdentity','runnerPID','configSha256']}
  if r['operation']=='stop':
   result['owner']=owner
+  service_phases('stop')
   result['java']=props('velocity',marker_names)
   require(r['velocityEvidence'] and all(result['java'].get(k)==v for k,v in dict(line.split('=',1) for line in r['velocityEvidence']['service'].splitlines()).items()),'Java drift since outer pre-stop baseline')
   result['sync']=props('velocity-sync',sync_names)
   require(result['sync']['ActiveState']=='active' and result['sync']['WorkingDirectory']==config['webRoot']+'/backend/scripts','Unexpected sync unit')
   require(all(not value for value in props('velocity-sync',['ExecStop','ExecStopPost']).values()),'Unapproved sync stop command')
-  bindings=props('velocity-sync',['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf'])
-  require('\n'.join(k+'='+v for k,v in bindings.items())==config['serviceBindings']['velocity-sync'],'Sync service binding drift')
+  configured('velocity-sync',result['sync']); running(result['sync'])
+  require(facts(result['sync'])['runtime']==r['serviceEvidence']['velocity-sync']['runtime'],'Sync runtime drift since preflight')
   require(result['java']['ControlGroup']!=result['sync']['ControlGroup'],'Shared Java/sync group')
   group=group_path(result['sync']['ControlGroup']); jgroup=group_path(result['java']['ControlGroup'])
   require(not(group.startswith(jgroup+'/') or jgroup.startswith(group+'/')),'Nested Java/sync group')
@@ -703,16 +838,22 @@ try:
   require(frozen(group),'Sync thawed before kill'); java(); require(frozen(group),'Sync thawed at kill boundary')
   write_sys(group,'cgroup.kill'); result['killed']=True; wait_for(lambda:not members(group),'Sync exit timed out')
   java(); ctl(['stop','velocity-sync']); result['stopped']=True
+  result['stoppedSync']=props('velocity-sync',sync_names); stopped(result['stoppedSync'])
  else:
   require(result.get('owner')==owner,'Runtime ownership belongs to another run')
-  require(result['stopped'] and result['changed'],'Missing original stop ownership'); own_leaves(); java()
+  require(result['stopped'] and result['changed'],'Missing original stop ownership'); own_leaves(); java(); service_phases(r['operation'])
   guard=read(config['webRoot']+'/backend/.velocity-maintenance'); require(guard,'Persistent maintenance guard absent')
   script=config['webRoot']+'/backend/scripts/sync_velocity.js'; candidate=read(r['bundle']+'/backend/scripts/sync_velocity.js')
   require(read(script)==candidate and b'.velocity-maintenance' in candidate,'Guard-aware installed candidate mismatch')
-  bindings=props('velocity-sync',['ExecStart','WorkingDirectory','User','Requires','BindsTo','PartOf'])
-  require('\n'.join(k+'='+v for k,v in bindings.items())==config['serviceBindings']['velocity-sync'],'New sync unit binding drift')
+  current_sync=props('velocity-sync',sync_names); configured('velocity-sync',current_sync)
+  if r['operation']=='cleanup-sync':
+   stopped(current_sync); require(current_sync==result['stoppedSync'],'Stopped cleanup phase drift')
   if r['operation']=='cleanup-java':
-   result['sync']=props('velocity-sync',sync_names); require(result['sync']['ActiveState']=='active','New sync not active')
+   old_sync=result['sync']; running(current_sync)
+   require(all(facts(current_sync)['runtime'][name]==facts(old_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']),'Unexpected new-sync command execution')
+   result['newSync']=current_sync; result['sync']=current_sync
+   require(result['sync']['ExecMainStartTimestampMonotonic']!=old_sync['ExecMainStartTimestampMonotonic'] and result['sync']['NRestarts']==old_sync['NRestarts'],'New sync start/restart marker drift')
+   require(facts(result['sync'])['runtime']['ExecStart'][0]['start_time']!=facts(old_sync)['runtime']['ExecStart'][0]['start_time'],'New sync command start drift')
    new_group=group_path(result['sync']['ControlGroup']); java_group=group_path(result['java']['ControlGroup'])
    require(new_group!=java_group and not(new_group.startswith(java_group+'/') or java_group.startswith(new_group+'/')),'New sync shares Java group')
    process_binding(new_group,digest(candidate))
@@ -732,7 +873,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const lock = path.join(config.stateRoot, 'deployment.lock');
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
   const pb = path.join(config.webRoot, 'backend/pocketbase');
-  let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger, preflightSources, configIdentity, configSha256, maintenance = null, installed = false, migrated = false, authenticated = false, velocityBaseline;
+  let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger, preflightSources, configIdentity, configSha256, maintenance = null, installed = false, migrated = false, authenticated = false, velocityBaseline, serviceEvidence;
   const firstCapture = config.baseline?.capture === 'stopped-backup';
   const captureDescriptor = firstCapture ? JSON.stringify(config.baseline) : null;
   const captureBinding = directory => ({ revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, snapshotDirectory: directory });
@@ -764,7 +905,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     const identity = stat => [stat.dev, stat.ino, stat.uid, stat.gid, stat.mode & 0o7777, stat.nlink];
     const runner = os.userInfo();
     check(runner.username === config.runnerUser && runner.uid !== 0, 'Finite stop requires actual nonroot runner');
-    const request = { operation, configFile, configIdentity, configSha256, lockIdentity: identity(opened), revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, runnerPID: process.pid, runnerUID: runner.uid, runnerGID: runner.gid, bundle, candidateManifestSha256: sha(fs.readFileSync(path.join(bundle, 'release.json'))), velocityEvidence: velocityBaseline ?? null, state: maintenance };
+    const request = { operation, configFile, configIdentity, configSha256, lockIdentity: identity(opened), revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, runnerPID: process.pid, runnerUID: runner.uid, runnerGID: runner.gid, bundle, candidateManifestSha256: sha(fs.readFileSync(path.join(bundle, 'release.json'))), velocityEvidence: velocityBaseline ?? null, serviceEvidence, state: maintenance };
     let result;
     try { result = JSON.parse(execFileSync('sudo', ['-n', '/usr/bin/python3', '-I', '-c', finiteRootSource], { input: JSON.stringify(request), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000 })); }
     catch (error) { maintenance = { ...(maintenance ?? {}), uncertain: true, operation, reason: 'Finite child result unavailable: ' + error.message }; throw error; }
@@ -843,8 +984,13 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       check(command('systemctl', ['show', 'velocity', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf']) === config.velocityServiceBinding, 'Java reverse service dependency drift');
       for (const unit of config.websiteServices) {
         check(command('systemctl', ['is-active', unit]) === 'active', 'Required service not active: ' + unit);
-        check(command('systemctl', ['show', unit, '-p', 'ExecStart', '-p', 'WorkingDirectory', '-p', 'User', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf']) === config.serviceBindings[unit], 'Service binding drift: ' + unit);
+        const facts = serviceFacts(showService(unit)), approved = serviceFacts(config.serviceBindings[unit]);
+        check(JSON.stringify(facts.configuration) === JSON.stringify(approved.configuration), 'Service binding drift: ' + unit);
+        serviceEvidence ??= {};
+        serviceEvidence[unit] = { configuration: facts.configuration, runtime: facts.runtime, environment: serviceEnvironment(facts, config) };
       }
+      const javaFacts = serviceFacts(showService('velocity'));
+      serviceEvidence.velocity = { configuration: javaFacts.configuration, runtime: javaFacts.runtime, environment: serviceEnvironment(javaFacts, config) };
       for (const file of config.configurationFiles) assertRealPath(file);
     },
     lock: () => { boundControl(lock); lockFd = fs.openSync(lock, 'wx', 0o600); fs.writeFileSync(lockFd, JSON.stringify({ revision, runNumber, pid: process.pid })); },

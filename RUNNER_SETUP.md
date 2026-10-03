@@ -18,3 +18,7 @@
 stop 可能在返回前已部分写保护或尝试冻结。失败保留保护与实际部分范围，较大 run 也拒绝覆盖未解决 failed；不自动解冻、启动旧 sync、撤持久 guard 或删除外来叶/目录。维护目录、配置和 EnvFile 必须由目标批准流程建立，runner 的实际读取与一致备份能力须核实。EnvFile 采用原白名单 `/etc/default/velocity-sync` 和 `/etc/default/mcsm-proxy`，与实际 unit/服务凭据分别绑定；旧 JSON 方案不能执行。
 
 长期人类与两份独立 `users` 服务身份、私有 credential/process.env 来源、root 配置、私有目录、明确 EnvFiles 及最终外部动作尚未齐。临时迁移 superuser 创建/删除已有有限授权也不等于这些前提成立。独立 PB/SQLite 测试与本地有限 host 映射只证明各自实际结果，不证明 Linux 冻结/杀组、生产停服或 Java/玩家全过程连续性。实际机器 UID/GID、账号标识、凭据和主机细节仅保留在私有证据。
+
+服务库存须提供 DEPLOY.md 所列完整属性，保留所有 Exec 命令的顺序、path、完整 argv、ignore_errors 与五个执行字段。预检绑定配置身份和 EnvFile 路径/选项/内容/权限/属主；原固定 root stop、cleanup-sync、cleanup-java 检查点再次核对，执行字段按旧运行、冻结、停止和新启动分别验证，不能删除执行字段来避开清理误拒。缺项、重复或未知表示、带歧义的 argv/转义拒绝；实际 systemctl 版本能否提供受支持表示尚须目标证据。
+
+清理仍只移除本 run 创建的叶及已空的自建目录，并在原 reload 点读取有效属性。角色/认证失败保留整个失败域，后续较大 run 不覆盖；独立测试成功域不能作为清理失败域或恢复真实主机的许可。完整网站进程身份、Java 连续性与有限 root 成功路径必须由实际目标核实；本地映射、旧无限内存设置或 OOM 为零均不能证明同机玩家安全。
