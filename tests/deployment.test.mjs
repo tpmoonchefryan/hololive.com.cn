@@ -368,7 +368,7 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
 // Retained independent acceptance fixtures now exercise the fixed production
 // entry, both PB versions, and the actual users authentication/API boundary.
 test('safe recovery and deployment validate actual contracts, unlisted roles and target authentication on both PB versions', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async () => {
-const evidence = fs.mkdtempSync(path.join(projectRoot, '.context/rework-epic005-003/adapter-')), project = projectRoot;
+const evidence = fs.mkdtempSync(path.join(projectRoot, '.context/rework-epic005-004/adapter-')), project = projectRoot;
 const candidate = revision;
 const extra = 'backend/pb_migrations/1765100008_add_velocity_advanced.js';
 const absent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1770818775_updated_users.js'];
@@ -388,7 +388,7 @@ function copyWithModes(from,to,options) {
 function sql(file, source, args = []) { return rawExec('python3', ['-c', source, file, ...args], {encoding:'utf8'}).trim(); }
 const names = fs.readdirSync(path.join(project, 'backend/pb_migrations')).filter(x=>x.endsWith('.js')).sort();
 const beforeNames = names.filter(x=>x<'1789999999');
-const retainedBytes = fs.readFileSync(path.join(project,'.context/epic005/private/unknown-migration.js'));
+const retainedBytes = fs.readFileSync(process.env.PB_RETAINED_HISTORY_FILE);
 assert.equal(sha(retainedBytes),'85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c');
 const bundle = path.join(root,'bundle');mkdir(bundle);
 for(const name of ['dist','backend/pb_migrations','backend/pb_hooks','backend/scripts']) copyWithModes(path.join(project,name),path.join(bundle,name),{recursive:true,preserveTimestamps:true,verbatimSymlinks:true});
@@ -514,6 +514,44 @@ try{
       const forged=read(path.join(safe,'backup.json'));forged.application=inventory(path.join(safe,'application'),forged.present);forged.contract=checkDatabases(path.join(safe,'application/backend/pb_data'));forged.snapshotId=snapshotIdentity(forged);forged.recoveryId=sha(JSON.stringify({snapshotId:forged.snapshotId,sourceSnapshotId:forged.sourceSnapshotId,identities:forged.identities,candidateFiles:forged.candidateFiles}));write(path.join(safe,'backup.json'),forged);
       assert.throws(()=>restoreSafeRecovery(safe,path.join(bound.local,'forged-'+defect),candidate),/Recovery candidate contract mismatch|Unapproved role change/);
     }
+    // Alter only the safe data and its self-reported permission/digests. The
+    // stopped source and sealed candidate expectation remain byte exact.
+    for (const defect of ['admin-roster', 'service-roster', 'role-mismatch', 'missing-permission', 'removed-identity', 'replaced-identity']) {
+      const rawBackup=newBackup();adapter().rehearse(rawBackup);
+      const safe=path.join(rawBackup,'safe-recovery'),oracle=path.join(rawBackup,'expected-recovery-contract.json');
+      const oracleBytes=fs.readFileSync(oracle),rawBytes=fs.readFileSync(path.join(rawBackup,'backup.json'));
+      const forged=read(path.join(safe,'backup.json'));
+      if(defect==='admin-roster'||defect==='service-roster'){
+        const role=defect==='admin-roster'?'admin':'service';
+        sql(path.join(safe,'application/backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set is_admin=1,service_account=? where id=?',(int(sys.argv[3]),sys.argv[2]));c.commit();c.execute('pragma wal_checkpoint(truncate)');c.close()",[bound.ordinary.id,String(Number(role==='service'))]);
+        forged.identities.push({id:bound.ordinary.id,role});
+      }else if(defect==='role-mismatch')forged.identities[0].role=forged.identities[0].role==='admin'?'service':'admin';
+      else if(defect==='removed-identity')forged.identities.pop();
+      else if(defect==='replaced-identity')forged.identities[0].id=bound.ordinary.id;
+      else {const missing=read(oracle);delete missing.identities;write(oracle,missing);}
+      forged.application=inventory(path.join(safe,'application'),forged.present);forged.contract=checkDatabases(path.join(safe,'application/backend/pb_data'));forged.snapshotId=snapshotIdentity(forged);
+      forged.recoveryId=sha(JSON.stringify({snapshotId:forged.snapshotId,sourceSnapshotId:forged.sourceSnapshotId,identities:forged.identities,candidateFiles:forged.candidateFiles}));write(path.join(safe,'backup.json'),forged);
+      const destination=path.join(bound.local,'forged-permission-'+defect);
+      assert.throws(()=>restoreSafeRecovery(safe,destination,candidate),/Recovery original identities permission binding mismatch/);
+      assert.equal(fs.existsSync(destination),false);assert.deepEqual(fs.readFileSync(path.join(rawBackup,'backup.json')),rawBytes);
+      if(defect!=='missing-permission')assert.deepEqual(fs.readFileSync(oracle),oracleBytes);
+      else {
+        const withoutPermission=read(oracle);assert.equal(withoutPermission.identities,undefined);
+        assert.throws(()=>createSafeRecovery(rawBackup,approvedWork,bundle,candidate,bound.identities,path.join(rawBackup,'rehearsal')),/Recovery original identities permission binding mismatch/);
+        assert.deepEqual(read(oracle),withoutPermission);
+        fs.unlinkSync(oracle);
+        assert.throws(()=>createSafeRecovery(rawBackup,approvedWork,bundle,candidate,bound.identities,path.join(rawBackup,'rehearsal')),/Missing original identities permission binding/);
+        assert.equal(fs.existsSync(oracle),false);
+      }
+      observe('A03-sealed-'+defect+'-'+version,'rehashed safe permission refused before destination writes',{passed:true,rawBackup,safe,independentExpectationUnchanged:defect!=='missing-permission'});
+    }
+    // An unsuccessful generation seals the original permission too: changing
+    // config for a retry cannot expand that permission.
+    const retryBackup=newBackup();bound.config.recoveryWorkingCopy=promoted;
+    result=await attempt(()=>adapter().rehearse(retryBackup));assert.equal(result.accepted,false);
+    const retryOracle=path.join(retryBackup,'expected-recovery-contract.json'),retryBytes=fs.readFileSync(retryOracle);
+    assert.throws(()=>createSafeRecovery(retryBackup,promoted,bundle,candidate,[...bound.identities,{id:bound.ordinary.id,role:'admin'}],path.join(retryBackup,'rehearsal')),/Recovery original identities permission binding mismatch/);
+    assert.deepEqual(fs.readFileSync(retryOracle),retryBytes);bound.config.recoveryWorkingCopy=approvedWork;
     const beforeInventory=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
     const outcome=await attempt(()=>deploy(adapter(),bound.config,candidate,6));
     assert.equal(outcome.accepted,false,outcome.error);

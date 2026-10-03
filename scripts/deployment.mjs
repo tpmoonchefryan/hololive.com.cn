@@ -449,18 +449,26 @@ function verifyRecoveryContract(directory, expected, rawContract) {
 export function createSafeRecovery(backup, migrated, bundle, revision, identities, expectedDirectory) {
   const raw = verifySnapshot(backup);
   verifyBundle(bundle, revision);
-  verifyDerivedData(path.join(backup, 'application'), migrated, identities);
-  verifyRecoverySecurity(migrated, identities);
   if (!expectedDirectory) {
     expectedDirectory = path.join(backup, 'candidate-contract-rehearsal');
-    restoreBackup(backup, expectedDirectory);
+    if (!fs.existsSync(expectedDirectory)) restoreBackup(backup, expectedDirectory);
     const output = command(path.join(expectedDirectory, 'backend/pocketbase'), ['migrate', 'up', '--dir', path.join(expectedDirectory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
     check(!/Failed|Error:/i.test(output), 'Isolated migration failed');
   }
   check(expectedDirectory === path.join(backup, 'rehearsal') || expectedDirectory === path.join(backup, 'candidate-contract-rehearsal'), 'Unbound recovery expectation');
   const expectedContract = recoveryContract(expectedDirectory);
+  const expectationFile = path.join(backup, 'expected-recovery-contract.json');
+  const expectation = { sourceSnapshotId: raw.snapshotId, revision, candidateFiles: verifyBundle(bundle, revision).files, expectedContract, identities };
+  // Seal the original permitted roles outside the data being assessed. Failed
+  // attempts and retries must use this same permission, never replace it.
+  if (fs.existsSync(expectationFile)) check(JSON.stringify(json(expectationFile)) === JSON.stringify(expectation), 'Recovery original identities permission binding mismatch');
+  else {
+    check(!fs.existsSync(path.join(backup, 'safe-recovery')), 'Missing original identities permission binding');
+    fs.writeFileSync(expectationFile, JSON.stringify(expectation, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+  }
+  verifyDerivedData(path.join(backup, 'application'), migrated, expectation.identities);
+  verifyRecoverySecurity(migrated, expectation.identities);
   verifyRecoveryContract(migrated, expectedContract, raw.contract);
-  writeJSON(path.join(backup, 'expected-recovery-contract.json'), { sourceSnapshotId: raw.snapshotId, revision, candidateFiles: verifyBundle(bundle, revision).files, expectedContract });
   const safe = path.join(backup, 'safe-recovery');
   check(!fs.existsSync(safe), 'Safe recovery destination exists');
   // Candidate app and forward-migrated data, never the permissive raw app.
@@ -487,11 +495,12 @@ export function restoreSafeRecovery(safe, destination, revision) {
   const source = verifySnapshot(path.dirname(safe));
   const expectation = json(path.join(path.dirname(safe), 'expected-recovery-contract.json'));
   check(source.snapshotId === manifest.sourceSnapshotId && expectation.sourceSnapshotId === source.snapshotId && expectation.revision === revision && JSON.stringify(expectation.candidateFiles) === JSON.stringify(manifest.candidateFiles) && JSON.stringify(expectation.expectedContract) === JSON.stringify(manifest.expectedContract), 'Recovery expected contract binding mismatch');
-  verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), manifest.identities);
+  check(Array.isArray(expectation.identities) && JSON.stringify(expectation.identities) === JSON.stringify(manifest.identities), 'Recovery original identities permission binding mismatch');
+  verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), expectation.identities);
   verifyRecoveryContract(path.join(safe, 'application'), expectation.expectedContract, source.contract);
-  verifyRecoverySecurity(path.join(safe, 'application'), manifest.identities);
+  verifyRecoverySecurity(path.join(safe, 'application'), expectation.identities);
   const result = restoreBackup(safe, destination);
-  verifyRecoverySecurity(destination, manifest.identities);
+  verifyRecoverySecurity(destination, expectation.identities);
   verifyRecoveryContract(destination, expectation.expectedContract, source.contract);
   return { ...result, recoveryId: manifest.recoveryId, sourceSnapshotId: manifest.sourceSnapshotId, oldDaemonStarted: false };
 }

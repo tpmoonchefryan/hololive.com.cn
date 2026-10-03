@@ -162,3 +162,5 @@ credentials retain the maintenance guard and produce a failed deployment record;
 PocketBase may already have started when authentication fails, while remaining
 dependent services stay stopped. Actual provisioning and production actions still
 require the existing separate authorization.
+
+安全恢复的原批准身份与角色随原快照、候选清单和实际迁移预期封存在安全集之外的 `expected-recovery-contract.json`。生成失败或再次尝试也不覆盖该许可；恢复逐人核对使用此原许可，缺失许可、名单增删、替换或角色变化均在目标写入前拒绝。安全集中的名单和重新计算的摘要不能授权身份。
