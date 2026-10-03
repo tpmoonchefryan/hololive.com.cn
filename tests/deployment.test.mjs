@@ -239,3 +239,19 @@ test('ordinary parent replacement after preflight cannot fabricate deployed stat
   assert.throws(() => f.adapter.failure({ status: 'failed' }), /parent binding/);
   assert.equal(fs.existsSync(f.state), false);
 }));
+for (const operation of ['record', 'failure', 'guard']) test(`${operation} rechecks pinned parent after open before truncation`, async t => productionFixture(t, f => {
+  f.adapter.verify(); const endpoint = operation === 'guard' ? f.guard : f.state;
+  fs.writeFileSync(endpoint, 'original private control file', { mode: 0o600 });
+  const parent = path.dirname(endpoint), originalOpen = fs.openSync;
+  fs.openSync = (file, ...args) => {
+    if (file === endpoint) {
+      fs.renameSync(parent, parent + '-original'); fs.mkdirSync(parent, { mode: 0o700 });
+      fs.writeFileSync(endpoint, 'replacement must stay untouched', { mode: 0o600 });
+    }
+    return originalOpen(file, ...args);
+  };
+  try { assert.throws(() => f.adapter[operation]({ status: 'deployed' }), /parent binding/); }
+  finally { fs.openSync = originalOpen; }
+  assert.equal(fs.readFileSync(endpoint, 'utf8'), 'replacement must stay untouched');
+  assert.equal(fs.readFileSync(path.join(parent + '-original', path.basename(endpoint)), 'utf8'), 'original private control file');
+}));
