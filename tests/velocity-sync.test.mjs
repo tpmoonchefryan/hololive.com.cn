@@ -149,3 +149,56 @@ for (const [version, binary] of binaries) test(`real Velocity users auth/read/re
     }
   } finally { try { if (unsubscribe) await unsubscribe(); } finally { await f.close(); } }
 });
+
+for (const options of [{ restartIfChanged: true }, { forceRestart: true }, {}]) test(`persistent website deployment guard blocks startup/event/migration differences ${JSON.stringify(options)}`, async () => {
+  const f = fixture(); f.adapter.isProtected = async () => true;
+  assert.deepEqual(await runVelocitySync(f.adapter, options), { status: 'protected', restarted: false });
+  assert.deepEqual(f.calls, []); assert.deepEqual(f.files, f.initial); assert.deepEqual(f.reports, []);
+});
+test('guard check failure refuses all Velocity side effects; unguarded original behavior is retained', async () => {
+  const f = fixture(); f.adapter.isProtected = async () => { throw new Error('guard inaccessible'); };
+  await assert.rejects(runVelocitySync(f.adapter, { forceRestart: true }), /guard inaccessible/);
+  assert.deepEqual(f.calls, []);
+  f.adapter.isProtected = async () => false;
+  assert.equal((await runVelocitySync(f.adapter, { restartIfChanged: true })).restarted, true);
+});
+
+for (const [version, binary] of binaries) test(`actual guarded daemon startup and realtime never touch Java files or control ${version}`, async (t) => {
+  const fs = await import('node:fs/promises'), path = await import('node:path'), os = await import('node:os');
+  const { startOwned } = await import('./helpers/pocketbase.mjs');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'hololive-guard-daemon-'));
+  t.diagnostic('isolated daemon evidence: ' + directory);
+  await fs.mkdir(path.join(directory, 'backend'));
+  await fs.cp(new URL('../backend/scripts', import.meta.url), path.join(directory, 'backend/scripts'), { recursive: true });
+  await fs.writeFile(path.join(directory, 'package.json'), '{"type":"module"}');
+  await fs.symlink(path.resolve('node_modules'), path.join(directory, 'node_modules'));
+  await fs.writeFile(path.join(directory, 'backend/.velocity-maintenance'), 'isolated deployment guard');
+  const velocity = path.join(directory, 'velocity'); await fs.mkdir(velocity);
+  const originals = { 'velocity.toml': 'existing live configuration', 'velocity.jar': 'existing JAR', 'forwarding.secret': 'existing secret', '.velocity_jar_ref': 'existing marker' };
+  for (const [file, bytes] of Object.entries(originals)) await fs.writeFile(path.join(velocity, file), bytes);
+  const bin = path.join(directory, 'bin'); await fs.mkdir(bin);
+  const controls = path.join(directory, 'control.log');
+  await fs.writeFile(path.join(bin, 'systemctl'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CONTROL_LOG"\nexit 99\n', { mode: 0o755 });
+  const f = await serviceFixture(binary); let daemon;
+  try {
+    daemon = await startOwned(process.execPath, [path.join(directory, 'backend/scripts/sync_velocity.js')], {
+      PB_URL: f.database.url, PB_EMAIL: f.service.email, PB_PASS: f.password, VELOCITY_DIR: velocity,
+      PATH: bin + path.delimiter + process.env.PATH, CONTROL_LOG: controls,
+    });
+    for (let i = 0; i < 100 && !daemon.output().includes('Watching for changes'); i++) {
+      if (daemon.child.exitCode !== null) throw new Error(daemon.output());
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.match(daemon.output(), /Watching for changes/);
+    const settingsResponse = await f.database.request('/api/collections/velocity_settings/records', { token: f.database.token });
+    assert.equal(settingsResponse.status, 200);
+    const settings = settingsResponse.data.items[0];
+    await f.database.request('/api/collections/velocity_settings/records/' + settings.id, { token: f.database.token, method: 'PATCH', body: { forwarding_secret: 'different database secret', motd: 'migration-like configuration difference', restart_trigger: new Date().toISOString() } });
+    for (let i = 0; i < 100 && !daemon.output().includes('Config change detected'); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.match(daemon.output(), /Config change detected/);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    for (const [file, bytes] of Object.entries(originals)) assert.equal(await fs.readFile(path.join(velocity, file), 'utf8'), bytes);
+    assert.deepEqual((await fs.readdir(velocity)).sort(), Object.keys(originals).sort());
+    await assert.rejects(fs.access(controls), error => error.code === 'ENOENT');
+  } finally { if (daemon) await daemon.close(); await f.close(); }
+});

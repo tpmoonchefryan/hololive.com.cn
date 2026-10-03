@@ -2,143 +2,76 @@ name: Deploy to Production
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hololive-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: self-hosted
+    environment: production
+    timeout-minutes: 30
+    env:
+      DEPLOY_REVISION: ${{ github.sha }}
+      # External inventoried, approved root-owned config. No guessed host paths.
+      DEPLOY_CONFIG: ${{ vars.DEPLOY_CONFIG }}
     steps:
-      - name: Checkout code
+      - name: Checkout exact revision
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      # Optimization: Use system installed Node.js to avoid slow downloads
-      - name: Check Node.js Version
-        run: node -v && npm -v
+      - name: Refuse stale or unconfigured deployment
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_CONFIG"
+          test -f "$DEPLOY_CONFIG"
+          test "$(git rev-parse HEAD)" = "$DEPLOY_REVISION"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$DEPLOY_REVISION"
+          node --version
+          npm --version
 
-      - name: Check PocketBase Migrations Governance
-        run: npm run check:migrations
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --registry=https://registry.npmjs.org
+
+      - name: Verify candidate
         env:
           MIGRATION_CHECK_BASE_SHA: ${{ github.event.before }}
           MIGRATION_CHECK_HEAD_SHA: ${{ github.sha }}
-
-      - name: Install Dependencies (with retry)
         run: |
-          set -e
-          npm config set registry https://registry.npmmirror.com
-          npm config set fetch-retries 5
-          npm config set fetch-retry-mintimeout 10000
-          npm config set fetch-retry-maxtimeout 120000
+          set -euo pipefail
+          npm run check:migrations
+          npm run lint
+          npm run audit:prod
+          node --test tests/deployment.test.mjs
+          npm run build
+          npm run check:bundle
+        # Network audit failures stop the deployment. They cannot prove safety.
 
-          for i in 1 2 3; do
-            echo "npm ci attempt ${i}/3"
-            if npm ci; then
-              exit 0
-            fi
-
-            if [ "$i" -lt 3 ]; then
-              echo "npm ci failed, retrying in 10s..."
-              sleep 10
-            fi
-          done
-
-          echo "npm ci failed after 3 attempts"
-          exit 1
-
-      - name: Lint (Zero Warning)
-        run: npm run lint
-
-      - name: Security Audit (Prod Deps, network-resilient)
+      - name: Prepare complete locked artifact
         run: |
-          set +e
+          set -euo pipefail
+          bundle="$(mktemp -d "$RUNNER_TEMP/hololive-release.XXXXXX")"
+          cp package.json package-lock.json "$bundle/"
+          npm ci --prefix "$bundle" --omit=dev --ignore-scripts --registry=https://registry.npmjs.org
+          cp -a dist "$bundle/"
+          mkdir "$bundle/backend"
+          cp -a backend/pb_migrations backend/pb_hooks backend/scripts "$bundle/backend/"
+          node scripts/deployment.mjs bundle "$bundle" "$DEPLOY_REVISION"
+          printf 'DEPLOY_BUNDLE=%s\n' "$bundle" >> "$GITHUB_ENV"
 
-          for i in 1 2 3; do
-            echo "npm audit attempt ${i}/3"
-            output="$(npm run audit:prod 2>&1)"
-            status=$?
-            echo "$output"
+      - name: Verify finite action plan
+        run: node scripts/deployment.mjs plan "$DEPLOY_BUNDLE" "$DEPLOY_CONFIG" "$GITHUB_RUN_NUMBER"
 
-            if [ "$status" -eq 0 ]; then
-              exit 0
-            fi
-
-            if echo "$output" | grep -Eqi "ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED|TLS|socket hang up|audit endpoint returned an error|getaddrinfo|Failed to connect"; then
-              if [ "$i" -lt 3 ]; then
-                echo "Network-related audit failure, retrying in 10s..."
-                sleep 10
-                continue
-              fi
-
-              echo "::warning::Security audit skipped due repeated network errors after 3 attempts."
-              exit 0
-            fi
-
-            echo "::error::Security audit failed due non-network issue."
-            exit "$status"
-          done
-
-      - name: Build Frontend
-        run: npm run build
-        env:
-          VITE_POCKETBASE_URL: "https://hololive.com.cn"
-
-      - name: Check Bundle Budget
-        run: npm run check:bundle
-
-      - name: Deploy to Web Root
-        run: |
-          # The runner is already ON the server.
-          # We just need to copy the build artifacts to the web root.
-          
-          echo "Deploying to /var/www/hololive.com.cn..."
-          
-          # Copy Frontend Build
-          # Assuming /var/www/hololive.com.cn is the target web root
-          # Note: 'rsync' is safer than 'cp' for syncing directories
-          rsync -av --delete dist/ /var/www/hololive.com.cn/dist/
-          
-          # Copy Backend Migrations
-          rsync -av backend/pb_migrations/ /var/www/hololive.com.cn/backend/pb_migrations/
-
-          # Copy Backend Scripts (e.g. Sync Velocity)
-          rsync -av backend/scripts/ /var/www/hololive.com.cn/backend/scripts/
-
-          # Ensure map-proxy service + nginx route are installed/updated
-          sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_map_proxy.sh
-          sudo /var/www/hololive.com.cn/backend/scripts/setup_map_proxy.sh
-
-          # Ensure mcsm-proxy service + nginx route are installed/updated
-          sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
-          sudo /var/www/hololive.com.cn/backend/scripts/setup_mcsm_proxy.sh
-
-          # Ensure pb-admin-gate service + nginx route are installed/updated
-          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh ]; then
-            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh
-            sudo /var/www/hololive.com.cn/backend/scripts/setup_pb_admin_gate.sh
-          fi
-
-          # Ensure ai-translate-proxy service + nginx route are installed/updated
-          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh ]; then
-            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh
-            sudo /var/www/hololive.com.cn/backend/scripts/setup_ai_translate_proxy.sh
-          fi
-
-          # Ensure Microsoft OAuth client secret expiry monitor is installed/updated
-          if [ -f /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh ]; then
-            sudo chmod +x /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh
-            sudo /var/www/hololive.com.cn/backend/scripts/setup_ms_oauth_secret_check.sh
-          fi
-
-          # Restart PocketBase and Velocity Sync Service
-          # Note: The runner user must have permission to run this (e.g. root or sudo w/o password)
-          sudo systemctl restart pocketbase
-          sudo systemctl restart velocity-sync
-          sudo systemctl restart map-proxy
-          sudo systemctl restart mcsm-proxy
-          sudo systemctl restart pb-admin-gate
-          sudo systemctl restart ai-translate-proxy
-          
-          echo "Deployment successful."
+      - name: Deploy approved revision
+        run: ./deploy.sh apply "$DEPLOY_BUNDLE" "$DEPLOY_CONFIG" "$GITHUB_RUN_NUMBER"
+        # Never invokes setup_*, package-manager host changes, nginx rewrites,
+        # accounts, or Java Velocity. Private backup/contract evidence stays on host.

@@ -3,6 +3,9 @@ import { prepareVelocityConfig } from "./velocity-config.js";
 
 /** One transaction with explicit adapters for safe isolated tests. */
 export async function runVelocitySync(adapter, { restartIfChanged = false, forceRestart = false } = {}) {
+  // Check before any read, snapshot, JAR fetch, file write or restart.
+  // The persistent deployment guard survives daemon startup and realtime events.
+  if (await adapter.isProtected?.()) return { status: "protected", restarted: false };
   let stage = "read";
   let snapshot;
   try {
