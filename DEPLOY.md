@@ -4,9 +4,9 @@
 
 ## 产物与目标契约
 
-每个 bundle 包含 `dist`、`backend/pb_migrations`、`backend/pb_hooks`、`backend/scripts`、根 `package.json` / `package-lock.json` 和由该 lock 通过 `npm ci --omit=dev --ignore-scripts` 安装的 `node_modules`。`release.json` 绑定 SHA、完整路径、文件摘要及内部相对符号链接，校验缺 hooks、运行依赖、版本漂移、篡改或外部链接。构建和部署安装均验证清单；删除只限上述应用产物。`backend/pb_data`（包括媒体）、`.env`、PB 二进制和其他目录保留。运行依赖随应用备份、更新和恢复，不能靠 runner 工作目录碰巧提供。
+每个 bundle 包含 `dist`、`backend/pb_migrations`、`backend/pb_hooks`、`backend/scripts`、根 `package.json` / `package-lock.json` 和由该 lock 通过 `npm ci --omit=dev --ignore-scripts` 安装的 `node_modules`。`release.json` 绑定 SHA、完整路径、文件摘要及内部相对符号链接，校验缺 hooks、运行依赖、版本漂移、篡改或外部链接。构建和部署安装均验证清单；删除只限上述应用产物。已有生产迁移必须全部存在于获准 bundle 且字节完全相同；未知、缺失或修改的历史迁移在任何服务停止和写入前拒绝，不删除它们。`backend/pb_data`（包括媒体）、`.env`、PB 二进制和其他目录保留。运行依赖随应用备份、更新和恢复，不能靠 runner 工作目录碰巧提供。
 
-生产具体值来自主机上独立批准、root 所有且其他用户不可写的 JSON 配置文件。GitHub `production` environment 的 `DEPLOY_CONFIG` variable 只指向该文件；配置缺失、候选未批准、库存未验证时 job 失败。不要把个人 SSH 私钥复制到 GitHub。已有 runner 承担执行；仓库代码不会安装/注册 runner、改 GitHub secret 或赋予权限。
+生产具体值来自主机上独立批准、root 所有且其他用户不可写的 JSON 配置文件。GitHub 仓库的 `DEPLOY_CONFIG` variable 只指向该文件；配置缺失、候选未批准、库存未验证时 job 失败。不要把个人 SSH 私钥复制到 GitHub。已有 runner 承担执行；仓库代码不会安装/注册 runner、改 GitHub secret 或赋予权限。
 
 配置必需字段：
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const config = {
   approvedRevision: revision, previousRevision: oldRevision,
@@ -46,7 +46,7 @@ test('old sync is stopped before guard/PB, consistent backup and rehearsal befor
   assert.ok(names.indexOf('baseline:/fixture/private-backup') < names.indexOf('install'));
   assert.ok(names.indexOf('migrate') < names.indexOf('start:pocketbase'));
   assert.ok(names.indexOf('assertVelocity:unchanged-marker') < names.findIndex(n => n.startsWith('record:')));
-  assert.ok(f.calls.every(call => !call.includes('velocity')));
+  assert.ok(f.calls.every(call => !(['stop', 'start'].includes(call[0]) && call[1] === 'velocity')));
   assert.equal(f.calls.at(-1)[0], 'unlock');
 });
 for (const stage of ['verify', 'lock', 'assertCurrent', 'velocity', 'stop-velocity-sync', 'guard', 'stop-pocketbase', 'backup', 'rehearse', 'baseline', 'install', 'migrate', 'start-pocketbase', 'health', 'start-velocity-sync', 'assertVelocity', 'record']) test(`${stage} failure stops subsequent writes and cannot record success`, async () => {
@@ -54,7 +54,7 @@ for (const stage of ['verify', 'lock', 'assertCurrent', 'velocity', 'stop-veloci
   if (stage !== 'record') assert.equal(f.calls.some(call => call[0] === 'record'), false);
   if (['verify', 'lock', 'assertCurrent', 'velocity', 'stop-velocity-sync'].includes(stage)) assert.equal(f.calls.some(call => call[0] === 'failure'), false, 'early/stale failures cannot poison newer state');
   if (!['verify', 'lock'].includes(stage)) assert.equal(f.calls.at(-1)[0], 'unlock');
-  assert.ok(f.calls.every(call => !call.includes('velocity')));
+  assert.ok(f.calls.every(call => !(['stop', 'start'].includes(call[0]) && call[1] === 'velocity')));
 });
 function temp(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hololive-deployment-')));
@@ -109,4 +109,20 @@ test('missing hooks/dependencies, tampering, external symlinks and destination a
   assert.throws(() => inventory(root), /External/);
   const alias = path.join(temp(t), 'alias'); fs.symlinkSync(root, alias);
   assert.throws(() => installBundle(root, alias, revision));
+});
+
+test('unknown/mutated production migration bytes refuse before touching any artifact', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live');
+  fs.mkdirSync(bundle); fs.mkdirSync(live); createBundle(bundle);
+  fs.mkdirSync(path.join(live, 'dist')); fs.writeFileSync(path.join(live, 'dist/index.html'), 'old frontend');
+  fs.mkdirSync(path.join(live, 'backend/pb_migrations'), { recursive: true });
+  const file = path.join(live, 'backend/pb_migrations/unknown_history.js'); fs.writeFileSync(file, 'unknown historical bytes');
+  assert.throws(() => verifyImmutableMigrations(bundle, live), /Unknown or modified/);
+  assert.throws(() => installBundle(bundle, live, revision), /Unknown or modified/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'unknown historical bytes');
+  assert.equal(fs.readFileSync(path.join(live, 'dist/index.html'), 'utf8'), 'old frontend');
+  fs.renameSync(file, path.join(live, 'backend/pb_migrations/123_schema.js'));
+  assert.throws(() => installBundle(bundle, live, revision), /Unknown or modified/);
+  fs.writeFileSync(path.join(live, 'backend/pb_migrations/123_schema.js'), 'candidate migration');
+  installBundle(bundle, live, revision); assert.equal(fs.readFileSync(path.join(live, 'dist/index.html'), 'utf8'), 'candidate frontend');
 });

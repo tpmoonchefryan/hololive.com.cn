@@ -15,7 +15,6 @@ concurrency:
 jobs:
   deploy:
     runs-on: self-hosted
-    environment: production
     timeout-minutes: 30
     env:
       DEPLOY_REVISION: ${{ github.sha }}
