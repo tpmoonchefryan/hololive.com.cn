@@ -17,8 +17,9 @@
 | `machineIdSha256`, `runnerUser` | 实测主机身份摘要、runner 服务用户 |
 | `webRoot`, `backupRoot`, `stateRoot`, `velocityRoot` | 已核定的绝对真实目录；互不嵌套，无符号链接 |
 | `pocketbaseVersion` | 主机二进制实测，仅支持已隔离验证的 0.26.5 / 0.34.2；维护不下载或升级 PB |
-| `websiteServices`, `serviceBindings` | 实测网站服务列表和 `systemctl show` 的 ExecStart/WorkingDirectory/User/Requires/BindsTo/PartOf 原样有限绑定；允许 pocketbase、velocity-sync 及现有四个网站代理 |
-| `nginxSiteFile`, `configurationFiles` | 已核定 sites-available 文件、上述网站 unit/env 文件和根/backend `.env` 的明确名单；只备份，维护不覆写配置 |
+| `websiteServices`, `serviceBindings` | 实测网站服务列表和 `systemctl show` 的 ExecStart/WorkingDirectory/User/Requires/BindsTo/PartOf 原样有限绑定；工作目录必须对应同一 webRoot；允许 pocketbase、velocity-sync 及现有四个网站代理 |
+| `nginxSiteFile`, `configurationFiles` | 已核定 sites-available 文件、上述网站 unit/env 文件和根/backend `.env` 的明确名单；必须包含全部网站 unit 和该 nginx 文件，另列实际 env；只备份，维护不覆写配置 |
+| `velocityServiceBinding` | Java 服务 Requires/BindsTo/PartOf 实测反向依赖；漂移拒绝 |
 | `protectedVelocityFiles`, `velocityPorts` | 实测 Java 配置、JAR、secret、marker 及监听端口 |
 | `pocketbaseHealthUrl` | 已核定 loopback 健康端点 |
 | `baselineReviewed`, `serviceIdentityReviewed`, `restoreRehearsalRequired` | 前基线/实际服务身份和一致恢复条件已明确核实；字段不是机器自动制造的审批 |
@@ -46,7 +47,7 @@
 node scripts/deployment.mjs restore-isolated APPROVED_PRIVATE_BACKUP NEW_ISOLATED_DIRECTORY
 ```
 
-该入口只接受新目录，校验备份白名单和全部文件摘要，恢复同一备份中的旧应用、锁定依赖与完整 DB/WAL/媒体；缺项以 backup manifest 原样记录。原备份保留。配置摘要和数据库完整性由部署的隔离 rehearsal 另行核对。
+该入口只接受新目录，校验备份白名单和全部文件摘要和原权限，恢复同一备份中的旧应用、锁定依赖与完整 DB/WAL/媒体；缺项以 backup manifest 原样记录。原备份保留。配置摘要和数据库完整性由部署的隔离 rehearsal 另行核对。
 
 真实恢复须先批准具体备份、目标、候选和服务动作。先停止 sync/PB，保留失败版本与其数据，再恢复同一快照的应用和完整数据及需要恢复的明确配置。不得单独倒退应用或数据库、删除迁移历史或放宽安全授权；若备份早于安全修复，先在隔离恢复副本落实既定授权迁移并核实真实人类/服务身份，再裁定可恢复的安全版本。旧 daemon 不理解保护标记，恢复旧代码时 `velocity-sync` 必须保持停止；不得启动旧 daemon 后碰运气观察 Java。恢复前、中、后分别保存 Java 启动/文件/监听/代理证据。缺少安全前提时该恢复动作未就绪，不启动它。
 

@@ -69,7 +69,14 @@ export function validatePlan(config, revision, runNumber) {
   const configurationWhitelist = [path.join(config.webRoot, 'backend/.env'), path.join(config.webRoot, '.env'), ...units.map(unit => '/etc/systemd/system/' + unit + '.service'), ...units.map(unit => '/etc/default/' + unit), config.nginxSiteFile];
   check(typeof config.nginxSiteFile === 'string' && config.nginxSiteFile.startsWith('/etc/nginx/sites-available/') && !config.nginxSiteFile.split('/').includes('..'), 'Missing inventoried nginx config');
   check(Array.isArray(config.configurationFiles) && config.configurationFiles.length > 0 && config.configurationFiles.every(file => typeof file === 'string' && path.isAbsolute(file) && configurationWhitelist.includes(file)), 'Missing limited configuration inventory');
-  check(config.serviceBindings && config.websiteServices.every(unit => typeof config.serviceBindings[unit] === 'string'), 'Missing actual service command/working directory bindings');
+check(config.serviceBindings && config.websiteServices.every(unit => typeof config.serviceBindings[unit] === 'string'), 'Missing actual service command/working directory bindings');
+  for (const unit of config.websiteServices) {
+    const directory = path.join(config.webRoot, unit === 'pocketbase' ? 'backend' : 'backend/scripts');
+    check(config.serviceBindings[unit].split('\n').includes('WorkingDirectory=' + directory), 'Service working directory does not match target');
+    check(config.configurationFiles.includes('/etc/systemd/system/' + unit + '.service'), 'Missing service config backup');
+  }
+  check(config.configurationFiles.includes(config.nginxSiteFile), 'Missing nginx configuration backup');
+  check(typeof config.velocityServiceBinding === 'string', 'Missing Java reverse service dependency binding');
   check(config.velocityPorts?.length > 0 && config.velocityPorts.every(port => Number.isInteger(port) && port >= 1 && port <= 65535), 'Missing actual Velocity listener bindings');
   check(/^[a-f0-9]{40}$/.test(config.previousRevision ?? ''), 'Missing actual previous revision');
   check(config.protectedVelocityFiles?.length >= 3 && config.protectedVelocityFiles.every(safeRelative), 'Missing Velocity file inventory');
@@ -125,7 +132,14 @@ function copyPaths(from, to, names) {
     const src = path.join(from, name), dst = path.join(to, name);
     check(fs.existsSync(src), 'Missing backup/artifact: ' + name);
     fs.mkdirSync(path.dirname(dst), { recursive: true, mode: 0o700 });
-    fs.cpSync(src, dst, { recursive: true, preserveTimestamps: true, dereference: false, verbatimSymlinks: true });
+fs.cpSync(src, dst, { recursive: true, preserveTimestamps: true, dereference: false, verbatimSymlinks: true });
+    const preserveMode = (source, target) => {
+      const stat = fs.lstatSync(source);
+      if (stat.isSymbolicLink()) return;
+      fs.chmodSync(target, stat.mode & 0o777);
+      if (stat.isDirectory()) for (const entry of fs.readdirSync(source)) preserveMode(path.join(source, entry), path.join(target, entry));
+    };
+    preserveMode(src, dst);
   }
 }
 
@@ -133,7 +147,10 @@ export function verifyImmutableMigrations(bundle, webRoot) {
   const directory = path.join(webRoot, 'backend/pb_migrations');
   if (!fs.existsSync(directory)) return;
   const source = new Map(inventory(bundle, ['backend/pb_migrations']).map(record => [record.path, record]));
-  for (const record of inventory(webRoot, ['backend/pb_migrations'])) check(JSON.stringify(source.get(record.path)) === JSON.stringify(record), 'Unknown or modified production migration: ' + record.path);
+for (const record of inventory(webRoot, ['backend/pb_migrations'])) {
+    const expected = source.get(record.path);
+    check(expected && expected.sha256 === record.sha256 && expected.directory === record.directory && expected.link === record.link, 'Unknown or modified production migration: ' + record.path);
+  }
 }
 
 export function installBundle(bundle, webRoot, revision) {
@@ -189,7 +206,8 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       for (const relative of artifactPaths) { const dest = path.join(config.webRoot, relative); if (fs.existsSync(dest)) assertRealPath(dest); }
       assertRealPath(path.join(config.webRoot, 'backend/pb_data'));
       check(sha(fs.readFileSync('/etc/machine-id')) === config.machineIdSha256 && os.userInfo().username === config.runnerUser, 'Wrong physical host or runner user');
-      check(command(pb, ['--version']).includes(config.pocketbaseVersion), 'Wrong PocketBase version');
+      check(command(pb, ['--version']) === 'pocketbase version ' + config.pocketbaseVersion, 'Wrong PocketBase version');
+      check(command('systemctl', ['show', 'velocity', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf']) === config.velocityServiceBinding, 'Java reverse service dependency drift');
       for (const unit of config.websiteServices) {
         check(command('systemctl', ['is-active', unit]) === 'active', 'Required service not active: ' + unit);
         check(command('systemctl', ['show', unit, '-p', 'ExecStart', '-p', 'WorkingDirectory', '-p', 'User', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf']) === config.serviceBindings[unit], 'Service binding drift: ' + unit);

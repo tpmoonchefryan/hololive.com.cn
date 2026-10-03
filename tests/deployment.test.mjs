@@ -10,8 +10,9 @@ const config = {
   webRoot: '/fixture/site', backupRoot: '/fixture/backup', stateRoot: '/fixture/state', velocityRoot: '/fixture/velocity',
   pocketbaseVersion: '0.26.5', machineIdSha256: 'c'.repeat(64), runnerUser: 'fixture',
   websiteServices: ['pocketbase', 'velocity-sync', 'map-proxy'],
-  serviceBindings: { pocketbase: 'fixture', 'velocity-sync': 'fixture', 'map-proxy': 'fixture' },
-  nginxSiteFile: '/etc/nginx/sites-available/fixture', configurationFiles: ['/etc/systemd/system/pocketbase.service'],
+  serviceBindings: { pocketbase: 'WorkingDirectory=/fixture/site/backend', 'velocity-sync': 'WorkingDirectory=/fixture/site/backend/scripts', 'map-proxy': 'WorkingDirectory=/fixture/site/backend/scripts' },
+  velocityServiceBinding: 'Requires=fixture\nBindsTo=\nPartOf=',
+  nginxSiteFile: '/etc/nginx/sites-available/fixture', configurationFiles: ['/etc/systemd/system/pocketbase.service', '/etc/systemd/system/velocity-sync.service', '/etc/systemd/system/map-proxy.service', '/etc/nginx/sites-available/fixture'],
   protectedVelocityFiles: ['velocity.toml', 'velocity.jar', 'forwarding.secret'], velocityPorts: [25565],
   pocketbaseHealthUrl: 'http://127.0.0.1:8090/api/health', baselineReviewed: true, serviceIdentityReviewed: true, restoreRehearsalRequired: true,
 };
@@ -33,7 +34,7 @@ test('exact approval, host/paths/PB/services/config bindings are mandatory', () 
     { stateRoot: '/fixture/velocity/state' }, { websiteServices: ['pocketbase', 'velocity-sync', 'velocity'] },
     { pocketbaseVersion: '0.99.0' }, { machineIdSha256: null }, { serviceBindings: {} },
     { baselineReviewed: false }, { serviceIdentityReviewed: false }, { protectedVelocityFiles: ['../secret'] },
-    { configurationFiles: ['/etc/ssh/private-key'] }, { velocityPorts: [] }, { previousRevision: undefined },
+    { configurationFiles: ['/etc/ssh/private-key'] }, { configurationFiles: ['/etc/systemd/system/pocketbase.service'] }, { velocityServiceBinding: null }, { velocityPorts: [] }, { previousRevision: undefined },
   ]) assert.throws(() => validatePlan({ ...config, ...change }, revision, 1));
   assert.throws(() => validatePlan(config, revision, 0));
 });
@@ -71,6 +72,7 @@ function createBundle(root) {
   fs.writeFileSync(path.join(root, 'backend/pb_migrations/123_schema.js'), 'candidate migration');
   fs.writeFileSync(path.join(root, 'backend/pb_hooks/auth.pb.js'), 'candidate authorization');
   fs.writeFileSync(path.join(root, 'backend/scripts/sync_velocity.js'), 'candidate protected daemon');
+  fs.chmodSync(path.join(root, 'backend/pb_hooks/auth.pb.js'), 0o660);
   const packages = {};
   for (const name of ['@iarna/toml', 'pocketbase', 'eventsource']) {
     const directory = path.join(root, 'node_modules', name); fs.mkdirSync(directory, { recursive: true });
