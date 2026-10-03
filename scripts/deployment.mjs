@@ -30,7 +30,7 @@ export function inventory(root, names = artifactPaths) {
       check(fs.existsSync(resolved), 'Broken artifact symlink');
       records.push({ path: relative, link: target });
     } else if (stat.isDirectory()) {
-      records.push({ path: relative, directory: true });
+      records.push({ path: relative, directory: true, mode: stat.mode & 0o777 });
       for (const name of fs.readdirSync(file).sort()) walk(relative + '/' + name);
     } else {
       check(stat.isFile(), 'Special artifact file refused');
@@ -114,7 +114,11 @@ check(config.serviceBindings && config.websiteServices.every(unit => typeof conf
   check(config.configurationFiles.includes(config.nginxSiteFile), 'Missing nginx configuration backup');
   check(typeof config.velocityServiceBinding === 'string', 'Missing Java reverse service dependency binding');
   check(config.velocityPorts?.length > 0 && config.velocityPorts.every(port => Number.isInteger(port) && port >= 1 && port <= 65535), 'Missing actual Velocity listener bindings');
-  check(/^[a-f0-9]{40}$/.test(config.previousRevision ?? ''), 'Missing actual previous revision');
+  if (config.baseline?.kind === 'mixed') {
+    check(config.previousRevision === undefined && config.baseline.sourceRevision === null, 'Mixed baseline must not invent a revision');
+    check(/^[a-f0-9]{64}$/.test(config.baseline.snapshotId ?? ''), 'Missing immutable mixed snapshot binding');
+    check(Array.isArray(config.baseline.retainedHistory) && Array.isArray(config.baseline.sourceAbsentHistory), 'Missing mixed history binding');
+  } else check(/^[a-f0-9]{40}$/.test(config.previousRevision ?? ''), 'Missing actual previous revision');
   check(config.protectedVelocityFiles?.length >= 3 && config.protectedVelocityFiles.every(safeRelative), 'Missing Velocity file inventory');
   check(typeof config.pocketbaseHealthUrl === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/api\/health$/.test(config.pocketbaseHealthUrl), 'Missing loopback health binding');
   check(config.baselineReviewed === true && config.serviceIdentityReviewed === true && config.restoreRehearsalRequired === true, 'Missing baseline/service identity/recovery prerequisites');
@@ -210,9 +214,28 @@ function verifyInstallTargets(webRoot, configurationFiles = []) {
     if (stat) inspect(dest);
   }
 }
-function checkDatabases(directory) {
+export function checkDatabases(directory) {
   // Metadata only, never records/tokens. Run on a stopped snapshot, read-only.
-  const script = `import sqlite3,json,pathlib,sys\np=pathlib.Path(sys.argv[1])\nout={}\nfor f in sorted(p.glob('*.db')):\n c=sqlite3.connect(f.as_uri()+'?mode=ro',uri=True)\n q=c.execute('pragma quick_check').fetchall()\n assert q==[('ok',)],str(f)+' integrity failure'\n tables=[r[0] for r in c.execute("select name from sqlite_master where type='table' order by name")]\n out[f.name]={'integrity':'ok','tables':{t:{'count':c.execute('select count(*) from "'+t.replace('"','""')+'"').fetchone()[0],'fields':[r[1:3] for r in c.execute('pragma table_info("'+t.replace('"','""')+'")')]} for t in tables}}\n if '_migrations' in tables: out[f.name]['migrations']=list(c.execute('select * from _migrations'))\n if '_collections' in tables: out[f.name]['collectionContract']=list(c.execute('select * from _collections'))\n c.close()\nassert 'data.db' in out,'Missing data database'\nprint(json.dumps(out))`;
+  const script = `import sqlite3,json,pathlib,sys,tempfile,shutil
+source=pathlib.Path(sys.argv[1])
+out={}
+with tempfile.TemporaryDirectory(prefix='hololive-snapshot-read-') as temporary:
+ p=pathlib.Path(temporary)
+ for f in source.glob('*.db'):
+  shutil.copy2(f,p/f.name)
+  wal=pathlib.Path(str(f)+'-wal')
+  if wal.exists():shutil.copy2(wal,p/wal.name)
+ for f in sorted(p.glob('*.db')):
+  c=sqlite3.connect(str(f))
+  q=c.execute('pragma quick_check').fetchall()
+  assert q==[('ok',)],str(f)+' integrity failure'
+  tables=[r[0] for r in c.execute("select name from sqlite_master where type='table' order by name")]
+  out[f.name]={'integrity':'ok','tables':{t:{'count':c.execute('select count(*) from "'+t.replace('"','""')+'"').fetchone()[0],'fields':[r[1:3] for r in c.execute('pragma table_info("'+t.replace('"','""')+'")')]} for t in tables}}
+  if '_migrations' in tables:out[f.name]['migrations']=list(c.execute('select * from _migrations'))
+  if '_collections' in tables:out[f.name]['collectionContract']=list(c.execute('select * from _collections'))
+  c.close()
+assert 'data.db' in out,'Missing data database'
+print(json.dumps(out))`;
   return JSON.parse(command('python3', ['-c', script, path.resolve(directory)]));
 }
 function copyPaths(from, to, names) {
@@ -232,20 +255,26 @@ fs.cpSync(src, dst, { recursive: true, preserveTimestamps: true, dereference: fa
   }
 }
 
-export function verifyImmutableMigrations(bundle, webRoot) {
+export function verifyImmutableMigrations(bundle, webRoot, baseline) {
   const directory = path.join(webRoot, 'backend/pb_migrations');
   if (!fs.existsSync(directory)) return;
   const source = new Map(inventory(bundle, ['backend/pb_migrations']).map(record => [record.path, record]));
 for (const record of inventory(webRoot, ['backend/pb_migrations'])) {
     const expected = source.get(record.path);
-    check(expected && expected.sha256 === record.sha256 && expected.directory === record.directory && expected.link === record.link, 'Unknown or modified production migration: ' + record.path);
+    const retained = baseline?.kind === 'mixed' && baseline.retainedHistory?.find(item => item.path === record.path);
+    check((expected && expected.sha256 === record.sha256 && expected.directory === record.directory && expected.link === record.link) || (!expected && retained && retained.sha256 === record.sha256 && !record.link && !record.directory), 'Unknown or modified production migration: ' + record.path);
   }
 }
 
-export function installBundle(bundle, webRoot, revision) {
+export function installBundle(bundle, webRoot, revision, baseline, backup) {
   const manifest = verifyBundle(bundle, revision);
   assertRealPath(webRoot);
-  verifyImmutableMigrations(bundle, webRoot);
+  verifyImmutableMigrations(bundle, webRoot, baseline);
+  if (baseline?.kind === 'mixed') {
+    verifySnapshot(backup, baseline);
+    assertSnapshotTarget(backup, webRoot);
+  }
+  const retained = (baseline?.retainedHistory ?? []).map(item => ({ ...item, bytes: fs.readFileSync(path.join(webRoot, item.path)) }));
   verifyInstallTargets(webRoot);
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
@@ -253,16 +282,169 @@ export function installBundle(bundle, webRoot, revision) {
     fs.rmSync(dest, { recursive: true, force: true });
     copyPaths(bundle, webRoot, [name]);
   }
+  for (const item of retained) fs.writeFileSync(path.join(webRoot, item.path), item.bytes, { mode: item.mode });
   const installed = inventory(webRoot);
-  check(JSON.stringify(installed) === JSON.stringify(manifest.files), 'Installed artifact mismatch');
+  const candidateFiles = installed.filter(item => !retained.some(old => old.path === item.path));
+  check(JSON.stringify(candidateFiles) === JSON.stringify(manifest.files), 'Installed artifact mismatch');
+  for (const item of retained) check(sha(fs.readFileSync(path.join(webRoot, item.path))) === item.sha256, 'Retained history changed');
   verifyArtifactLinks(webRoot, installed);
 }
 
 export function snapshotApplication(webRoot, backup) {
-  const names = [...artifactPaths, 'backend/pb_data'];
+  const names = [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'];
   const present = names.filter(name => fs.existsSync(path.join(webRoot, name)));
   copyPaths(webRoot, path.join(backup, 'application'), present);
   return { present, missing: names.filter(name => !present.includes(name)), application: inventory(path.join(backup, 'application'), present) };
+}
+
+
+const retainedFile = 'backend/pb_migrations/1765100008_add_velocity_advanced.js';
+const retainedDigest = '85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c';
+const sourceAbsent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1770818775_updated_users.js'];
+export function snapshotIdentity(manifest) {
+  return sha(JSON.stringify({ revision: manifest.revision ?? null, present: manifest.present, missing: manifest.missing,
+    application: manifest.application, configuration: manifest.configuration, ownership: manifest.ownership,
+    contract: manifest.contract, retainedHistory: manifest.retainedHistory, sourceAbsentHistory: manifest.sourceAbsentHistory }));
+}
+export function verifySnapshot(backup, baseline) {
+  check(typeof backup === 'string' && path.isAbsolute(backup), 'Missing complete snapshot');
+  assertRealPath(backup);
+  const manifest = json(path.join(backup, 'backup.json'));
+  check(manifest.snapshotId === snapshotIdentity(manifest), 'Snapshot identity mismatch');
+  check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Snapshot bytes drift');
+  check([...artifactPaths, 'backend/pb_data', 'backend/pocketbase'].every(name => manifest.present.includes(name) !== manifest.missing.includes(name)) && manifest.present.every(name => [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'].includes(name)) && manifest.missing.every(name => [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'].includes(name)), 'Incomplete component/missing inventory');
+  check(manifest.present.includes('backend/pb_data') && manifest.present.includes('backend/pocketbase'), 'Incomplete DB/media/binary snapshot');
+  check(Array.isArray(manifest.configuration) && manifest.configuration.length > 0 && Array.isArray(manifest.ownership), 'Missing snapshot configuration');
+  const names = manifest.configuration.map(item => item.path);
+  check(names.every(safeRelative) && manifest.configuration.every(item => item.sha256 && !item.link && !item.directory), 'Invalid configuration manifest');
+  check(JSON.stringify(inventory(path.join(backup, 'configuration'), names)) === JSON.stringify(manifest.configuration), 'Configuration snapshot drift');
+  check(names.every(name => manifest.ownership.some(item => item.path === name && Number.isInteger(item.uid) && Number.isInteger(item.gid))), 'Missing configuration ownership metadata');
+  check(JSON.stringify(checkDatabases(path.join(backup, 'application/backend/pb_data'))) === JSON.stringify(manifest.contract), 'Snapshot contract drift');
+  if (baseline?.kind === 'mixed') {
+    check(manifest.revision === null && baseline.sourceRevision === null && baseline.snapshotId === manifest.snapshotId, 'Mixed snapshot binding mismatch');
+    check(JSON.stringify(baseline.retainedHistory) === JSON.stringify(manifest.retainedHistory) && JSON.stringify(baseline.sourceAbsentHistory) === JSON.stringify(manifest.sourceAbsentHistory), 'Mixed history binding mismatch');
+    const history = manifest.contract['data.db'].migrations.map(row => row[0]);
+    check(manifest.retainedHistory.length === 1 && manifest.retainedHistory[0].path === retainedFile && manifest.retainedHistory[0].sha256 === retainedDigest, 'Unknown retained historical bytes');
+    const item = manifest.application.find(item => item.path === retainedFile);
+    check(item?.sha256 === retainedDigest && item.mode === manifest.retainedHistory[0].mode, 'Retained snapshot bytes mismatch');
+    check(history.includes(path.basename(retainedFile)), 'Retained migration is not applied');
+    check(JSON.stringify(manifest.sourceAbsentHistory) === JSON.stringify(sourceAbsent) && sourceAbsent.every(file => history.includes(file) && !manifest.application.some(item => item.path === 'backend/pb_migrations/' + file)), 'Source-absent ledger mismatch');
+  }
+  return manifest;
+}
+function assertSnapshotTarget(backup, webRoot) {
+  const manifest = json(path.join(backup, 'backup.json'));
+  check(JSON.stringify(inventory(webRoot, manifest.present)) === JSON.stringify(manifest.application), 'Target changed since stopped snapshot');
+  for (const name of manifest.missing) check(!fs.existsSync(path.join(webRoot, name)), 'Previously missing target appeared');
+  for (const item of manifest.configuration) {
+    const file = '/' + item.path;
+    check(sha(fs.readFileSync(file)) === item.sha256 && (fs.statSync(file).mode & 0o777) === item.mode, 'Target configuration drift');
+  }
+}
+function verifyRecoverySecurity(directory, identities) {
+  check(Array.isArray(identities) && identities.length > 0 && identities.some(item => item.role === 'admin') && identities.some(item => item.role === 'service'), 'Missing approved recovery identities');
+  check(identities.every(item => typeof item.id === 'string' && /^[a-z0-9]{15}$/.test(item.id) && ['admin', 'service'].includes(item.role)), 'Invalid recovery identities');
+  // Read actual isolated SQLite schema/flags. No account creation or role grant.
+  const script = `import sqlite3,json,sys
+import tempfile,shutil,pathlib,contextlib,atexit
+stack=contextlib.ExitStack();atexit.register(stack.close)
+def observed(file):
+ target=pathlib.Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='hololive-recovery-read-')))/'data.db'
+ shutil.copy2(file,target)
+ wal=pathlib.Path(file+'-wal')
+ if wal.exists():shutil.copy2(wal,str(target)+'-wal')
+ return sqlite3.connect(str(target))
+c=observed(sys.argv[1])
+cols={r[1] for r in c.execute('pragma table_info(users)')}
+assert {'is_admin','service_account'}.issubset(cols),'Missing authorization flags'
+rows=c.execute('select createRule,updateRule,deleteRule from _collections where name="users"').fetchall()
+assert rows and rows[0]==(None,None,None),'Unsafe users write rules'
+admin='@request.auth.id != "" && @request.auth.is_admin = true && (@request.auth.verified = true || @request.auth.service_account = true)'
+for name in ['media','posts','announcements','whitelists','extra_whitelist','system_settings','cms_sections','server_maps','server_info_details','audit_logs','velocity_settings','velocity_servers','velocity_forced_hosts','mcsm_config','translation_config']:
+ row=c.execute('select createRule,updateRule,deleteRule,listRule,viewRule from _collections where name=?',(name,)).fetchone()
+ if row is None and name=='extra_whitelist':continue
+ assert row is not None,'Missing protected collection'
+ assert all(rule is None or rule==admin for rule in row[:3]),'Unsafe protected write rule'
+ public=['media','announcements','system_settings','cms_sections','server_maps','server_info_details']
+ read=('is_public = true || ('+admin+')') if name=='posts' else '' if name in public else admin
+ assert row[3]==read and row[4]==read,'Unsafe protected read rule'
+for item in json.loads(sys.argv[2]):
+ r=c.execute('select is_admin,service_account,verified from users where id=?',(item['id'],)).fetchone()
+ assert r and bool(r[0]) and ((bool(r[2]) and not bool(r[1])) if item['role']=='admin' else bool(r[1])),'Recovery identity role mismatch'
+print('verified')`;
+  check(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db'), JSON.stringify(identities)]) === 'verified', 'Recovery security failed');
+}
+function verifyDerivedData(rawDirectory, migratedDirectory, identities) {
+  const script = `import sqlite3,sys,json
+import tempfile,shutil,pathlib,contextlib,atexit
+stack=contextlib.ExitStack();atexit.register(stack.close)
+def observed(file):
+ target=pathlib.Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='hololive-recovery-read-')))/'data.db'
+ shutil.copy2(file,target)
+ wal=pathlib.Path(file+'-wal')
+ if wal.exists():shutil.copy2(wal,str(target)+'-wal')
+ return sqlite3.connect(str(target))
+old=observed(sys.argv[1])
+new=observed(sys.argv[2])
+approved={item['id'] for item in json.loads(sys.argv[3])}
+for (table,) in old.execute("select name from sqlite_master where type='table' and name not in ('_migrations','_collections','_params') and name not like 'sqlite_%'"):
+ quote=lambda x:'"'+x.replace('"','""')+'"'
+ before=[r[1] for r in old.execute('pragma table_info('+quote(table)+')')]
+ after=[r[1] for r in new.execute('pragma table_info('+quote(table)+')')]
+ allowed={'admin_entrance_key'} if table=='system_settings' else set()
+ assert all(field in after or field in allowed for field in before),'Unexplained removed column'
+ fields=[f for f in before if f in after and f!='updated' and not (table=='users' and f in ('is_admin','service_account'))]
+ sql='select '+','.join(map(quote,fields))+' from '+quote(table)
+ normalize=lambda rows:sorted(json.dumps(row,sort_keys=True) for row in rows)
+ original=list(old.execute(sql));derived=list(new.execute(sql))
+ if table=='users':
+  index=fields.index('id'); originalIds={row[index] for row in original}
+  assert all(row[index] in originalIds or row[index] in approved for row in derived),'Unapproved added identity'
+  derived=[row for row in derived if row[index] in originalIds]
+  for flag in ['is_admin','service_account']:
+   if flag in before:
+    q='select id,'+quote(flag)+' from users'
+    oldFlags=dict(old.execute(q));newFlags=dict(new.execute(q))
+    assert all(key in approved or value==newFlags.get(key) for key,value in oldFlags.items()),'Unapproved role change'
+ assert normalize(original)==normalize(derived),'Derived record/content mismatch: '+table
+print('verified')`;
+  check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? [])]) === 'verified', 'Derived source mismatch');
+  const names = ['backend/pb_data/storage'];
+  const raw = names.filter(name => fs.existsSync(path.join(rawDirectory, name)));
+  check(JSON.stringify(inventory(rawDirectory, raw)) === JSON.stringify(inventory(migratedDirectory, raw)), 'Derived media mismatch');
+}
+export function createSafeRecovery(backup, migrated, bundle, revision, identities) {
+  const raw = verifySnapshot(backup);
+  verifyBundle(bundle, revision);
+  verifyDerivedData(path.join(backup, 'application'), migrated, identities);
+  verifyRecoverySecurity(migrated, identities);
+  const safe = path.join(backup, 'safe-recovery');
+  check(!fs.existsSync(safe), 'Safe recovery destination exists');
+  // Candidate app and forward-migrated data, never the permissive raw app.
+  copyPaths(bundle, path.join(safe, 'application'), artifactPaths);
+  copyPaths(migrated, path.join(safe, 'application'), ['backend/pb_data']);
+  copyPaths(path.join(backup, 'application'), path.join(safe, 'application'), ['backend/pocketbase']);
+  for (const item of raw.retainedHistory ?? []) copyPaths(path.join(backup, 'application'), path.join(safe, 'application'), [item.path]);
+  copyPaths(path.join(backup, 'configuration'), path.join(safe, 'configuration'), raw.configuration.map(item => item.path));
+  const present = [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'];
+  const manifest = { revision, sourceSnapshotId: raw.snapshotId, present, missing: [], application: inventory(path.join(safe, 'application'), present),
+    configuration: raw.configuration, ownership: raw.ownership, contract: checkDatabases(path.join(safe, 'application/backend/pb_data')),
+    retainedHistory: raw.retainedHistory, sourceAbsentHistory: raw.sourceAbsentHistory, identities, candidateFiles: verifyBundle(bundle, revision).files };
+  manifest.snapshotId = snapshotIdentity(manifest);
+  manifest.recoveryId = sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: raw.snapshotId, identities, candidateFiles: manifest.candidateFiles }));
+  writeJSON(path.join(safe, 'backup.json'), manifest);
+  return safe;
+}
+export function restoreSafeRecovery(safe, destination, revision) {
+  const manifest = verifySnapshot(safe);
+  check(manifest.revision === revision && /^[a-f0-9]{40}$/.test(revision) && /^[a-f0-9]{64}$/.test(manifest.sourceSnapshotId ?? ''), 'Recovery app/data binding mismatch');
+  check(manifest.recoveryId === sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: manifest.sourceSnapshotId, identities: manifest.identities, candidateFiles: manifest.candidateFiles })), 'Recovery identity binding mismatch');
+  const app = manifest.application.filter(item => !item.path.startsWith('backend/pb_data') && item.path !== 'backend/pocketbase' && !(manifest.retainedHistory ?? []).some(old => old.path === item.path));
+  check(JSON.stringify(app) === JSON.stringify(manifest.candidateFiles), 'Recovery candidate mismatch');
+  verifyRecoverySecurity(path.join(safe, 'application'), manifest.identities);
+  const result = restoreBackup(safe, destination);
+  verifyRecoverySecurity(destination, manifest.identities);
+  return { ...result, recoveryId: manifest.recoveryId, sourceSnapshotId: manifest.sourceSnapshotId, oldDaemonStarted: false };
 }
 
 export function productionAdapter(bundle, config, revision, runNumber, configFile) {
@@ -296,7 +478,14 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   return {
     verify: () => {
       verifyBundle(bundle, revision);
-      verifyImmutableMigrations(bundle, config.webRoot);
+      verifyImmutableMigrations(bundle, config.webRoot, config.baseline);
+      if (config.baseline?.kind === 'mixed') {
+        verifySnapshot(config.baseline.snapshotDirectory, config.baseline);
+        assertSnapshotTarget(config.baseline.snapshotDirectory, config.webRoot);
+        const history = json(path.join(config.baseline.snapshotDirectory, 'backup.json')).contract['data.db'].migrations.map(row => row[0]);
+        const allowed = inventory(bundle, ['backend/pb_migrations']).filter(item => item.sha256).map(item => path.basename(item.path));
+        check(history.every(file => allowed.includes(file) || config.baseline.sourceAbsentHistory.includes(file) || config.baseline.retainedHistory.some(item => path.basename(item.path) === file) || !file.endsWith('.js')), 'Unknown applied historical migration');
+      }
       verifyInstallTargets(config.webRoot, config.configurationFiles);
       for (const endpoint of [state, guard, lock]) boundControl(endpoint);
       check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? '') && ['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'Missing actual Actions run/repository binding');
@@ -329,24 +518,35 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       fs.chmodSync(backupPath, 0o700);
       const snapshot = snapshotApplication(config.webRoot, backupPath);
       copyPaths('/', path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
-      writeJSON(path.join(backupPath, 'backup.json'), { revision: oldState?.revision ?? config.previousRevision, ...snapshot, configuration: inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1))) });
+      const contract = checkDatabases(path.join(backupPath, 'application/backend/pb_data'));
+      const configuration = inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
+      const ownership = config.configurationFiles.map(file => { const stat = fs.statSync(file); return { path: file.slice(1), uid: stat.uid, gid: stat.gid }; });
+      const value = { revision: config.baseline?.kind === 'mixed' ? null : oldState?.revision ?? config.previousRevision, ...snapshot, configuration, ownership, contract, retainedHistory: config.baseline?.retainedHistory ?? [], sourceAbsentHistory: config.baseline?.sourceAbsentHistory ?? [] };
+      value.snapshotId = snapshotIdentity(value);
+      writeJSON(path.join(backupPath, 'backup.json'), value);
+      if (config.baseline?.kind === 'mixed') verifySnapshot(backupPath, config.baseline);
       return backupPath;
     },
     rehearse: backup => {
       const manifest = json(path.join(backup, 'backup.json'));
+      if (manifest.snapshotId) verifySnapshot(backup, config.baseline);
       check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Backup digest mismatch');
       checkDatabases(path.join(backup, 'application/backend/pb_data'));
       const isolated = path.join(backup, 'rehearsal');
-      copyPaths(path.join(backup, 'application'), isolated, manifest.present);
+      restoreBackup(backup, isolated);
       check(JSON.stringify(inventory(isolated, manifest.present)) === JSON.stringify(manifest.application), 'Restore rehearsal differs from snapshot');
       checkDatabases(path.join(isolated, 'backend/pb_data'));
       const migrationLog = migrateCopy(isolated);
       check(!/Failed|Error:/i.test(migrationLog), 'Isolated migration failed');
       fs.writeFileSync(path.join(backup, 'isolated-migration.log'), migrationLog, { mode: 0o600 });
       writeJSON(path.join(backup, 'isolated-migrated-contract.json'), checkDatabases(path.join(isolated, 'backend/pb_data')));
+      // A migration rehearsal never promotes raw permissive data to safe recovery.
+      // The approved identities must already exist in the derived database.
+      const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities);
+      restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision);
     },
     baseline: backup => writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))),
-    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); installBundle(bundle, config.webRoot, revision); },
+    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); installBundle(bundle, config.webRoot, revision, config.baseline, backupPath); },
     migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); },
     start: unit => systemctl(unit === 'pocketbase' || unit === 'velocity-sync' ? 'start' : 'restart', unit),
     health: async () => {
@@ -364,7 +564,11 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       check(config.velocityPorts?.length > 0, 'Velocity port inventory missing');
       writeJSON(path.join(backupPath, 'velocity-continuity.json'), { before, after });
     },
-    record: value => writeControl(state, JSON.stringify({ ...value, runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n'),
+    record: value => {
+      boundControl(state);
+      const backupManifest = backupPath ? json(path.join(backupPath, 'backup.json')) : null;
+      writeControl(state, JSON.stringify({ ...value, baseline: backupManifest?.snapshotId ?? null, candidateManifest: verifyBundle(bundle, revision), retainedHistory: config.baseline?.retainedHistory ?? [], runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n');
+    },
     failure: value => writeControl(state, JSON.stringify({ ...value, runNumber, failedAt: new Date().toISOString() }) + '\n'),
   };
 }
@@ -373,9 +577,26 @@ export function restoreBackup(backup, destination) {
   // Always isolated; never silently restores a running production directory.
   check(!fs.existsSync(destination), 'Restore destination must be new');
   const manifest = json(path.join(backup, 'backup.json'));
-  check(manifest.present.every(name => [...artifactPaths, 'backend/pb_data'].includes(name)), 'Backup whitelist mismatch');
+  check(manifest.present.every(name => [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'].includes(name)), 'Backup whitelist mismatch');
   check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Corrupt backup');
+  if (manifest.snapshotId) verifySnapshot(backup);
+  if (manifest.configuration) {
+    check(JSON.stringify(inventory(path.join(backup, 'configuration'), manifest.configuration.filter(item => !item.directory && !item.link).map(item => item.path))) === JSON.stringify(manifest.configuration), 'Corrupt configuration backup');
+  }
   copyPaths(path.join(backup, 'application'), destination, manifest.present);
+  if (manifest.configuration) {
+    const names = manifest.configuration.map(item => item.path);
+    copyPaths(path.join(backup, 'configuration'), path.join(destination, 'isolated-configuration'), names);
+    check(JSON.stringify(inventory(path.join(destination, 'isolated-configuration'), names)) === JSON.stringify(manifest.configuration), 'Configuration restore verification failed');
+    for (const item of manifest.ownership ?? []) {
+      const file = path.join(destination, 'isolated-configuration', item.path);
+      let stat = fs.statSync(file);
+      if (stat.uid !== item.uid || stat.gid !== item.gid) fs.chownSync(file, item.uid, item.gid);
+      stat = fs.statSync(file);
+      check(stat.uid === item.uid && stat.gid === item.gid, 'Configuration ownership restore failed');
+    }
+    writeJSON(path.join(destination, 'configuration-ownership.json'), manifest.ownership ?? []);
+  }
   check(JSON.stringify(inventory(destination, manifest.present)) === JSON.stringify(manifest.application), 'Restore verification failed');
   return { restored: manifest.present, revision: manifest.revision };
 }

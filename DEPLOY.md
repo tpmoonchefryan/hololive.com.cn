@@ -82,3 +82,58 @@ PB 隔离测试通过 `PB_TEST_BINARY_026` / `PB_TEST_BINARY_034` 指向相应�
 产物的每个相对链接必须完整解析到发布清单内的文件或目录；包内部链接和 .bin 可用，引用保留的环境、数据、未交付文件、断链或外部路径被拒绝。发布产物不包含 .env 或 .env.*。安装前一次核对所有替换目标及父路径，再开始删除，避免后面的目标无效时先删除前面的产物。
 
 实际 WorkingDirectory、EnvironmentFile 和明确运行环境文件清单仍须从生产库存核实。当前实现选择在替换前拒绝目录内 .env/.env.* 或 configurationFiles 与产物的重叠，包含 backend/scripts/.env；其字节、权限与旧产物保持。该位置可记录在配置清单，但不能借此通过安装；需在原流程内裁定安全保留方案后才能上线，不迁移或覆写环境以绕过拒绝。根与 backend 的 .env 沿明确配置清单私有备份，应用恢复与配置恢复分别核对；拒绝不算部署成功。
+
+Mixed installed baselines and recovery
+-------------------------------------
+
+A candidate revision identifies candidate code. An old mixed host is identified
+by a stopped, immutable snapshot instead of an invented Git revision. The
+`baseline.kind = "mixed"` branch requires `sourceRevision: null`, an exact
+`snapshotId`, a private `snapshotDirectory`, and the exact retained and
+source-absent migration lists. `previousRevision` is omitted only in this
+separately bound branch. The full Git baseline branch remains available.
+
+A snapshot binds every application component and missing component, DB/WAL and
+media, the actual PocketBase binary, explicit unit/inline environment and nginx
+configuration, modes and configuration ownership metadata, and database
+schema/history/counts. A hash of these facts is its immutable ID. An online file
+inventory or `baselineReviewed` alone cannot satisfy this contract. Preflight,
+backup, rehearsal and installation all check the binding and refuse drift.
+A new stopped backup must match the approved immutable ID before installation.
+
+The only observed extra migration accepted by the mixed branch is
+`1765100008_add_velocity_advanced.js` with SHA256
+`85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c`.
+It must exist byte for byte and already be applied in the same snapshot. It
+remains a target history component, separate from candidate-owned artifacts;
+it is never executed from the candidate, rolled down, or imported as project
+source. The source-absent ledger observations
+`1770817921_updated_users.js`, `1770818121_updated_users.js`, and
+`1770818775_updated_users.js` are retained without generating source files or
+rewriting history. Their original provenance remains unknown. New unknown
+files/ledger entries or mismatched applied state refuse before service changes.
+Production use still requires explicit release authorization for this branch.
+
+The new forward migration reconciles the two observed text selection fields
+and adds three missing optional number fields before the existing runtime
+normalizer. Valid old values and record IDs are preserved; unknown types and
+invalid values reject the transaction. Missing numbers have PocketBase's zero
+(unconfigured) value, which is not evidence of actual Java configuration.
+The maintenance guard keeps synchronization paused until separately authorized.
+
+Raw snapshots can only be restored unchanged in a new isolated location.
+Configuration is restored under `isolated-configuration/` using its absolute
+path mapping, with modes and original ownership verified and ownership metadata retained separately;
+this command never writes live configuration. A distinct safe recovery set
+binds the original snapshot ID, forward migrated DB/media, candidate application
+manifest and revision, configuration, and preexisting approved identity records.
+It has its own recovery ID. Missing or mismatched role flags refuse; these tools
+never provision identities. The raw snapshot is not relabeled as safe. A failed
+safe rehearsal stops installation; website services may remain stopped and the
+old daemon must remain stopped. There is no automatic production restore.
+Neither local rehearsal nor an identity list proves real credentials, actual
+service authentication, Java/player continuity, or production authorization.
+
+An explicitly supplied private `recoveryWorkingCopy` can carry previously authorized identity provisioning inside the existing rehearsal step. Source records, relationships and media must match the raw snapshot; only roster-bound identity additions and role changes are allowed. The tool verifies these changes and never creates accounts or changes flags. Without such a verified copy or already valid roles, rehearsal fails. SQLite inspection uses private disposable DB/WAL copies so reading a stopped WAL-mode snapshot never creates sidecars in the immutable original.
+
+The governed local verification supplies `PB_RETAINED_HISTORY_FILE` pointing to the private exact historical byte evidence. That file is read as a retained-byte fixture and never executed or included in candidate source. Without the private input the exact-history adapter proof is skipped and its mixed-history result is not verifiable. Normal PB schema and safe-recovery tests still run. Text conversion saves existing records through PocketBase, so its normal `updated` timestamp may advance; content, IDs and relationships are preserved.

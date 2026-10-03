@@ -37,7 +37,7 @@ for (const [version, binary] of binaries) {
   });
   test(`representative applied-history upgrade preserves data ${version}`, async () => {
     // Synthetic old installed database: canonical migrations before the new upgrades.
-    const previous = names.filter(x => !x.startsWith('179000'));
+    const previous = names.filter(x => !x.startsWith('179000') && !x.startsWith('1789999999'));
     const pb = await pocketbase(binary, previous);
     try {
       const post = await pb.request('/api/collections/posts/records', { token: pb.token, method: 'POST', body: { title: { zh: 'preserved' }, content: { zh: '<p>preserved</p>' }, is_public: false } });
@@ -46,7 +46,7 @@ for (const [version, binary] of binaries) {
       const velocity = await pb.request('/api/collections/velocity_settings/records', { token: pb.token });
       assert.equal(velocity.data.items.length, 1);
       const original = velocity.data.items[0];
-      for (const name of names.filter(x => x.startsWith('179000'))) await copyFile(path.join(root, 'backend/pb_migrations', name), path.join(pb.migrations, name));
+      for (const name of names.filter(x => x.startsWith('179000') || x.startsWith('1789999999'))) await copyFile(path.join(root, 'backend/pb_migrations', name), path.join(pb.migrations, name));
       await pb.restart();
       await verify(pb);
       const saved = await pb.request('/api/collections/posts/records/' + post.data.id, { token: pb.token }); assert.deepEqual(saved.data.title, post.data.title);
@@ -54,6 +54,52 @@ for (const [version, binary] of binaries) {
       const savedVelocity = await pb.request('/api/collections/velocity_settings/records/' + original.id, { token: pb.token });
       for (const key of ['motd', 'forwarding_secret', 'bind_port']) assert.equal(savedVelocity.data[key], original[key]);
       const before = history(pb); assert.equal(pb.run(['migrate', 'up']).status, 0); assert.deepEqual(history(pb), before);
+    } finally { await pb.close(); }
+  });
+}
+
+// Reproduce observed schema with anonymous records, never a live data export.
+const reconcile = '1789999999_schema_velocity_reconcile_observed_legacy.js';
+const observed = `migrate((app) => {
+  const c = app.findCollectionByNameOrId('velocity_settings');
+  for (const name of ['player_info_forwarding_mode','ping_passthrough']) c.fields.removeByName(name);
+  app.save(c);
+  for (const name of ['player_info_forwarding_mode','ping_passthrough']) c.fields.add(new TextField({name}));
+  for (const name of ['compression_threshold','compression_level','login_ratelimit']) c.fields.removeByName(name);
+  app.save(c);
+}, () => {});`;
+for (const [version, binary] of binaries) {
+  for (const invalid of [false, 'selection', 'type', 'number']) test(`observed legacy reconciliation ${invalid || 'legal'} ${version}`, async () => {
+    const previous = names.filter(name => name < reconcile);
+    const setup = '1789999998_observed_fixture.js';
+    let source = observed;
+    if (invalid === 'type') source = source.replace("new TextField({name})", "name === 'player_info_forwarding_mode' ? new BoolField({name}) : new TextField({name})");
+    const pb = await pocketbase(binary, previous, { [setup]: source });
+    try {
+      const listing = await pb.request('/api/collections/velocity_settings/records', {token:pb.token});
+      const record = listing.data.items[0];
+      if (invalid !== 'type') {
+        const saved = await pb.request('/api/collections/velocity_settings/records/'+record.id, {token:pb.token,method:'PATCH',body:{player_info_forwarding_mode: invalid === 'selection' ? 'unknown-mode' : 'legacy',ping_passthrough:'ALL',connection_timeout: invalid === 'number' ? 700000 : 4321}});
+        assert.equal(saved.status,200,JSON.stringify(saved));
+      }
+      const beforeHistory = history(pb);
+      const before = await pb.request('/api/collections/velocity_settings/records/'+record.id,{token:pb.token});
+      for (const file of names.filter(name => name >= reconcile)) await copyFile(path.join(root,'backend/pb_migrations',file),path.join(pb.migrations,file));
+      const result = pb.run(['migrate','up']);
+      if (invalid) {
+        assert.match(result.stdout+result.stderr,/Unsupported legacy|Invalid legacy/);
+        assert.deepEqual(history(pb),beforeHistory,'failed migration must not append ledger');
+        const after = await pb.request('/api/collections/velocity_settings/records/'+record.id,{token:pb.token});
+        assert.deepEqual(after.data,before.data,'rejected transaction preserves record');
+      } else {
+        assert.equal(result.status,0,result.stdout+result.stderr); assert.doesNotMatch(result.stdout+result.stderr,/Failed|Error:/);
+        await pb.restart(); await verify(pb);
+        const after = await pb.request('/api/collections/velocity_settings/records/'+record.id,{token:pb.token});
+        for (const key of ['id','motd','forwarding_secret','bind_port','player_info_forwarding_mode','ping_passthrough','connection_timeout']) assert.deepEqual(after.data[key],before.data[key],key);
+        for (const key of ['compression_threshold','compression_level','login_ratelimit']) assert.equal(after.data[key],0,'missing value remains unconfigured');
+        assert.ok(history(pb).includes(setup));
+        const applied=history(pb);assert.equal(pb.run(['migrate','up']).status,0);assert.deepEqual(history(pb),applied);
+      }
     } finally { await pb.close(); }
   });
 }
