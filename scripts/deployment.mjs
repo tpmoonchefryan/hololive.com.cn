@@ -116,8 +116,11 @@ check(config.serviceBindings && config.websiteServices.every(unit => typeof conf
   check(config.velocityPorts?.length > 0 && config.velocityPorts.every(port => Number.isInteger(port) && port >= 1 && port <= 65535), 'Missing actual Velocity listener bindings');
   if (config.baseline?.kind === 'mixed') {
     check(config.previousRevision === undefined && config.baseline.sourceRevision === null, 'Mixed baseline must not invent a revision');
-    check(/^[a-f0-9]{64}$/.test(config.baseline.snapshotId ?? ''), 'Missing immutable mixed snapshot binding');
+    check(config.baseline.capture === undefined || config.baseline.capture === 'stopped-backup', 'Unknown mixed capture mode');
+    if (config.baseline.capture === 'stopped-backup') check(config.baseline.snapshotId === undefined && config.baseline.snapshotDirectory === undefined, 'First capture must not invent a snapshot');
+    else check(/^[a-f0-9]{64}$/.test(config.baseline.snapshotId ?? '') && typeof config.baseline.snapshotDirectory === 'string' && path.isAbsolute(config.baseline.snapshotDirectory), 'Missing immutable mixed snapshot binding');
     check(Array.isArray(config.baseline.retainedHistory) && Array.isArray(config.baseline.sourceAbsentHistory), 'Missing mixed history binding');
+    check(config.baseline.retainedHistory.length === 1 && config.baseline.retainedHistory[0].path === retainedFile && config.baseline.retainedHistory[0].sha256 === retainedDigest && Number.isInteger(config.baseline.retainedHistory[0].mode) && config.baseline.retainedHistory[0].mode >= 0 && config.baseline.retainedHistory[0].mode <= 0o777 && JSON.stringify(config.baseline.sourceAbsentHistory) === JSON.stringify(sourceAbsent), 'Unknown mixed history descriptor');
   } else check(/^[a-f0-9]{40}$/.test(config.previousRevision ?? ''), 'Missing actual previous revision');
   check(config.protectedVelocityFiles?.length >= 3 && config.protectedVelocityFiles.every(safeRelative), 'Missing Velocity file inventory');
   check(typeof config.pocketbaseHealthUrl === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/api\/health$/.test(config.pocketbaseHealthUrl), 'Missing loopback health binding');
@@ -238,6 +241,32 @@ assert 'data.db' in out,'Missing data database'
 print(json.dumps(out))`;
   return JSON.parse(command('python3', ['-c', script, path.resolve(directory)]));
 }
+// This is a bounded online metadata read, not a backup or data contract. SQLite
+// uses its ordinary read transaction so committed WAL rows remain visible.
+export function readMigrationLedger(directory) {
+  assertRealPath(directory);
+  assertRealPath(path.join(directory, 'data.db'));
+  const script = `import sqlite3,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]).resolve()/'data.db'
+c=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=3)
+c.execute('pragma query_only=ON')
+c.execute('begin')
+rows=list(c.execute('select * from _migrations'))
+print(json.dumps(rows))
+c.rollback()
+c.close()`;
+  return JSON.parse(command('python3', ['-c', script, path.resolve(directory)]));
+}
+function verifyMixedHistory(bundle, application, baseline, rows) {
+  check(baseline.retainedHistory.length === 1 && baseline.retainedHistory[0].path === retainedFile && baseline.retainedHistory[0].sha256 === retainedDigest && JSON.stringify(baseline.sourceAbsentHistory) === JSON.stringify(sourceAbsent), 'Unknown mixed history descriptor');
+  const retained = inventory(application, [retainedFile])[0];
+  check(retained.sha256 === retainedDigest && retained.mode === baseline.retainedHistory[0].mode, 'Retained snapshot bytes mismatch');
+  const history = rows.map(row => row[0]);
+  check(rows.some(row => row[0] === path.basename(retainedFile) && Number.isFinite(row[1]) && row[1] > 0), 'Retained migration is not applied');
+  check(sourceAbsent.every(file => rows.some(row => row[0] === file && Number.isFinite(row[1]) && row[1] > 0) && !fs.existsSync(path.join(application, 'backend/pb_migrations', file))), 'Source-absent ledger mismatch');
+  const allowed = inventory(bundle, ['backend/pb_migrations']).filter(item => item.sha256).map(item => path.basename(item.path));
+  check(history.every(file => allowed.includes(file) || sourceAbsent.includes(file) || file === path.basename(retainedFile) || !file.endsWith('.js')), 'Unknown applied historical migration');
+}
 function copyPaths(from, to, names) {
   for (const name of names) {
     check(safeRelative(name), 'Unsafe copy path');
@@ -304,7 +333,8 @@ const sourceAbsent = ['1770817921_updated_users.js', '1770818121_updated_users.j
 export function snapshotIdentity(manifest) {
   return sha(JSON.stringify({ revision: manifest.revision ?? null, present: manifest.present, missing: manifest.missing,
     application: manifest.application, configuration: manifest.configuration, ownership: manifest.ownership,
-    contract: manifest.contract, retainedHistory: manifest.retainedHistory, sourceAbsentHistory: manifest.sourceAbsentHistory }));
+    contract: manifest.contract, retainedHistory: manifest.retainedHistory, sourceAbsentHistory: manifest.sourceAbsentHistory,
+    ...(manifest.captureBinding ? { captureBinding: manifest.captureBinding } : {}) }));
 }
 export function verifySnapshot(backup, baseline) {
   check(typeof backup === 'string' && path.isAbsolute(backup), 'Missing complete snapshot');
@@ -321,14 +351,14 @@ export function verifySnapshot(backup, baseline) {
   check(names.every(name => manifest.ownership.some(item => item.path === name && Number.isInteger(item.uid) && Number.isInteger(item.gid))), 'Missing configuration ownership metadata');
   check(JSON.stringify(checkDatabases(path.join(backup, 'application/backend/pb_data'))) === JSON.stringify(manifest.contract), 'Snapshot contract drift');
   if (baseline?.kind === 'mixed') {
+    if (baseline.captureBinding) check(JSON.stringify(manifest.captureBinding) === JSON.stringify(baseline.captureBinding), 'Capture candidate/run binding mismatch');
     check(manifest.revision === null && baseline.sourceRevision === null && baseline.snapshotId === manifest.snapshotId, 'Mixed snapshot binding mismatch');
     check(JSON.stringify(baseline.retainedHistory) === JSON.stringify(manifest.retainedHistory) && JSON.stringify(baseline.sourceAbsentHistory) === JSON.stringify(manifest.sourceAbsentHistory), 'Mixed history binding mismatch');
-    const history = manifest.contract['data.db'].migrations.map(row => row[0]);
     check(manifest.retainedHistory.length === 1 && manifest.retainedHistory[0].path === retainedFile && manifest.retainedHistory[0].sha256 === retainedDigest, 'Unknown retained historical bytes');
     const item = manifest.application.find(item => item.path === retainedFile);
     check(item?.sha256 === retainedDigest && item.mode === manifest.retainedHistory[0].mode, 'Retained snapshot bytes mismatch');
-    check(history.includes(path.basename(retainedFile)), 'Retained migration is not applied');
-    check(JSON.stringify(manifest.sourceAbsentHistory) === JSON.stringify(sourceAbsent) && sourceAbsent.every(file => history.includes(file) && !manifest.application.some(item => item.path === 'backend/pb_migrations/' + file)), 'Source-absent ledger mismatch');
+    check(manifest.contract['data.db'].migrations.some(row => row[0] === path.basename(retainedFile) && Number.isFinite(row[1]) && row[1] > 0), 'Retained migration is not applied');
+    check(JSON.stringify(manifest.sourceAbsentHistory) === JSON.stringify(sourceAbsent) && sourceAbsent.every(file => manifest.contract['data.db'].migrations.some(row => row[0] === file && Number.isFinite(row[1]) && row[1] > 0) && !manifest.application.some(item => item.path === 'backend/pb_migrations/' + file)), 'Source-absent ledger mismatch');
   }
   return manifest;
 }
@@ -338,7 +368,8 @@ function assertSnapshotTarget(backup, webRoot) {
   for (const name of manifest.missing) check(!fs.existsSync(path.join(webRoot, name)), 'Previously missing target appeared');
   for (const item of manifest.configuration) {
     const file = '/' + item.path;
-    check(sha(fs.readFileSync(file)) === item.sha256 && (fs.statSync(file).mode & 0o777) === item.mode, 'Target configuration drift');
+    const stat = fs.statSync(file), owner = manifest.ownership.find(value => value.path === item.path);
+    check(sha(fs.readFileSync(file)) === item.sha256 && (stat.mode & 0o777) === item.mode && stat.uid === owner.uid && stat.gid === owner.gid, 'Target configuration drift');
   }
 }
 function verifyRecoverySecurity(directory, identities) {
@@ -510,7 +541,15 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const lock = path.join(config.stateRoot, 'deployment.lock');
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
   const pb = path.join(config.webRoot, 'backend/pocketbase');
-  let lockFd, backupPath, oldState;
+  let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger;
+  const firstCapture = config.baseline?.capture === 'stopped-backup';
+  const captureDescriptor = firstCapture ? JSON.stringify(config.baseline) : null;
+  const captureBinding = directory => ({ revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, snapshotDirectory: directory });
+  const assertCaptured = backup => {
+    if (firstCapture) check(backup === backupPath, 'Capture snapshot directory mismatch');
+    if (firstCapture) check(captured && config.approvedRevision === revision && config.repository === process.env.GITHUB_REPOSITORY && JSON.stringify(config.baseline) === captureDescriptor && JSON.stringify(effectiveBaseline.captureBinding) === JSON.stringify(captureBinding(backup)), 'Capture candidate/run binding mismatch');
+    return verifySnapshot(backup, effectiveBaseline);
+  };
   const controlParents = new Map([state, guard, lock].map(file => [path.dirname(file), fs.lstatSync(path.dirname(file))]));
   const boundControl = file => {
     const parent = path.dirname(file), expected = controlParents.get(parent), current = fs.lstatSync(parent);
@@ -556,11 +595,14 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       verifyBundle(bundle, revision);
       verifyImmutableMigrations(bundle, config.webRoot, config.baseline);
       if (config.baseline?.kind === 'mixed') {
-        verifySnapshot(config.baseline.snapshotDirectory, config.baseline);
-        assertSnapshotTarget(config.baseline.snapshotDirectory, config.webRoot);
-        const history = json(path.join(config.baseline.snapshotDirectory, 'backup.json')).contract['data.db'].migrations.map(row => row[0]);
-        const allowed = inventory(bundle, ['backend/pb_migrations']).filter(item => item.sha256).map(item => path.basename(item.path));
-        check(history.every(file => allowed.includes(file) || config.baseline.sourceAbsentHistory.includes(file) || config.baseline.retainedHistory.some(item => path.basename(item.path) === file) || !file.endsWith('.js')), 'Unknown applied historical migration');
+        if (firstCapture) {
+          onlineLedger = readMigrationLedger(path.join(config.webRoot, 'backend/pb_data'));
+          verifyMixedHistory(bundle, config.webRoot, config.baseline, onlineLedger);
+        } else {
+          const manifest = verifySnapshot(config.baseline.snapshotDirectory, config.baseline);
+          assertSnapshotTarget(config.baseline.snapshotDirectory, config.webRoot);
+          verifyMixedHistory(bundle, config.webRoot, config.baseline, manifest.contract['data.db'].migrations);
+        }
       }
       verifyInstallTargets(config.webRoot, config.configurationFiles);
       for (const endpoint of [state, guard, lock]) boundControl(endpoint);
@@ -590,6 +632,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     stop: systemctl.bind(null, 'stop'),
     guard: () => writeControl(guard, 'Website maintenance: explicit release of Velocity synchronization requires separate authorization.\n'),
     backup: () => {
+      if (firstCapture) check(!captured && onlineLedger && JSON.stringify(config.baseline) === captureDescriptor, 'First capture requires verified unchanged descriptor and one backup');
       backupPath = fs.mkdtempSync(path.join(config.backupRoot, `run-${runNumber}-`));
       fs.chmodSync(backupPath, 0o700);
       const snapshot = snapshotApplication(config.webRoot, backupPath);
@@ -598,14 +641,20 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       const configuration = inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
       const ownership = config.configurationFiles.map(file => { const stat = fs.statSync(file); return { path: file.slice(1), uid: stat.uid, gid: stat.gid }; });
       const value = { revision: config.baseline?.kind === 'mixed' ? null : oldState?.revision ?? config.previousRevision, ...snapshot, configuration, ownership, contract, retainedHistory: config.baseline?.retainedHistory ?? [], sourceAbsentHistory: config.baseline?.sourceAbsentHistory ?? [] };
+      if (firstCapture) {
+        verifyMixedHistory(bundle, path.join(backupPath, 'application'), config.baseline, contract['data.db'].migrations);
+        check(JSON.stringify(contract['data.db'].migrations) === JSON.stringify(onlineLedger), 'Applied history changed since preflight');
+        value.captureBinding = captureBinding(backupPath);
+      }
       value.snapshotId = snapshotIdentity(value);
       writeJSON(path.join(backupPath, 'backup.json'), value);
-      if (config.baseline?.kind === 'mixed') verifySnapshot(backupPath, config.baseline);
+      if (firstCapture) { effectiveBaseline = { ...config.baseline, snapshotId: value.snapshotId, snapshotDirectory: backupPath, captureBinding: value.captureBinding }; captured = true; }
+      if (config.baseline?.kind === 'mixed') assertCaptured(backupPath);
       return backupPath;
     },
     rehearse: backup => {
       const manifest = json(path.join(backup, 'backup.json'));
-      if (manifest.snapshotId) verifySnapshot(backup, config.baseline);
+      if (manifest.snapshotId) assertCaptured(backup);
       check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Backup digest mismatch');
       checkDatabases(path.join(backup, 'application/backend/pb_data'));
       const isolated = path.join(backup, 'rehearsal');
@@ -621,8 +670,8 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities, isolated);
       restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision);
     },
-    baseline: backup => writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))),
-    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); installBundle(bundle, config.webRoot, revision, config.baseline, backupPath); },
+    baseline: backup => { assertCaptured(backup); writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))); },
+    install: () => { verifyInstallTargets(config.webRoot, config.configurationFiles); assertCaptured(backupPath); installBundle(bundle, config.webRoot, revision, effectiveBaseline, backupPath); },
     migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); verifyRecoverySecurity(config.webRoot, config.recoveryIdentities); const expected = json(path.join(backupPath, 'expected-recovery-contract.json')); verifyRecoveryContract(config.webRoot, expected.expectedContract, json(path.join(backupPath, 'backup.json')).contract); },
     start: unit => systemctl(unit === 'pocketbase' || unit === 'velocity-sync' ? 'start' : 'restart', unit),
     health: async () => {
@@ -644,10 +693,10 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     },
     record: value => {
       boundControl(state);
-      const backupManifest = backupPath ? json(path.join(backupPath, 'backup.json')) : null;
+      const backupManifest = backupPath ? assertCaptured(backupPath) : null;
       writeControl(state, JSON.stringify({ ...value, baseline: backupManifest?.snapshotId ?? null, candidateManifest: verifyBundle(bundle, revision), retainedHistory: config.baseline?.retainedHistory ?? [], runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n');
     },
-    failure: value => writeControl(state, JSON.stringify({ ...value, runNumber, failedAt: new Date().toISOString() }) + '\n'),
+    failure: value => writeControl(state, JSON.stringify({ ...value, backup: backupPath ?? value.backup, runNumber, failedAt: new Date().toISOString() }) + '\n'),
   };
 }
 

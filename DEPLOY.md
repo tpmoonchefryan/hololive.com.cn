@@ -4,7 +4,7 @@
 
 ## 产物与目标契约
 
-每个 bundle 包含 `dist`、`backend/pb_migrations`、`backend/pb_hooks`、`backend/scripts`、根 `package.json` / `package-lock.json` 和由该 lock 通过 `npm ci --omit=dev --ignore-scripts` 安装的 `node_modules`。`release.json` 绑定 SHA、完整路径、文件摘要及内部相对符号链接，校验缺 hooks、运行依赖、版本漂移、篡改或外部链接。构建和部署安装均验证清单；删除只限上述应用产物。已有生产迁移必须全部存在于获准 bundle 且字节完全相同；未知、缺失或修改的历史迁移在任何服务停止和写入前拒绝，不删除它们。`backend/pb_data`（包括媒体）、`.env`、PB 二进制和其他目录保留。运行依赖随应用备份、更新和恢复，不能靠 runner 工作目录碰巧提供。
+每个 bundle 包含 `dist`、`backend/pb_migrations`、`backend/pb_hooks`、`backend/scripts`、根 `package.json` / `package-lock.json` 和由该 lock 通过 `npm ci --omit=dev --ignore-scripts` 安装的 `node_modules`。`release.json` 绑定 SHA、完整路径、文件摘要及内部相对符号链接，校验缺 hooks、运行依赖、版本漂移、篡改或外部链接。构建和部署安装均验证清单；删除只限上述应用产物。候选拥有的已有生产迁移必须存在于获准 bundle 且字节完全相同；下述 mixed 契约只容许精确保留的一条已应用历史及三条缺源 ledger 例外；未知、缺失或修改的历史迁移在任何服务停止和写入前拒绝，不删除它们。`backend/pb_data`（包括媒体）、`.env`、PB 二进制和其他目录保留。运行依赖随应用备份、更新和恢复，不能靠 runner 工作目录碰巧提供。
 
 生产具体值来自主机上独立批准、root 所有且其他用户不可写的 JSON 配置文件。GitHub 仓库的 `DEPLOY_CONFIG` variable 只指向该文件；配置缺失、候选未批准、库存未验证时 job 失败。不要把个人 SSH 私钥复制到 GitHub。已有 runner 承担执行；仓库代码不会安装/注册 runner、改 GitHub secret 或赋予权限。
 
@@ -13,6 +13,7 @@
 | 字段 | 来源与约束 |
 | --- | --- |
 | `approvedRevision`, `previousRevision` | 本次明确批准 SHA、实际部署前版本；不是旧 run 猜值 |
+| `baseline` | mixed 首次使用 `capture: "stopped-backup"`、`sourceRevision: null` 和精确历史名单，不填写 snapshot 字段或 previousRevision；预绑定 mixed 使用实际 snapshotId / snapshotDirectory；完整 Git 基线使用 previousRevision |
 | `repository` | 实测当前 Actions 仓库全名，与真实 run 环境匹配 |
 | `machineIdSha256`, `runnerUser` | 实测主机身份摘要、runner 服务用户 |
 | `webRoot`, `backupRoot`, `stateRoot`, `velocityRoot` | 已核定的绝对真实目录；互不嵌套，无符号链接 |
@@ -29,8 +30,8 @@
 ## 有限更新顺序
 
 1. 核对完整候选、root 配置、物理主机、用户、目录、服务绑定、PB 版本和实际 main，取得 Java 启动标记/PID/重启计数、文件摘要与监听基线。
-2. 停止旧 `velocity-sync`，等待其退出；写 `backend/.velocity-maintenance` 持久保护标记，再停止 PocketBase。停止 sync 本身不会停止 Java Velocity；维护路径从不调用 Java 服务。
-3. 在网站写入前备份旧应用及锁定依赖、完整 `pb_data`（DB/WAL/媒体）和明确配置文件。PB 已停止，使这些数据一致。备份私有目录权限 0700，摘要、集合契约、迁移历史、表字段/数量、日志留在私有目录，不上传 GitHub 或公开仓库。
+2. 停止旧 `velocity-sync`，等待其退出；写 `backend/.velocity-maintenance` 持久保护标记，再停止 PocketBase。维护路径从不调用 Java 服务。旧 daemon 在途异步配置/JAR/restart 动作能否安全停止须有实际依据；稳定 PID 或文件采样不能证明已排空，缺此依据不得开始生产维护。
+3. 在网站写入前备份旧应用及锁定依赖、完整 `pb_data`（DB/WAL/媒体）和明确配置文件。PB 已停止，使这些数据一致。首次 mixed 的完整基线在本步骤一次生成封存，绑定实际候选 SHA、runNumber/runId、仓库及私有快照目录；配置不被回写。停服前只用 WAL 可见的只读事务核对有限迁移元信息，不把它当作一致备份。备份私有目录权限 0700，摘要、集合契约、迁移历史、表字段/数量、日志留在私有目录，不上传 GitHub 或公开仓库。
 4. 复制备份到隔离目录，逐文件匹配摘要，数据库只读 `quick_check`，然后用同版本 PB 和本次 hooks/migrations 对隔离副本重放迁移。保留迁移前契约和隔离结果。任何失败停止生产写入。
 5. 仅替换清单中的应用产物，再核对摘要。对停止中的生产 PB 运行本次迁移；检查退出码及错误文本。启动 PB，确认真实 JSON 健康状态，再按库存启动受保护 sync、重启已存在的网站代理。Nginx、Java、unit/env 配置、操作系统和账号均不被改写。
 6. 比较 Java PID、启动单调时间、重启计数和文件摘要完全一致，并核对代理监听；记录此次 run/SHA、备份位置、有限动作和持久部署状态。运行及外部玩家代理观察仍须另存实际证据；一次 is-active 不证明连续性。
@@ -88,9 +89,11 @@ Mixed installed baselines and recovery
 
 A candidate revision identifies candidate code. An old mixed host is identified
 by a stopped, immutable snapshot instead of an invented Git revision. The
-`baseline.kind = "mixed"` branch requires `sourceRevision: null`, an exact
-`snapshotId`, a private `snapshotDirectory`, and the exact retained and
-source-absent migration lists. `previousRevision` is omitted only in this
+`baseline.kind = "mixed"` branch requires `sourceRevision: null` and the exact
+retained and source-absent migration lists. For a first maintenance, explicitly set
+`capture: "stopped-backup"` and omit `snapshotId` and `snapshotDirectory`. Existing
+pre-bound maintenance instead supplies its exact `snapshotId` and private
+`snapshotDirectory` without a capture mode. `previousRevision` is omitted only in this
 separately bound branch. The full Git baseline branch remains available.
 
 A snapshot binds every application component and missing component, DB/WAL and
@@ -99,7 +102,12 @@ configuration, modes and configuration ownership metadata, and database
 schema/history/counts. A hash of these facts is its immutable ID. An online file
 inventory or `baselineReviewed` alone cannot satisfy this contract. Preflight,
 backup, rehearsal and installation all check the binding and refuse drift.
-A new stopped backup must match the approved immutable ID before installation.
+A pre-bound stopped backup must match the approved immutable ID before installation.
+First capture seals that ID once in the existing backup step after sync, guard and
+PB stop. Rehearsal, baseline, installation and recording consume the same sealed
+snapshot and check its actual candidate/run/directory binding. Before installation,
+the target bytes, missing components, configuration and original ledger must still
+match. A changed descriptor or binding refuses; no reviewed flag creates a snapshot.
 
 The only observed extra migration accepted by the mixed branch is
 `1765100008_add_velocity_advanced.js` with SHA256
@@ -164,3 +172,9 @@ dependent services stay stopped. Actual provisioning and production actions stil
 require the existing separate authorization.
 
 安全恢复的原批准身份与角色随原快照、候选清单和实际迁移预期封存在安全集之外的 `expected-recovery-contract.json`。生成失败或再次尝试也不覆盖该许可；恢复逐人核对使用此原许可，缺失许可、名单增删、替换或角色变化均在目标写入前拒绝。安全集中的名单和重新计算的摘要不能授权身份。
+
+### 临时迁移超级用户与失败重试
+
+Owner 已允许必要的迁移专用临时超级用户通过 CLI 分别创建，迁移完成后移除。执行前绑定实际目标、有限名单、CLI 能力和维护窗口，确认新建标识不会覆盖既有账号；凭据仅留私有环境，不打印、提交或上传。结束后删除新建账号并核验账号和临时凭据无残留。该授权不创建长期 users、不授永久人类或服务角色，也不允许服务改用超管凭据。共用部署入口不自动创建账号。
+
+前置检查失败不产生快照、guard 或服务变更。停止后封存、恢复演练、身份许可或安装前漂移失败，保留实际私有快照、原独立许可、guard 和 failed 状态，不启动后续服务或旧 daemon。目标角色失败发生于 PB 启动前；目标认证失败时 PB 可能已经启动，后续服务仍不启动。未解决的失败、同一或更旧 run、并发锁均拒绝覆盖；重试不自动删状态、锁、guard、快照或许可，不新增自动恢复入口。只有已成功状态可接受真正较新的 run，其快照与旧证据分别保留。
