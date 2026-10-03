@@ -29,6 +29,10 @@ const config = {
 };
 test('configured commands stay exact while all five execution facts retain their phase', () => {
   const old = serviceFacts(fixtureService('/fixture/site/backend/scripts'));
+  const zero = serviceFacts(fixtureService('/fixture/site/backend/scripts').replaceAll('status=0', 'status=0/0').replaceAll('pid=200', 'pid=0'));
+  assert.equal(zero.runtime.ExecStart[0].status, '0/0');
+  assert.equal(zero.runtime.ExecStart[0].pid, '0');
+  assert.deepEqual(Object.keys(zero.runtime.ExecStart[0]), ['start_time','stop_time','pid','code','status']);
   for (const phase of ['stopped', 'new']) {
     const actual = serviceFacts(fixtureService('/fixture/site/backend/scripts', 'velocity-sync', phase));
     assert.deepEqual(actual.configuration, old.configuration);
@@ -137,6 +141,16 @@ test('actual manifest/install/consistent snapshot and isolated restore protect d
   assert.equal(fs.readFileSync(path.join(restored, 'backend/pb_data/storage/media.bin'), 'utf8'), 'matching media');
   assert.equal(fs.readFileSync(path.join(restored, 'dist/old.js'), 'utf8'), 'old asset');
   assert.throws(() => restoreBackup(backup, live), /must be new/);
+  const configurationRoot=path.join(backup,'configuration');fs.mkdirSync(configurationRoot);
+  fs.writeFileSync(path.join(configurationRoot,'fixture.env'),'fixture',{mode:0o600});
+  const originalManifest=JSON.parse(fs.readFileSync(path.join(backup,'backup.json')));
+  const configuration=inventory(configurationRoot,['fixture.env']);
+  for(const ownership of [[],[{path:'fixture.env',uid:0,gid:0},{path:'fixture.env',uid:0,gid:0}],[{path:'other.env',uid:0,gid:0}],[{path:'fixture.env',uid:-1,gid:0}],...(process.geteuid()===0?[]:[[{path:'fixture.env',uid:0,gid:0}]])]) {
+    fs.writeFileSync(path.join(backup,'backup.json'),JSON.stringify({...originalManifest,configuration,ownership}));
+    const refused=path.join(root,'owner-refused');
+    assert.throws(()=>restoreBackup(backup,refused),/ownership/);assert.equal(fs.existsSync(refused),false);
+  }
+  fs.writeFileSync(path.join(backup,'backup.json'),JSON.stringify(originalManifest));
   fs.writeFileSync(path.join(backup, 'application/backend/pb_data/data.db'), 'corruption');
   assert.throws(() => restoreBackup(backup, path.join(root, 'corrupted')), /Corrupt/);
 });
@@ -568,7 +582,12 @@ cp.execFileSync=(file,args,options)=>{
   throw new Error('Unapproved external command refused: '+file);
 };syncBuiltinESMExports();
 const environment={...process.env};Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
-const adapter=(run=6)=>{write(bound.configFile,bound.config);return productionAdapter(bundle,bound.config,candidate,run,bound.configFile);};
+const adapter=(run=6)=>{
+  const domain=bound;write(domain.configFile,domain.config);
+  const actual=productionAdapter(bundle,domain.config,candidate,run,domain.configFile), stop=actual.stop;
+  actual.stop=async unit=>{await stop(unit);if(unit==='pocketbase'&&domain.running){const service=await domain.running;await service.close();domain.running=null;}};
+  return actual;
+};
 function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
 function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
@@ -738,6 +757,8 @@ try{
   // its own actual PB database, permission, state and private evidence root.
   for (const [version,binary] of binaries) for (const scenario of ['preflight-history','preflight-bytes','preflight-unknown','preflight-mode','preflight-retained-unapplied','preflight-unknown-ledger','preflight-placeholder','seal-failure','rehearsal-failure','binding-drift','install-drift','poststop-ledger','poststop-migration-bytes','poststop-migration-mode','poststop-config-bytes','poststop-config-mode','poststop-config-owner','backup-component','backup-db','backup-media','backup-config','backup-config-mode','backup-config-owner','backup-seal-write','snapshot-raw','snapshot-config','snapshot-component','cleanup-guard','cleanup-code','cleanup-unit','cleanup-file','cleanup-job','cleanup-java','cleanup-leaf','cleanup-run','cleanup-readback','first-success','full-success']) {
     bound=await fixture(version,binary,'-'+scenario);
+    const domain=bound;
+    try {
     bound.config.baseline={kind:'mixed',capture:'stopped-backup',sourceRevision:null,retainedHistory:[{path:extra,sha256:sha(retainedBytes),mode:0o644}],sourceAbsentHistory:absent};
     delete bound.config.previousRevision;
     const javaBefore=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
@@ -809,14 +830,18 @@ try{
       const raw=read(path.join(state.backup,'backup.json'));
       if(scenario!=='full-success'&&scenario!=='seal-failure') {assert.deepEqual(raw.captureBinding,{revision:candidate,runNumber:6,runId:'6006',repository:bound.config.repository,snapshotDirectory:state.backup});assert.equal(bound.config.baseline.snapshotId,undefined);}
       const sealed=fs.readFileSync(path.join(state.backup,'backup.json')), permissionFile=path.join(state.backup,'expected-recovery-contract.json'), permission=fs.existsSync(permissionFile)?fs.readFileSync(permissionFile):null;
-      if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
       const commandsBefore=bound.commands.length;
       const retry=await attempt(()=>deploy(adapter(successful?6:7),bound.config,candidate,successful?6:7));assert.equal(retry.accepted,false);assert.match(retry.error,/Older\/repeated run or unresolved failed deployment/);
       assert.equal(bound.commands.slice(commandsBefore).some(c=>c.file==='sudo'),false);assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
       if(successful) {
         process.env.GITHUB_RUN_ID='6007';
+        delete bound.config.recoveryWorkingCopy;
+        if(scenario==='full-success')bound.config.previousRevision=state.revision;
         bound.config.finiteStop.syncCodeSha256=sha(fs.readFileSync(path.join(bound.webRoot,'backend/scripts/sync_velocity.js')));
         const next=await deploy(adapter(7),bound.config,candidate,7);assert.equal(next.status,'deployed');assert.notEqual(next.backup,state.backup);assert.equal(fs.readdirSync(bound.config.backupRoot).length,2);
+        const nextRaw=read(path.join(next.backup,'backup.json'));
+        if(scenario==='first-success')assert.deepEqual(nextRaw.captureBinding,{revision:candidate,runNumber:7,runId:'6007',repository:bound.config.repository,snapshotDirectory:next.backup});
+        else assert.equal(nextRaw.revision,state.revision);
         assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
         if(bound.running){const service=await bound.running;await service.close();bound.running=null;}process.env.GITHUB_RUN_ID='6006';
       }
@@ -824,6 +849,12 @@ try{
     }
     assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),javaBefore);
     observe('capture-'+scenario+'-'+version,'first/full capture, stop order, bindings, failed-state and permission preservation',{passed:true,fixtureRoot:bound.local});
+    } finally {
+      if(domain.running){const service=await domain.running;await service.close();domain.running=null;}
+      process.env.GITHUB_RUN_ID='6006';
+      fs.statSync=(file,...args)=>{const value=originals.statSync(bound?.configMap.get(file)??file,...args);return file===bound?.configFile?new Proxy(value,{get:(v,k)=>k==='uid'?0:Reflect.get(v,k)}):value;};
+      fs.lstatSync=(file,...args)=>originals.lstatSync(bound?.configMap.get(file)??file,...args);
+    }
   }
 
 }finally{

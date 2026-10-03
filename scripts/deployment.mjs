@@ -36,7 +36,7 @@ export function serviceFacts(raw) {
     configuration[name] = []; runtime[name] = [];
     let rest = properties[name];
     while (rest) {
-      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+) \}(?: |$)/.exec(rest);
+      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0/0) \}(?: |$)/.exec(rest);
       check(match && path.isAbsolute(match[1]) && !/[\\"'\t\n]/.test(match[2]), 'Ambiguous service command');
       const argv = match[2].split(' ');
       check(argv.every(Boolean) && /^\[[^\[\]]+\]$/.test(match[4]) && /^\[[^\[\]]+\]$/.test(match[5]) && ['(null)', 'exited', 'killed', 'dumped'].includes(match[7]), 'Ambiguous service argv/runtime');
@@ -57,7 +57,7 @@ export function serviceFacts(raw) {
   }
   return { configuration, runtime, environment };
 }
-const showService = unit => command('systemctl', ['show', unit, ...serviceNames.flatMap(name => ['-p', name])]);
+const showService = unit => command('systemctl', ['show', unit, '--all', ...serviceNames.flatMap(name => ['-p', name])]);
 function serviceEnvironment(facts, config) {
   return facts.environment.map(item => {
     check(config.configurationFiles.includes(item.path), 'EnvironmentFile outside approved configuration inventory');
@@ -612,7 +612,7 @@ def file_flags(p):
  finally: os.close(fd)
 def ctl(args): return subprocess.check_output(['/usr/bin/systemctl']+args,text=True,timeout=10).strip()
 def props(unit,names):
- out=ctl(['show',unit]+sum((['-p',n] for n in names),[])); rows=[line.split('=',1) for line in out.splitlines()]
+ out=ctl(['show',unit,'--all']+sum((['-p',n] for n in names),[])); rows=[line.split('=',1) for line in out.splitlines()]
  require(all(len(row)==2 for row in rows) and len(rows)==len(names) and len(set(row[0] for row in rows))==len(names) and set(row[0] for row in rows)==set(names),'Missing/duplicate/unknown unit property'); return dict(rows)
 marker_names=['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState','ControlGroup']
 execution_names=['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost']
@@ -625,7 +625,7 @@ def facts(value):
   if name not in execution_names: configuration[name]=value[name]; continue
   configuration[name]=[]; runtime[name]=[]; rest=value[name]
   while rest:
-   m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+) \}(?: |$)',rest)
+   m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0/0) \}(?: |$)',rest)
    require(m and os.path.isabs(m[1]) and not any(c in m[2] for c in ['\\','"',"'",'\t','\n']),'Ambiguous service command')
    argv=m[2].split(' '); require(all(argv) and re.fullmatch(r'\[[^\[\]]+\]',m[4]) and re.fullmatch(r'\[[^\[\]]+\]',m[5]) and m[7] in ['(null)','exited','killed','dumped'],'Ambiguous service argv/runtime')
    command={'path':m[1],'argv':argv,'ignore_errors':m[3]}; require(command not in configuration[name],'Duplicate service command'); configuration[name].append(command)
@@ -927,10 +927,11 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     velocityBaseline ??= value;
     return value;
   };
+  const assertRunState = value => check(!value || (value.status === 'deployed' && runNumber > value.runNumber), 'Older/repeated run or unresolved failed deployment');
   const assertCurrent = () => {
     check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
     oldState = controlRead(state, boundControl);
-    check(!oldState || (oldState.status === 'deployed' && runNumber > oldState.runNumber), 'Older/repeated run or unresolved failed deployment');
+    assertRunState(oldState);
   };
   const authenticateTarget = async () => {
     const identities = config.recoveryIdentities;
@@ -953,6 +954,12 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const migrateCopy = directory => command(pb, ['migrate', 'up', '--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
   return {
     verify: () => {
+      assertRunState(controlRead(state, boundControl));
+      for (const file of config.configurationFiles) {
+        assertRealPath(file);
+        const owner = fs.statSync(file);
+        assertRecoverableOwners([{ uid: owner.uid, gid: owner.gid }]);
+      }
       verifyBundle(bundle, revision);
       verifyImmutableMigrations(bundle, config.webRoot, config.baseline);
       if (config.baseline?.kind === 'mixed') {
@@ -1086,6 +1093,14 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   };
 }
 
+function assertRecoverableOwners(owners) {
+  const uid = process.geteuid(), groups = new Set([process.getegid(), ...process.getgroups()]);
+  for (const owner of owners) {
+    check(Number.isSafeInteger(owner.uid) && owner.uid >= 0 && owner.uid < 4294967295 && Number.isSafeInteger(owner.gid) && owner.gid >= 0 && owner.gid < 4294967295, 'Invalid configuration ownership metadata');
+    check(uid === 0 || (owner.uid === uid && groups.has(owner.gid)), 'Configuration ownership cannot be reconstructed by actual runner');
+  }
+}
+
 export function restoreBackup(backup, destination) {
   // Always isolated; never silently restores a running production directory.
   check(!fs.existsSync(destination), 'Restore destination must be new');
@@ -1094,6 +1109,10 @@ export function restoreBackup(backup, destination) {
   check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Corrupt backup');
   if (manifest.snapshotId) verifySnapshot(backup);
   if (manifest.configuration) {
+    const names = manifest.configuration.map(item => item.path);
+    check(names.every(safeRelative) && new Set(names).size === names.length && manifest.configuration.every(item => item.sha256 && !item.link && !item.directory), 'Invalid configuration manifest');
+    check(Array.isArray(manifest.ownership) && manifest.ownership.length === names.length && new Set(manifest.ownership.map(item => item.path)).size === names.length && manifest.ownership.every(item => names.includes(item.path)), 'Missing/duplicate configuration ownership metadata');
+    assertRecoverableOwners(manifest.ownership);
     check(JSON.stringify(inventory(path.join(backup, 'configuration'), manifest.configuration.filter(item => !item.directory && !item.link).map(item => item.path))) === JSON.stringify(manifest.configuration), 'Corrupt configuration backup');
   }
   copyPaths(path.join(backup, 'application'), destination, manifest.present);
