@@ -7,19 +7,45 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
+function fixtureService(directory, unit = 'velocity-sync', phase = 'running') {
+  const executable = unit === 'pocketbase' ? directory + '/pocketbase' : '/usr/bin/node';
+  const argv = unit === 'pocketbase' ? executable + ' serve --automigrate=false' : '/usr/bin/node ' + (unit === 'velocity-sync' ? 'sync_velocity.js' : unit + '.js');
+  const record = phase === 'stopped' ? 'start_time=[fixture-start] ; stop_time=[fixture-stop] ; pid=200 ; code=killed ; status=9' : phase === 'new' ? 'start_time=[fixture-new-start] ; stop_time=[n/a] ; pid=201 ; code=(null) ; status=0' : 'start_time=[fixture-start] ; stop_time=[n/a] ; pid=200 ; code=(null) ; status=0';
+  return ['ExecCondition=', 'ExecStartPre=', `ExecStart={ path=${executable} ; argv[]=${argv} ; ignore_errors=no ; ${record} }`, 'ExecStartPost=', 'ExecReload=', 'ExecStop=', 'ExecStopPost=', 'WorkingDirectory=' + directory, 'User=fixture', 'Group=fixture', 'EnvironmentFiles=', 'Requires=', 'BindsTo=', 'PartOf='].join('\n');
+}
+
 const config = {
   approvedRevision: revision, previousRevision: oldRevision,
   webRoot: '/fixture/site', backupRoot: '/fixture/backup', stateRoot: '/fixture/state', velocityRoot: '/fixture/velocity',
   pocketbaseVersion: '0.26.5', machineIdSha256: 'c'.repeat(64), runnerUser: 'fixture',
   websiteServices: ['pocketbase', 'velocity-sync', 'map-proxy'],
-  serviceBindings: { pocketbase: 'WorkingDirectory=/fixture/site/backend', 'velocity-sync': 'WorkingDirectory=/fixture/site/backend/scripts', 'map-proxy': 'WorkingDirectory=/fixture/site/backend/scripts' },
+  serviceBindings: Object.fromEntries(['pocketbase','velocity-sync','map-proxy'].map(unit => [unit, fixtureService('/fixture/site' + (unit === 'pocketbase' ? '/backend' : '/backend/scripts'), unit)])),
   velocityServiceBinding: 'Requires=fixture\nBindsTo=\nPartOf=',
   nginxSiteFile: '/etc/nginx/sites-available/fixture', configurationFiles: ['/etc/systemd/system/pocketbase.service', '/etc/systemd/system/velocity-sync.service', '/etc/systemd/system/map-proxy.service', '/etc/nginx/sites-available/fixture'],
   protectedVelocityFiles: ['velocity.toml', 'velocity.jar', 'forwarding.secret'], velocityPorts: [25565],
   pocketbaseHealthUrl: 'http://127.0.0.1:8090/api/health', baselineReviewed: true, serviceIdentityReviewed: true, restoreRehearsalRequired: true,
 };
+test('configured commands stay exact while all five execution facts retain their phase', () => {
+  const old = serviceFacts(fixtureService('/fixture/site/backend/scripts'));
+  for (const phase of ['stopped', 'new']) {
+    const actual = serviceFacts(fixtureService('/fixture/site/backend/scripts', 'velocity-sync', phase));
+    assert.deepEqual(actual.configuration, old.configuration);
+    assert.notDeepEqual(actual.runtime.ExecStart, old.runtime.ExecStart);
+    assert.deepEqual(Object.keys(actual.runtime.ExecStart[0]), ['start_time','stop_time','pid','code','status']);
+  }
+  for (const change of [raw => raw.replace('sync_velocity.js', 'sync_velocity.js --unsafe'), raw => raw.replace('ignore_errors=no', 'ignore_errors=yes'), raw => raw.replace('Group=fixture', 'Group=other')]) {
+    assert.notDeepEqual(serviceFacts(change(fixtureService('/fixture/site/backend/scripts'))).configuration, old.configuration);
+  }
+  for (const change of [raw => raw + '\nUser=duplicate', raw => raw.replace(' ; pid=200', ''), raw => raw.replace('argv[]=/usr/bin/node', 'argv[]="/usr/bin/node"'), raw => raw.replace('ExecStop=', 'Unknown=')]) {
+    assert.throws(() => serviceFacts(change(fixtureService('/fixture/site/backend/scripts'))), /property|command/);
+  }
+  const env = serviceFacts(fixtureService('/fixture/site/backend/scripts').replace('EnvironmentFiles=', 'EnvironmentFiles=/etc/default/velocity-sync (ignore_errors=no)'));
+  assert.deepEqual(env.environment, [{path:'/etc/default/velocity-sync',ignore_errors:'no'}]);
+  assert.throws(() => serviceFacts(fixtureService('/fixture/site/backend/scripts').replace('EnvironmentFiles=', 'EnvironmentFiles=/etc/default/velocity-sync (ignore_errors=no) /etc/default/velocity-sync (ignore_errors=yes)')), /EnvironmentFiles/);
+});
+
 function fixture(fail) {
   const calls = [], step = name => async (...args) => {
     calls.push([name, ...args]); if (name === fail) throw new Error('injected ' + name);
@@ -156,7 +182,7 @@ function finiteHostResponse(request, host) {
   const inode = file => { const x = fs.lstatSync(file); return [x.dev, x.ino]; };
   const content = unit => unit === 'velocity' ? '[Unit]\nRefuseManualStop=yes\n' : '[Unit]\nRefuseManualStart=yes\n[Service]\nRestart=no\nRestartForceExitStatus=\n';
   try {
-    assert.deepEqual(Object.keys(request).sort(), ['operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','state'].sort());
+    assert.deepEqual(Object.keys(request).sort(), ['operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','serviceEvidence','state'].sort());
     assert.ok(['stop','cleanup-sync','cleanup-java'].includes(operation));
     fail('root'); fail('runner'); fail('config'); fail('lock');
     if (host.euid !== undefined && host.euid !== 0) return reply(false, 'finite fixture actual root missing');
@@ -200,7 +226,7 @@ async function productionFixture(t, callback) {
   fs.writeFileSync(path.join(webRoot, 'backend/.env'), 'retained environment', { mode: 0o600 });
   for (const name of ['velocity.toml','velocity.jar']) fs.writeFileSync(path.join(root,'velocity',name), 'protected fixture');
   const protectedFile = path.join(root, 'velocity/forwarding.secret'); fs.writeFileSync(protectedFile, 'protected fixture', { mode: 0o600 });
-  const bound = { ...config, webRoot, backupRoot: path.join(root, 'backup'), stateRoot: path.join(root, 'state'), velocityRoot: path.join(root, 'velocity'), runnerUser: os.userInfo().username, machineIdSha256: createHash('sha256').update('fixture machine').digest('hex'), repository: 'fixture/deployment', serviceBindings: Object.fromEntries(config.websiteServices.map(unit => [unit, 'WorkingDirectory=' + webRoot + (unit === 'pocketbase' ? '/backend' : '/backend/scripts')])) };
+  const bound = { ...config, webRoot, backupRoot: path.join(root, 'backup'), stateRoot: path.join(root, 'state'), velocityRoot: path.join(root, 'velocity'), runnerUser: os.userInfo().username, machineIdSha256: createHash('sha256').update('fixture machine').digest('hex'), repository: 'fixture/deployment', serviceBindings: Object.fromEntries(config.websiteServices.map(unit => [unit, fixtureService(webRoot + (unit === 'pocketbase' ? '/backend' : '/backend/scripts'), unit)])) };
   fs.writeFileSync(path.join(webRoot, 'backend/scripts/sync_velocity.js'), 'old daemon fixture');
   bound.finiteStop = { syncCodeSha256: createHash('sha256').update(fs.readFileSync(path.join(webRoot, 'backend/scripts/sync_velocity.js'))).digest('hex') };
   const configMap = new Map(bound.configurationFiles.map((file, index) => { const local = path.join(root, 'config-' + index); fs.writeFileSync(local, 'fixture config', { mode: 0o600 }); return [file, local]; }));
@@ -218,13 +244,13 @@ async function productionFixture(t, callback) {
     if (file === 'git' && args[0] === 'ls-remote') return revision + '\trefs/heads/main\n';
     if (file.endsWith('/backend/pocketbase') && args[0] === '--version') return 'pocketbase version 0.26.5\n';
     if (file === 'systemctl' && args[0] === 'is-active') return 'active\n';
-    if (file === 'systemctl' && args[0] === 'show') return (args[1] === 'velocity' && args.includes('MainPID') ? 'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active' : args[1] === 'velocity' ? bound.velocityServiceBinding : bound.serviceBindings[args[1]]) + '\n';
+    if (file === 'systemctl' && args[0] === 'show') return (args[1] === 'velocity' && args.includes('MainPID') ? 'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active' : args[1] === 'velocity' ? (args.includes('ExecStart') ? fixtureService(bound.velocityRoot, 'velocity') : bound.velocityServiceBinding) : bound.serviceBindings[args[1]]) + '\n';
     if(file==='ss') return 'LISTEN 0 100 127.0.0.1:25565 0.0.0.0:*\n';
     if(file==='sudo'&&args[1]==='systemctl') return '';
     throw new Error('External command refused by isolated test');
   };
   Object.assign(process.env, { GITHUB_REPOSITORY: bound.repository, GITHUB_RUN_ID: '123', GITHUB_EVENT_NAME: 'workflow_dispatch' }); syncBuiltinESMExports();
-  try { await callback({ root, bundle, webRoot, host, configFile, configMap, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
+  try { await callback({ root, bundle, webRoot, host, configFile, configMap, config: bound, protectedFile, commands, createAdapter: () => productionAdapter(bundle, bound, revision, 2, configFile), get adapter() { return this.boundAdapter ??= this.createAdapter(); }, executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
   finally {
     fs.readFileSync = originalRead; fs.statSync = originalStat; fs.lstatSync = originalLstat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
     for (const [key, value] of Object.entries(environment)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -416,7 +442,7 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
     fs.rmSync(path.join(f.webRoot,'backend/pb_hooks'),{recursive:true});
     f.config.configurationFiles=[path.join(f.webRoot,'backend/.env')];f.config.recoveryIdentities=identities;
     cp.execFileSync=(file,args,options)=>file==='python3'||(file.endsWith('/backend/pocketbase')&&args[0]!=='--version')?f.executeLocal(file,args,options):commandOverride(file,args,options);syncBuiltinESMExports();
-    const initial=f.adapter.backup();const raw=JSON.parse(fs.readFileSync(path.join(initial,'backup.json')));raw.revision=null;raw.retainedHistory=[{path:extra,sha256:createHash('sha256').update(bytes).digest('hex'),mode:0o644}];raw.sourceAbsentHistory=absent;raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));
+    const initial=f.createAdapter().backup();const raw=JSON.parse(fs.readFileSync(path.join(initial,'backup.json')));raw.revision=null;raw.retainedHistory=[{path:extra,sha256:createHash('sha256').update(bytes).digest('hex'),mode:0o644}];raw.sourceAbsentHistory=absent;raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));
     f.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:raw.snapshotId,snapshotDirectory:initial,retainedHistory:raw.retainedHistory,sourceAbsentHistory:absent};delete f.config.previousRevision;
     f.adapter.verify();f.adapter.assertCurrent();
     const backup=f.adapter.backup();assert.equal(verifySnapshot(backup,f.config.baseline).snapshotId,raw.snapshotId);
@@ -508,7 +534,7 @@ async function fixture(version,binary, suffix = '') {
   for(const name of ['velocity.toml','velocity.jar','forwarding.secret'])fs.writeFileSync(path.join(local,'velocity',name),'unchanged disposable Java fixture',{mode:0o600});
   const configFiles=['/etc/systemd/system/pocketbase.service','/etc/systemd/system/velocity-sync.service','/etc/nginx/sites-available/acceptance006',path.join(webRoot,'.env'),path.join(webRoot,'backend/.env')];
   const configMap=new Map();for(const file of configFiles.filter(x=>x.startsWith('/etc/'))){const localFile=path.join(local,'external-config',path.basename(file));fs.writeFileSync(localFile,'DISPOSABLE_CONFIG='+path.basename(file)+'\n',{mode:0o600});configMap.set(file,localFile);}
-  const config={approvedRevision:candidate,repository:'fixture/acceptance006',webRoot,backupRoot:path.join(local,'backup'),stateRoot:path.join(local,'state'),velocityRoot:path.join(local,'velocity'),pocketbaseVersion:version,machineIdSha256:sha('isolated machine'),runnerUser:os.userInfo().username,websiteServices:['pocketbase','velocity-sync'],serviceBindings:{pocketbase:'WorkingDirectory='+webRoot+'/backend', 'velocity-sync':'WorkingDirectory='+webRoot+'/backend/scripts'},velocityServiceBinding:'Requires=\nBindsTo=\nPartOf=',protectedVelocityFiles:['velocity.toml','velocity.jar','forwarding.secret'],velocityPorts:[25565],configurationFiles:configFiles,nginxSiteFile:configFiles[2],pocketbaseHealthUrl:base+'/api/health',baselineReviewed:true,serviceIdentityReviewed:true,restoreRehearsalRequired:true,recoveryIdentities:identities,previousRevision:'b'.repeat(40)};
+  const config={approvedRevision:candidate,repository:'fixture/acceptance006',webRoot,backupRoot:path.join(local,'backup'),stateRoot:path.join(local,'state'),velocityRoot:path.join(local,'velocity'),pocketbaseVersion:version,machineIdSha256:sha('isolated machine'),runnerUser:os.userInfo().username,websiteServices:['pocketbase','velocity-sync'],serviceBindings:{pocketbase:fixtureService(webRoot+'/backend','pocketbase'), 'velocity-sync':fixtureService(webRoot+'/backend/scripts')},velocityServiceBinding:'Requires=\nBindsTo=\nPartOf=',protectedVelocityFiles:['velocity.toml','velocity.jar','forwarding.secret'],velocityPorts:[25565],configurationFiles:configFiles,nginxSiteFile:configFiles[2],pocketbaseHealthUrl:base+'/api/health',baselineReviewed:true,serviceIdentityReviewed:true,restoreRehearsalRequired:true,recoveryIdentities:identities,previousRevision:'b'.repeat(40)};
   const configFile=path.join(local,'config.json');write(configFile,config);
   const work=path.join(local,'approved-working');mkdir(path.join(work,'backend'));
   copyWithModes(path.join(webRoot,'backend/pb_data'),path.join(work,'backend/pb_data'),{recursive:true});
@@ -533,7 +559,7 @@ cp.execFileSync=(file,args,options)=>{
   if(file==='python3'||file===bound.binary||file===path.join(bound.webRoot,'backend/pocketbase'))return rawExec(file,args,options);
   if(file==='git'&&args[0]==='ls-remote')return candidate+'\trefs/heads/main\n';
   if(file==='systemctl'&&args[0]==='is-active')return 'active\n';
-  if(file==='systemctl'&&args[0]==='show')return (args[1]==='velocity'&&args.includes('MainPID')?'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active':args[1]==='velocity'?bound.config.velocityServiceBinding:bound.config.serviceBindings[args[1]])+'\n';
+  if(file==='systemctl'&&args[0]==='show')return (args[1]==='velocity'&&args.includes('MainPID')?'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active':args[1]==='velocity'?(args.includes('ExecStart')?fixtureService(bound.config.velocityRoot,'velocity'):bound.config.velocityServiceBinding):bound.config.serviceBindings[args[1]])+'\n';
   if(file==='ss')return 'LISTEN 0 100 127.0.0.1:25565 0.0.0.0:*\n';
   if(file==='sudo'&&args[1]==='systemctl'){
     if(args[2]==='start'&&args[3]==='pocketbase')bound.running=startOwned(bound.binary,['serve','--automigrate=false','--http',new URL(bound.base).host,'--dir',path.join(bound.webRoot,'backend/pb_data'),'--migrationsDir',path.join(bound.webRoot,'backend/pb_migrations'),'--hooksDir',path.join(bound.webRoot,'backend/pb_hooks')]);
@@ -632,24 +658,53 @@ try{
       for(const who of bound.identities){const auth=await request(bound.base,'/api/collections/users/auth-with-password',null,'POST',{identity:who.role+'@example.invalid',password:'Disposable-Only-2026!'});const data=auth.status===200?await request(bound.base,'/api/collections/velocity_settings/records',auth.data.token):auth;authorizedReads.push({role:who.role,authStatus:auth.status,readStatus:data.status,records:data.data.items?.length??null});}
     }
     observe('P05-live-identity-'+version,'missing approved live roles stop before dependent services/deployed',{passed:!outcome.accepted,accepted:outcome.accepted,error:outcome.error??null,status:outcome.value?.status??null,liveRoles:roles,authorizedReads,services:bound.commands.filter(c=>c.file==='sudo'),javaFixtureBytesRetained:JSON.stringify(beforeInventory)===JSON.stringify(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles)),state:fs.existsSync(path.join(bound.config.stateRoot,'deployment.json'))?read(path.join(bound.config.stateRoot,'deployment.json')).status:null});
-    // Existing-field baseline: restore the approved synthetic role-bearing data,
-    // then exercise the complete actual target authentication and start path.
-    const safeRestore=path.join(bound.local,'approved-target');
-    restoreSafeRecovery(path.join(read(path.join(bound.config.stateRoot,'deployment.json')).backup,'safe-recovery'),safeRestore,candidate);
-    fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
-    copyWithModes(path.join(safeRestore,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
-    bound.config.targetAuthentication=bound.identities.map(item=>({...item,identity:item.role+'@example.invalid',passwordEnv:'DISPOSABLE_TARGET_PASSWORD',...(item.role==='service'?{services:['velocity-sync']}: {})}));
+    const roleDomain=bound;
+    const retainFailureDomain=domain=>{
+      const record=read(path.join(domain.config.stateRoot,'deployment.json'));
+      const names=['backup.json','expected-recovery-contract.json','safe-recovery/backup.json'];
+      const files=[...names.map(name=>path.join(record.backup,name)),...['velocity','velocity-sync'].map(unit=>path.join(domain.local,'runtime',unit+'.service.d','99-hololive-release-guard.conf'))];
+      return files.map(file=>({file,bytes:fs.readFileSync(file),mode:fs.lstatSync(file).mode,ino:fs.lstatSync(file).ino}));
+    };
+    const unchangedFailureDomain=entries=>{for(const entry of entries){assert.deepEqual(fs.readFileSync(entry.file),entry.bytes);assert.equal(fs.lstatSync(entry.file).mode,entry.mode);assert.equal(fs.lstatSync(entry.file).ino,entry.ino);}};
+    const roleRetained=retainFailureDomain(roleDomain);
+    const roleFailedBytes=fs.readFileSync(path.join(roleDomain.config.stateRoot,'deployment.json'));
+    const roleGuardBytes=fs.readFileSync(path.join(roleDomain.webRoot,'backend/.velocity-maintenance'));
+    const roleRetry=await attempt(()=>deploy(adapter(7),bound.config,candidate,7));
+    assert.equal(roleRetry.accepted,false,roleRetry.error);
+    assert.deepEqual(fs.readFileSync(path.join(roleDomain.config.stateRoot,'deployment.json')),roleFailedBytes);
+    assert.deepEqual(fs.readFileSync(path.join(roleDomain.webRoot,'backend/.velocity-maintenance')),roleGuardBytes);
+    unchangedFailureDomain(roleRetained);
+    bound=await fixture(version,binary,'-auth-failure');
+    // This domain's own approved working copy supplies its role-bearing data.
+    const prepareAuthenticatedDomain=()=>{
+      fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
+      copyWithModes(path.join(bound.config.recoveryWorkingCopy,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
+      bound.config.targetAuthentication=bound.identities.map(item=>({...item,identity:item.role+'@example.invalid',passwordEnv:'DISPOSABLE_TARGET_PASSWORD',...(item.role==='service'?{services:['velocity-sync']}: {})}));
+      initializeBaseline();bound.commands=[];
+    };
+    prepareAuthenticatedDomain();
     process.env.DISPOSABLE_TARGET_PASSWORD='incorrect disposable password';
-    bound.config.stateRoot=path.join(bound.local,'auth-failure-state');mkdir(bound.config.stateRoot);initializeBaseline();bound.commands=[];
     const authFailure=await attempt(()=>deploy(adapter(),bound.config,candidate,6));
     assert.equal(authFailure.accepted,false,authFailure.error);
     assert.match(authFailure.error,/Target authentication failed/);
     assert.equal(bound.commands.some(c=>c.file==='sudo'&&c.args[2]==='start'&&c.args[3]==='velocity-sync'),false);
     assert.equal(read(path.join(bound.config.stateRoot,'deployment.json')).status,'failed');
     if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
-    process.env.DISPOSABLE_TARGET_PASSWORD='Disposable-Only-2026!';bound.config.stateRoot=path.join(bound.local,'success-state');mkdir(bound.config.stateRoot);initializeBaseline();bound.commands=[];
+    const authDomain=bound, authFailedBytes=fs.readFileSync(path.join(bound.config.stateRoot,'deployment.json'));
+    const authRetained=retainFailureDomain(authDomain);
+    const authGuardBytes=fs.readFileSync(path.join(bound.webRoot,'backend/.velocity-maintenance'));
+    const authRetry=await attempt(()=>deploy(adapter(7),bound.config,candidate,7));
+    assert.equal(authRetry.accepted,false,authRetry.error);
+    assert.deepEqual(fs.readFileSync(path.join(authDomain.config.stateRoot,'deployment.json')),authFailedBytes);
+    assert.deepEqual(fs.readFileSync(path.join(authDomain.webRoot,'backend/.velocity-maintenance')),authGuardBytes);
+    unchangedFailureDomain(authRetained);
+    bound=await fixture(version,binary,'-success');prepareAuthenticatedDomain();
+    process.env.DISPOSABLE_TARGET_PASSWORD='Disposable-Only-2026!';
+    const safeRestore=bound.config.recoveryWorkingCopy, successBeforeInventory=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
     const success=await deploy(adapter(),bound.config,candidate,6);
     assert.equal(success.status,'deployed');
+    for(const unit of ['velocity','velocity-sync'])assert.equal(fs.existsSync(path.join(bound.local,'runtime',unit+'.service.d')),false);
+    unchangedFailureDomain(roleRetained);unchangedFailureDomain(authRetained);
     assert.equal(bound.commands.some(c=>c.file==='sudo'&&c.args[2]==='start'&&c.args[3]==='velocity-sync'),true);
     assert.equal(read(path.join(bound.config.stateRoot,'deployment.json')).status,'deployed');
     for(const who of [...bound.identities,bound.ordinary]){
@@ -669,7 +724,7 @@ try{
     bound.config.targetAuthentication=bound.config.targetAuthentication.map(item=>item.id===human.id?{id:item.id,role:item.role,tokenEnv:'DISPOSABLE_HUMAN_TOKEN'}:item);
     await adapter().health();
     assert.equal((await request(bound.base,'/api/collections/system_settings/records',superAuth.data.token)).data.items[0].enable_local_login,false);
-    assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),beforeInventory);
+    assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),successBeforeInventory);
     if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
     // Existing authorization fields cannot make an unlisted promotion acceptable.
     bound.config.stateRoot=path.join(bound.local,'existing-state');mkdir(bound.config.stateRoot);fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});copyWithModes(path.join(safeRestore,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});initializeBaseline();

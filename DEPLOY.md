@@ -19,7 +19,7 @@
 | `finiteStop.syncCodeSha256` | 维护窗口当前实际同步脚本 SHA-256；包括后续 guard-aware 版本，不沿用旧 PID/hash 猜值 |
 | `webRoot`, `backupRoot`, `stateRoot`, `velocityRoot` | 已核定的绝对真实目录；互不嵌套，无符号链接 |
 | `pocketbaseVersion` | 主机二进制实测，仅支持已隔离验证的 0.26.5 / 0.34.2；维护不下载或升级 PB |
-| `websiteServices`, `serviceBindings` | 实测网站服务列表和 `systemctl show` 的 ExecStart/WorkingDirectory/User/Requires/BindsTo/PartOf 原样有限绑定；工作目录必须对应同一 webRoot；允许 pocketbase、velocity-sync 及现有四个网站代理 |
+| `websiteServices`, `serviceBindings` | 实测网站服务列表与完整 `systemctl show` 属性：ExecCondition/ExecStartPre/ExecStart/ExecStartPost/ExecReload/ExecStop/ExecStopPost、WorkingDirectory、User、Group、EnvironmentFiles、Requires、BindsTo、PartOf。配置命令顺序、path、完整 argv 和 ignore_errors 必须精确一致；工作目录对应同一 webRoot；允许 pocketbase、velocity-sync 及现有四个网站代理 |
 | `nginxSiteFile`, `configurationFiles` | 已核定 sites-available 文件、上述网站 unit/env 文件和根/backend `.env` 的明确名单；必须包含全部网站 unit 和该 nginx 文件，另列实际 env；只备份，维护不覆写配置 |
 | `velocityServiceBinding` | Java 服务 Requires/BindsTo/PartOf 实测反向依赖；漂移拒绝 |
 | `protectedVelocityFiles`, `velocityPorts` | 实测 Java 配置、JAR、secret、marker 及监听端口 |
@@ -190,3 +190,9 @@ Owner 已允许必要的迁移专用临时超级用户通过 CLI 分别创建，
 实际部署前仍须供应获准人类/两份独立服务身份、私有凭据与 `process.env` 来源、root 配置、runner 可读且可一致备份的明确 EnvFiles 和私有目录。服务 EnvFile 使用原白名单路径 `/etc/default/velocity-sync`、`/etc/default/mcsm-proxy`，与实际 unit 绑定；不要执行旧 JSON 凭据方案。临时迁移 superuserCLI 的创建/删除必须遵守已准目标与窗口、无覆盖、私有凭据及删除残留核验，不能代替长期 `users` 身份或目标认证。
 
 已有 root 读取与程序库存不证明本实现的 Linux freeze/kill、实际停服或玩家全过程连续性。完整真实 run/候选、原安全恢复与有限外部动作、010 同窗前基线和后验、最终 Release 条件未齐时仍未就绪。CI 固定输入/执行顺序属于另待批准的方案；本实现不改变 workflow。
+
+服务属性绑定保留每条命令的 `start_time`、`stop_time`、`pid`、`code` 和 `status`，分别记录配置身份和执行阶段。预检与原固定 Python 停服/清理检查点核对全部网站服务和 Java 的配置；EnvFile 路径、ignore_errors、内容摘要、权限及 UID/GID 对应同一批准配置库存。缺属性、重复属性、未知属性、重复 EnvFile、无法明确解析的 argv/转义或命令表示均拒绝，不把缺项当空值。当前解析只接受完整的 systemctl `path/argv[]/ignore_errors/start_time/stop_time/pid/code/status` 表示；其他版本表示的可用性须由实际目标验证。
+
+旧 sync 运行和冻结阶段绑定同一 PID、启动标记、cgroup、完整 proc argv、用户/组、线程文件描述符与同步脚本。全组退出并按原 stop 收口后，记录同一旧命令的终止事实与空组；清 sync 叶时核对该停止事实。新 sync 启动后重新核对实际运行命令、启动标记、进程和独立 cgroup，才清 Java 叶。其他网站服务在原检查点保留其阶段事实；PocketBase 必须对应本次新启动，其他尚未启动的网站代理保留旧进程绑定。Java 的命令执行事实、进程启动/cgroup、文件、job 与监听同时保持原保护要求。合法运行字段变化不改变配置身份，错误阶段或实际进程漂移仍拒绝清理。
+
+原部署测试内的 mixed 输入在被测 adapter 构造前固定。角色失败、认证失败和成功部署从各自独立的运行叶、服务映射、应用数据和控制目录开始；失败域保留保护、failed 记录及备份/许可，同域较大 run 仍须拒绝。测试源码及本地映射不表示真实 Linux 特权路径、生产 run、恢复权限或玩家全程验收已经通过；这些结果分别依赖实际执行证据。
