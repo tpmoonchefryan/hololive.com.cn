@@ -3,6 +3,7 @@ import { runVelocitySync, createVelocityFiles } from "./lib/velocity-sync.js";
 import PocketBase from 'pocketbase';
 import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import net from 'net';
@@ -19,6 +20,7 @@ const VELOCITY_DIR = process.env.VELOCITY_DIR || "/opt/velocity";
 const VELOCITY_SERVICE = "velocity";
 const VELOCITY_OWNER = process.env.VELOCITY_OWNER || "ubuntu:ubuntu";
 const JAR_REF_MARKER = ".velocity_jar_ref";
+const DEPLOYMENT_GUARD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.velocity-maintenance');
 
 // EventSource required for Realtime in Node environment
 import { EventSource } from 'eventsource';
@@ -140,6 +142,7 @@ const runtimeFiles = createVelocityFiles({ fs, directory: VELOCITY_DIR, join: pa
 
 async function queueSync({ reason = "manual", restartIfChanged = false, forceRestart = false } = {}) {
     syncQueue = syncQueue.catch(() => {}).then(() => runVelocitySync({
+        isProtected: () => pathExists(DEPLOYMENT_GUARD),
         read: async () => {
             pendingJarVersion = null;
             const input = await data.read();
