@@ -74,6 +74,8 @@ function verifyArtifactLinks(root, records) {
 }
 
 export function verifyBundle(root, revision) {
+  assertRealPath(root);
+  for (const name of artifactPaths) assertRealPath(path.dirname(path.join(root, name)));
   const manifest = json(path.join(root, 'release.json'));
   check(manifest.revision === revision && /^[a-f0-9]{40}$/.test(revision), 'Revision mismatch');
   check(JSON.stringify(manifest.paths) === JSON.stringify(artifactPaths), 'Incomplete artifact whitelist');

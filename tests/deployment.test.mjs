@@ -256,3 +256,9 @@ for (const operation of ['record', 'failure', 'guard']) test(`${operation} reche
   assert.equal(fs.readFileSync(endpoint, 'utf8'), 'replacement must stay untouched');
   assert.equal(fs.readFileSync(path.join(parent + '-original', path.basename(endpoint)), 'utf8'), 'original private control file');
 }));
+test('bundle structural parent aliases cannot make external ordinary files look delivered', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'); fs.mkdirSync(bundle); createBundle(bundle);
+  const external = path.join(root, 'external-backend'); fs.renameSync(path.join(bundle, 'backend'), external); fs.symlinkSync(external, path.join(bundle, 'backend'));
+  assert.throws(() => verifyBundle(bundle, revision), /Symlink/);
+  assert.equal(fs.readFileSync(path.join(external, 'scripts/sync_velocity.js'), 'utf8'), 'candidate protected daemon');
+});
