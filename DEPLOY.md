@@ -15,7 +15,8 @@
 | `approvedRevision`, `previousRevision` | 本次明确批准 SHA、实际部署前版本；不是旧 run 猜值 |
 | `baseline` | mixed 首次使用 `capture: "stopped-backup"`、`sourceRevision: null` 和精确历史名单，不填写 snapshot 字段或 previousRevision；预绑定 mixed 使用实际 snapshotId / snapshotDirectory；完整 Git 基线使用 previousRevision |
 | `repository` | 实测当前 Actions 仓库全名，与真实 run 环境匹配 |
-| `machineIdSha256`, `runnerUser` | 实测主机身份摘要、runner 服务用户 |
+| `machineIdSha256`, `runnerUser` | 实测主机身份摘要、实际非 root runner；root 子调用另外复核 SUDO_USER 及实际 UID/GID |
+| `finiteStop.syncCodeSha256` | 维护窗口当前实际同步脚本 SHA-256；包括后续 guard-aware 版本，不沿用旧 PID/hash 猜值 |
 | `webRoot`, `backupRoot`, `stateRoot`, `velocityRoot` | 已核定的绝对真实目录；互不嵌套，无符号链接 |
 | `pocketbaseVersion` | 主机二进制实测，仅支持已隔离验证的 0.26.5 / 0.34.2；维护不下载或升级 PB |
 | `websiteServices`, `serviceBindings` | 实测网站服务列表和 `systemctl show` 的 ExecStart/WorkingDirectory/User/Requires/BindsTo/PartOf 原样有限绑定；工作目录必须对应同一 webRoot；允许 pocketbase、velocity-sync 及现有四个网站代理 |
@@ -30,15 +31,17 @@
 ## 有限更新顺序
 
 1. 核对完整候选、root 配置、物理主机、用户、目录、服务绑定、PB 版本和实际 main，取得 Java 启动标记/PID/重启计数、文件摘要与监听基线。
-2. 停止旧 `velocity-sync`，等待其退出；写 `backend/.velocity-maintenance` 持久保护标记，再停止 PocketBase。维护路径从不调用 Java 服务。旧 daemon 在途异步配置/JAR/restart 动作能否安全停止须有实际依据；稳定 PID 或文件采样不能证明已排空，缺此依据不得开始生产维护。
-3. 在网站写入前备份旧应用及锁定依赖、完整 `pb_data`（DB/WAL/媒体）和明确配置文件。PB 已停止，使这些数据一致。首次 mixed 的完整基线在本步骤一次生成封存，绑定实际候选 SHA、runNumber/runId、仓库及私有快照目录；配置不被回写。停服前只用 WAL 可见的只读事务核对有限迁移元信息，不把它当作一致备份。备份私有目录权限 0700，摘要、集合契约、迁移历史、表字段/数量、日志留在私有目录，不上传 GitHub 或公开仓库。
+2. 在原锁内核对当前 sync 代码、unit、启动身份、实际 cgroup/成员/线程 I/O、Java 标记、文件属性、JAR tmp/bak 和 Velocity job。先创建两份精确 runtime 叶：`/run/systemd/system/velocity.service.d/99-hololive-release-guard.conf` 使用 `[Unit] RefuseManualStop=yes`；同名 sync 叶使用 `[Unit] RefuseManualStart=yes`、`[Service] Restart=no` 并清空 `RestartForceExitStatus=`。拒绝同名/别名/硬链接、未知代码或进程、Java/sync 组重叠、在途 job/文件漂移和已知异步内核 I/O。一次 daemon-reload 并读取实际保护属性；仅冻结当前 sync cgroup，10 秒内确认 frozen=1，在冻结中再次核对身份/I/O/Java/文件/job，仍冻结才写 cgroup.kill，10 秒内确认成员及后代全退。然后原 systemctl stop 收口，写持久 `backend/.velocity-maintenance`，再停止 PB。稳定采样或旧库存不能代替当前冻结窗口核对。
+3. 在网站写入前备份旧应用及锁定依赖、完整 `pb_data`（DB/WAL/媒体）和明确配置文件。PB 已停止，使这些数据一致。首次 mixed 的完整基线在本步骤一次生成封存，绑定实际候选 SHA、runNumber/runId、仓库及私有快照目录；配置不被回写。停服前只用 WAL 可见的只读事务核对有限迁移元信息，并绑定迁移字节/mode、声明配置字节/mode/owner；原 backup 与 install 比较源及捕获内容，漂移拒绝。停服前读数不是一致备份。备份私有目录权限 0700，摘要、集合契约、迁移历史、表字段/数量、日志留在私有目录，不上传 GitHub 或公开仓库。
 4. 复制备份到隔离目录，逐文件匹配摘要，数据库只读 `quick_check`，然后用同版本 PB 和本次 hooks/migrations 对隔离副本重放迁移。保留迁移前契约和隔离结果。任何失败停止生产写入。
-5. 仅替换清单中的应用产物，再核对摘要。对停止中的生产 PB 运行本次迁移；检查退出码及错误文本。启动 PB，确认真实 JSON 健康状态，再按库存启动受保护 sync、重启已存在的网站代理。Nginx、Java、unit/env 配置、操作系统和账号均不被改写。
+5. 仅替换清单中的应用产物，再核对摘要。对停止中的生产 PB 运行本次迁移；检查退出码及错误文本。启动 PB，确认真实 JSON 健康状态，再按库存启动受保护 sync、重启已存在的网站代理。仅上述两份 runtime drop-in 在获准窗口创建和清理；持久 unit/env 与 Nginx 配置按原合同备份。
 6. 比较 Java PID、启动单调时间、重启计数和文件摘要完全一致，并核对代理监听；记录此次 run/SHA、备份位置、有限动作和持久部署状态。运行及外部玩家代理观察仍须另存实际证据；一次 is-active 不证明连续性。
+
+在原 sync 启动点，只有候选安装、目标迁移/角色/合同及实际认证全部通过，并核实候选 sync 代码与持久 guard 后，才删除本次 sync runtime 叶；在此清理点 reload 并读回原属性，然后启动新 sync。新 sync 在持久 guard 下运行，再核对实际代码/unit/进程、Java/文件/job 后删除本次 Java runtime 叶，reload 并核对原属性。仅删除本次 inode/content 所属的叶及已空的自建目录；不重启 Java。清理身份或属性回读失败保留剩余保护，拒绝后续成功记录。
 
 保护标记不会自动删除。新版 daemon 在首次同步、settings/server/forced-host 实时事件及迁移触发事件执行前检查标记；存在时不读取/生成配置、不下载 JAR、不写配置/secret、也不 restart Java。网站维护后 sync 配置应用暂停，这是明确的运维状态。恢复同步需要另外确认真实数据/磁盘差异、服务身份及保护 Java 的具体方案与授权；不要在本轮中顺手删除标记。
 
-任何步骤失败都不宣称成功。应用可能已替换、PB/sync 可能仍停着；失败记录保留，后续 run 拒绝覆盖。自动恢复数据可能毁掉新数据，维护不会未经明确恢复授权擅自回退。
+stop 返回前可能已创建目录/首个保护叶、尝试冻结或终止。失败记录区分已完成、尝试但未知、残留保护、冻结/成员/服务读数及原因；不能因 stop 尚未返回而漏记，也不能把未知范围称为已停服。任何步骤失败都不宣称成功。应用可能已替换、PB/sync 可能仍停着；失败记录保留，较大 run 也拒绝覆盖未解决 failed。失败不自动解冻旧队列、启动旧 daemon、撤持久 guard 或恢复宽松旧应用；finally 只释放自己的原锁。自动恢复数据可能毁掉新数据，维护不会未经明确恢复授权擅自回退。
 
 ## 一致恢复
 
@@ -178,3 +181,12 @@ require the existing separate authorization.
 Owner 已允许必要的迁移专用临时超级用户通过 CLI 分别创建，迁移完成后移除。执行前绑定实际目标、有限名单、CLI 能力和维护窗口，确认新建标识不会覆盖既有账号；凭据仅留私有环境，不打印、提交或上传。结束后删除新建账号并核验账号和临时凭据无残留。该授权不创建长期 users、不授永久人类或服务角色，也不允许服务改用超管凭据。共用部署入口不自动创建账号。
 
 前置检查失败不产生快照、guard 或服务变更。停止后封存、恢复演练、身份许可或安装前漂移失败，保留实际私有快照、原独立许可、guard 和 failed 状态，不启动后续服务或旧 daemon。目标角色失败发生于 PB 启动前；目标认证失败时 PB 可能已经启动，后续服务仍不启动。未解决的失败、同一或更旧 run、并发锁均拒绝覆盖；重试不自动删状态、锁、guard、快照或许可，不新增自动恢复入口。只有已成功状态可接受真正较新的 run，其快照与旧证据分别保留。
+
+
+## 有限特权与尚缺的真实输入
+
+主进程保持实际非 root runner。`deployment.mjs` 通过无 shell 的 `sudo -n /usr/bin/python3 -I -c` 调用固定内嵌代码，操作枚举仅 stop、cleanup-sync、cleanup-java；不接受任意命令、脚本、服务或写路径。子调用复核实际 euid=0、SUDO_USER/UID/GID、root 配置身份/摘要、锁 inode/同 run、候选清单及物理主机。写入仅两份批准 runtime 叶、必要自建目录及实际 sync unit 绑定的 cgroup.freeze/cgroup.kill；有限 reload/属性读取和原 stop 收口在该接口内。整个 apply 不改为 root，不安装 sudo 策略或通用 helper。
+
+实际部署前仍须供应获准人类/两份独立服务身份、私有凭据与 `process.env` 来源、root 配置、runner 可读且可一致备份的明确 EnvFiles 和私有目录。服务 EnvFile 使用原白名单路径 `/etc/default/velocity-sync`、`/etc/default/mcsm-proxy`，与实际 unit 绑定；不要执行旧 JSON 凭据方案。临时迁移 superuserCLI 的创建/删除必须遵守已准目标与窗口、无覆盖、私有凭据及删除残留核验，不能代替长期 `users` 身份或目标认证。
+
+已有 root 读取与程序库存不证明本实现的 Linux freeze/kill、实际停服或玩家全过程连续性。完整真实 run/候选、原安全恢复与有限外部动作、010 同窗前基线和后验、最终 Release 条件未齐时仍未就绪。CI 固定输入/执行顺序属于另待批准的方案；本实现不改变 workflow。
