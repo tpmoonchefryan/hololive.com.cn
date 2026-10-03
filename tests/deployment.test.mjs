@@ -7,7 +7,7 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const config = {
   approvedRevision: revision, previousRevision: oldRevision,
@@ -41,6 +41,13 @@ test('exact approval, host/paths/PB/services/config bindings are mandatory', () 
     { configurationFiles: ['/etc/ssh/private-key'] }, { configurationFiles: ['/etc/systemd/system/pocketbase.service'] }, { velocityServiceBinding: null }, { velocityPorts: [] }, { previousRevision: undefined },
   ]) assert.throws(() => validatePlan({ ...config, ...change }, revision, 1));
   assert.throws(() => validatePlan(config, revision, 0));
+});
+test('first mixed capture is explicit and cannot invent a previous snapshot or historical scope', () => {
+  const baseline={kind:'mixed',capture:'stopped-backup',sourceRevision:null,retainedHistory:[{path:'backend/pb_migrations/1765100008_add_velocity_advanced.js',sha256:'85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c',mode:0o644}],sourceAbsentHistory:['1770817921_updated_users.js','1770818121_updated_users.js','1770818775_updated_users.js']};
+  const first={...config,previousRevision:undefined,baseline};
+  assert.equal(validatePlan(first,revision,1).revision,revision);
+  for(const change of [{capture:true},{capture:'online'},{snapshotId:'d'.repeat(64)},{snapshotDirectory:'/fixture/imaginary'},{sourceRevision:oldRevision},{retainedHistory:[]},{sourceAbsentHistory:[]}])assert.throws(()=>validatePlan({...first,baseline:{...baseline,...change}},revision,1));
+  assert.throws(()=>validatePlan({...first,previousRevision:oldRevision},revision,1));
 });
 test('old sync is stopped before guard/PB, consistent backup and rehearsal before writes', async () => {
   const f = fixture(); assert.equal((await deploy(f.adapter, config, revision, 12)).status, 'deployed');
@@ -368,7 +375,7 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
 // Retained independent acceptance fixtures now exercise the fixed production
 // entry, both PB versions, and the actual users authentication/API boundary.
 test('safe recovery and deployment validate actual contracts, unlisted roles and target authentication on both PB versions', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async () => {
-const evidence = fs.mkdtempSync(path.join(projectRoot, '.context/rework-epic005-004/adapter-')), project = projectRoot;
+const evidence = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hololive-adapter-'))), project = projectRoot;
 const candidate = revision;
 const extra = 'backend/pb_migrations/1765100008_add_velocity_advanced.js';
 const absent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1770818775_updated_users.js'];
@@ -400,8 +407,8 @@ async function request(base, route, token, method='GET', body) {
   const response=await fetch(base+route,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:token}:{})},...(body?{body:JSON.stringify(body)}:{})});
   return {status:response.status,data:await response.json()};
 }
-async function fixture(version,binary) {
-  const local=path.join(root,'PB'+version);mkdir(local);
+async function fixture(version,binary, suffix = '') {
+  const local=path.join(root,'PB'+version+suffix);mkdir(local);
   const webRoot=path.join(local,'site');mkdir(webRoot);
   copyWithModes(bundle,webRoot,{recursive:true,verbatimSymlinks:true});
   // Exact pre-upgrade application migration inventory; hooks were absent on the
@@ -474,7 +481,7 @@ cp.execFileSync=(file,args,options)=>{
   throw new Error('Unapproved external command refused: '+file);
 };syncBuiltinESMExports();
 const environment={...process.env};Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
-const adapter=()=>productionAdapter(bundle,bound.config,candidate,6,bound.configFile);
+const adapter=(run=6)=>productionAdapter(bundle,bound.config,candidate,run,bound.configFile);
 function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
 function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
@@ -611,6 +618,61 @@ try{
     sql(path.join(existing,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('update users set is_admin=0,service_account=1 where id=?',(sys.argv[2],));c.commit()",[bound.ordinary.id]);result=await attempt(()=>adapter().rehearse(newBackup()));assert.equal(result.accepted,false,result.error);assert.match(result.error,/Unapproved role change/);
     observe('P06-authentication-'+version,'actual target rejects credentials then admits valid identities',{passed:true});
   }
+  // Fresh first capture never initializes a prior snapshot. Every scenario has
+  // its own actual PB database, permission, state and private evidence root.
+  for (const [version,binary] of binaries) for (const scenario of ['preflight-history','preflight-bytes','preflight-unknown','seal-failure','rehearsal-failure','binding-drift','install-drift','first-success','full-success']) {
+    bound=await fixture(version,binary,'-'+scenario);
+    bound.config.baseline={kind:'mixed',capture:'stopped-backup',sourceRevision:null,retainedHistory:[{path:extra,sha256:sha(retainedBytes),mode:0o644}],sourceAbsentHistory:absent};
+    delete bound.config.previousRevision;
+    const javaBefore=inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles);
+    if(scenario.startsWith('preflight-')) {
+      if(scenario==='preflight-bytes')fs.writeFileSync(path.join(bound.webRoot,extra),'changed retained bytes');
+      else if(scenario==='preflight-unknown')fs.writeFileSync(path.join(bound.webRoot,'backend/pb_migrations/unknown.js'),'unknown source');
+      else sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('delete from _migrations where file=?',(sys.argv[2],));c.commit()",[absent[0]]);
+      const result=await attempt(()=>deploy(adapter(),bound.config,candidate,6));assert.equal(result.accepted,false);assert.match(result.error,/Source-absent ledger|Unknown or modified|Retained snapshot bytes/);
+      assert.equal(bound.commands.some(c=>c.file==='sudo'),false);assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),false);
+      assert.deepEqual(fs.readdirSync(bound.config.backupRoot),[]);assert.equal(fs.existsSync(path.join(bound.config.stateRoot,'deployment.json')),false);
+    } else {
+      const successful=scenario==='first-success'||scenario==='full-success';
+      if(successful) {
+        // A separately prepared synthetic source already has approved roles.
+        // This does not grant production users or make a pre-stop snapshot.
+        fs.rmSync(path.join(bound.webRoot,'backend/pb_data'),{recursive:true});copyWithModes(path.join(bound.config.recoveryWorkingCopy,'backend/pb_data'),path.join(bound.webRoot,'backend/pb_data'),{recursive:true});
+        bound.config.targetAuthentication=bound.identities.map(item=>({...item,identity:item.role+'@example.invalid',passwordEnv:'DISPOSABLE_TARGET_PASSWORD',...(item.role==='service'?{services:['velocity-sync']}:{})}));
+        process.env.DISPOSABLE_TARGET_PASSWORD='Disposable-Only-2026!';
+      }
+      if(scenario==='full-success') {
+        fs.unlinkSync(path.join(bound.webRoot,extra));sql(path.join(bound.webRoot,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('delete from _migrations where file=?',(f,)) for f in json.loads(sys.argv[2])];c.commit()",[JSON.stringify([path.basename(extra),...absent])]);
+        delete bound.config.baseline;bound.config.previousRevision=oldRevision;delete bound.config.recoveryWorkingCopy;
+      }
+      if(scenario==='rehearsal-failure')bound.config.recoveryWorkingCopy=bound.webRoot;
+      const actual=adapter(), originalBaseline=actual.baseline, originalBackup=actual.backup;
+      actual.backup=()=>{const stops=bound.commands.filter(c=>c.file==='sudo'&&c.args[2]==='stop').map(c=>c.args[3]);assert.deepEqual(stops,['velocity-sync','pocketbase']);assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);const backup=originalBackup();if(scenario==='seal-failure'){const manifest=read(path.join(backup,'backup.json'));manifest.captureBinding.runId='wrong-run';write(path.join(backup,'backup.json'),manifest);}return backup;};
+      if(scenario==='binding-drift'||scenario==='install-drift')actual.baseline=backup=>{originalBaseline(backup);if(scenario==='binding-drift')process.env.GITHUB_RUN_ID='6007';else fs.writeFileSync(path.join(bound.webRoot,'dist/index.html'),'unapproved target drift');};
+      const result=await attempt(()=>deploy(actual,bound.config,candidate,6));process.env.GITHUB_RUN_ID='6006';
+      assert.equal(result.accepted,successful,result.error);
+      const state=read(path.join(bound.config.stateRoot,'deployment.json'));assert.equal(state.status,successful?'deployed':'failed');
+      assert.equal(fs.existsSync(path.join(bound.webRoot,'backend/.velocity-maintenance')),true);
+      assert.equal(fs.readdirSync(bound.config.backupRoot).length,1);
+      const raw=read(path.join(state.backup,'backup.json'));
+      if(scenario!=='full-success'&&scenario!=='seal-failure') {assert.deepEqual(raw.captureBinding,{revision:candidate,runNumber:6,runId:'6006',repository:bound.config.repository,snapshotDirectory:state.backup});assert.equal(bound.config.baseline.snapshotId,undefined);}
+      const sealed=fs.readFileSync(path.join(state.backup,'backup.json')), permissionFile=path.join(state.backup,'expected-recovery-contract.json'), permission=fs.existsSync(permissionFile)?fs.readFileSync(permissionFile):null;
+      if(bound.running){const service=await bound.running;await service.close();bound.running=null;}
+      const commandsBefore=bound.commands.length;
+      const retry=await attempt(()=>deploy(adapter(),bound.config,candidate,6));assert.equal(retry.accepted,false);assert.match(retry.error,/Older\/repeated run or unresolved failed deployment/);
+      assert.equal(bound.commands.slice(commandsBefore).some(c=>c.file==='sudo'),false);assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
+      if(successful) {
+        process.env.GITHUB_RUN_ID='6007';
+        const next=await deploy(adapter(7),bound.config,candidate,7);assert.equal(next.status,'deployed');assert.notEqual(next.backup,state.backup);assert.equal(fs.readdirSync(bound.config.backupRoot).length,2);
+        assert.deepEqual(fs.readFileSync(path.join(state.backup,'backup.json')),sealed);if(permission)assert.deepEqual(fs.readFileSync(permissionFile),permission);else assert.equal(fs.existsSync(permissionFile),false);
+        if(bound.running){const service=await bound.running;await service.close();bound.running=null;}process.env.GITHUB_RUN_ID='6006';
+      }
+      if(!successful)assert.equal(bound.commands.some(c=>c.file==='sudo'&&['start','restart'].includes(c.args[2])),false);
+    }
+    assert.deepEqual(inventory(bound.config.velocityRoot,bound.config.protectedVelocityFiles),javaBefore);
+    observe('capture-'+scenario+'-'+version,'first/full capture, stop order, bindings, failed-state and permission preservation',{passed:true,fixtureRoot:bound.local});
+  }
+
 }finally{
   if(bound?.running){const service=await bound.running;await service.close();}
   Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];
@@ -619,4 +681,15 @@ write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,iso
 console.log(JSON.stringify({observations:observations.length,passed:observations.filter(x=>x.passed).length,failed:observations.filter(x=>!x.passed).length,root,production:false}));
 process.exitCode=observations.every(x=>x.passed)?0:1;
 
+});
+
+test('online migration metadata reads committed WAL, without treating it as a stopped snapshot', async t => {
+  const root=temp(t), db=path.join(root,'data.db');
+  const writer=cp.spawn('python3',['-u','-c',`import sqlite3,sys,time
+c=sqlite3.connect(sys.argv[1]);c.execute('pragma journal_mode=WAL');c.execute('pragma wal_autocheckpoint=0');c.execute('create table _migrations(file text,applied integer)');c.commit();c.execute("insert into _migrations values ('committed-in-wal.js',1)");c.commit();print('ready',flush=True);time.sleep(30)`,db],{stdio:['ignore','pipe','pipe']});
+  try {
+    await new Promise((resolve,reject)=>{writer.stdout.once('data',resolve);writer.once('error',reject);writer.once('exit',code=>reject(new Error('writer exited '+code)));});
+    assert.ok(fs.statSync(db+'-wal').size>0);
+    assert.deepEqual(readMigrationLedger(root),[['committed-in-wal.js',1]]);
+  } finally {writer.kill();await new Promise(resolve=>writer.once('close',resolve));}
 });

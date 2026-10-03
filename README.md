@@ -106,8 +106,8 @@ velocity-sync
 │  ├─ check_bundle_budget.mjs # 构建产物体积预算检查
 │  └─ setup_velocity.sh       # Ubuntu 初始 Velocity 安装脚本
 ├─ .github/workflows/deploy.yml
-├─ deploy.sh                  # Ubuntu 一键部署脚本
-├─ DEPLOY.md                  # 部署说明
+├─ deploy.sh                  # 既有主机有限维护入口
+├─ DEPLOY.md                  # 完整产物、有限维护和恢复契约
 └─ RUNNER_SETUP.md            # 自托管 Runner 说明
 ```
 
@@ -226,32 +226,13 @@ npm run check:bundle  # 构建体积预算检查
 
 ## 10. 部署说明
 
-### 10.1 一键部署（Ubuntu）
+### 10.1 既有主机维护
 
-使用根目录脚本：
-
-```bash
-chmod +x deploy.sh
-sudo ./deploy.sh
-```
-
-脚本会安装 Nginx/Node/PocketBase，构建前端，配置 HTTPS，并安装相关 systemd 服务。
+`deploy.sh` 调用 `scripts/deployment.mjs`，使用独立批准的 root 私有配置与完整 bundle。执行条件、首次 mixed 停服备份、恢复演练、真实目标身份和 Java 保护见 [DEPLOY.md](DEPLOY.md)。现有 `setup_*.sh` 的初装与配置动作另行批准。
 
 ### 10.2 CI/CD（GitHub Actions）
 
-工作流：`.github/workflows/deploy.yml`
-
-- 触发：`main` 分支 push / 手动触发
-- Runner：`self-hosted`
-- 流程：
-  1. `npm ci`
-  2. `npm run lint`
-  3. `npm run audit:prod`
-  4. `npm run build`
-  5. `npm run check:bundle`
-  6. `rsync` 同步 `dist/`、`backend/pb_migrations/`、`backend/scripts/`
-  7. 执行 `setup_map_proxy.sh`、`setup_mcsm_proxy.sh`
-  8. 重启 `pocketbase` / `velocity-sync` / `map-proxy` / `mcsm-proxy`
+工作流 [deploy.yml](.github/workflows/deploy.yml) 使用既有 self-hosted runner，沿用 `main` push / 手动入口。`DEPLOY_CONFIG` 指向主机 root 所有的有限配置，绑定获准提交与真实 run。工作流检查、构建并封装 `dist`、migrations、hooks、scripts 和锁定运行依赖；在原维护顺序中核对主机及历史、停止 sync、写 guard、停止 PB、备份、隔离恢复与迁移验证，再安装和核验目标认证。成功记录须有本次实际证据；生产前提缺失时拒绝。完整配置与服务边界见 [DEPLOY.md](DEPLOY.md)，runner 核对见 [RUNNER_SETUP.md](RUNNER_SETUP.md)。
 
 ### 10.3 生产服务与端口
 
@@ -295,14 +276,14 @@ sudo ./deploy.sh
 
 ## 13. 参考文档
 
-- 部署手册：`DEPLOY.md`
+- 部署手册：[DEPLOY.md](DEPLOY.md)
 - Runner 配置：`RUNNER_SETUP.md`
-- 一键部署脚本：`deploy.sh`
+- 有限维护入口：[deploy.sh](deploy.sh)
 - 后端服务脚本：`backend/scripts/`
 
 ## 本地验证与授权迁移
 
-PocketBase 支持基准为 **0.26.5 和 0.34.2**；部署默认 0.26.5，升级前须在隔离副本执行迁移重放。Windows 或 Linux 使用同版本官方二进制；测试通过 `PB_TEST_BINARY_026` / `PB_TEST_BINARY_034` 指定文件。
+PocketBase 支持基准为 **0.26.5 和 0.34.2**；部署读取实际主机版本，不设下载或升级默认值；升级前须另行批准并在隔离副本执行迁移重放。Windows 或 Linux 使用同版本官方二进制；测试通过 `PB_TEST_BINARY_026` / `PB_TEST_BINARY_034` 指定文件。
 
 管理员授权由超管供应 `users.is_admin=true`，并验证身份后设 `verified=true`。无人根据邮箱白名单自动升级；既有 whitelists 只作为业务资料。服务账号由超管另设 `service_account=true`，使用独立凭据并可通过撤销 `is_admin` 立即停止管理访问。普通 users 创建、修改、删除由超管管理，OAuth 新身份仍由可信供应流程建立，不能自行提升管理员。
 

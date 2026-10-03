@@ -1,61 +1,11 @@
-# GitHub Self-Hosted Runner Setup Guide
+# 既有 GitHub Self-Hosted Runner 核对
 
-本指南将帮助您在阿里云服务器上安装 GitHub Actions Runner，从而绕过 Gitee 同步步骤，直接从服务器拉取代码并部署。
+现有维护工作流沿用 `main` push 和手动入口。Runner 的注册、安装、用户与权限配置属于另行批准的初装操作；本指南不证明主机已完成安装或授权。
 
-## 第一步：获取 RunnerToken
+维护前核对 GitHub 中 runner 在线状态及实际仓库、标签、主机身份、服务用户与工作目录。名称不能证明物理目标。确认本次获准 SHA、真实 Actions run，以及仓库 `DEPLOY_CONFIG` 指向的主机 root 所有私有 JSON 配置；配置与有限目录、网站服务、PB 版本、环境文件、备份及恢复条件对应同一目标。
 
-1.  进入您的 GitHub 仓库页面。
-2.  点击 **Settings** -> **Actions** -> **Runners**。
-3.  点击 **New self-hosted runner**。
-4.  选择 **Linux** 系统。
+仅核对执行原有限维护所需的非交互权限，包括已核定网站服务的 stop/start/restart。已有免密 sudo、旧 webhook 清理或初装状态须由实际证据确认，不能由历史文档认定。缺权限时停止该动作并提交具体缺项，不自行扩大 sudo 或安装服务。
 
-## 第二步：在服务器上安装 Runner
+部署使用完整 bundle 与 `release.json`，不依赖 runner 工作目录碰巧存在的运行库。初次 mixed 基线在原 backup 步骤、停止 sync 和 PB 后生成封存；恢复、目标角色与实际认证通过后才允许后续服务启动。旧 daemon 的在途安全须先成立，同机 Java Velocity 持续受保护。
 
-*请使用 SSH 连接到您的服务器，并执行以下命令（建议使用非 root 用户，但为了简单起见，以下假设您如果用 root 运行需要额外参数）：*
-
-### 1. 创建 Runner 目录
-```bash
-# 创建一个文件夹
-mkdir actions-runner && cd actions-runner
-```
-
-### 2. 下载 Runner (请参考 GitHub 页面给出的最新版本命令)
-*示例 (GitHub 页面会提供包含 Token 的准确命令，请复制那里的)*：
-```bash
-# 举例：
-curl -o actions-runner-linux-x64-2.311.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.311.0/actions-runner-linux-x64-2.311.0.tar.gz
-tar xzf ./actions-runner-linux-x64-2.311.0.tar.gz
-```
-
-### 3. 配置 Runner
-**关键步骤**：GitHub 页面生成的 `config.sh` 命令。
-```bash
-# 如果您是 root 用户，必须加上 --allow-run-as-root 参数
-./config.sh --url https://github.com/YourRepo/hololive.com.cn --token A1B2C3D4... --allow-run-as-root
-```
-*   **Runner group**: Default
-*   **Runner name**: (默认即可，或输入 `aliyun-server`)
-*   **Labels**: (默认即可，包含 `self-hosted`, `linux`, `x64`)
-*   **Work folder**: `_work` (默认即可)
-
-### 4. 安装为系统服务 (后台运行 & 开机自启)
-```bash
-./svc.sh install
-./svc.sh start
-```
-此时 Runner 应该显示为 `Active (Running)`。在 GitHub 页面上刷新，您应该能看到 Runner 状态为 `Idle` (空闲)。
-
-## 第三步：权限配置 (已完成)
-
-**我已通过 Root 权限为您配置了 `ubuntu` 用户的免密 sudo 权限。**
-Runner 在重启服务时 (`sudo systemctl restart pocketbase`) 将不再需要输入密码。
-
-您可以直接进行下一步。
-
-## 第四步：清理旧配置
-
-我已帮您删除了 Gitee 相关的 Webhook 脚本。您还需要清理一下 `deploy.sh` 中残留的 PM2 进程配置（我会帮您更新脚本）。
-
----
-
-**配置完成后，任何推送到 `main` 分支的代码都会直接由这就服务器拉取并部署。**
+具体维护顺序、失败状态、私有证据及恢复边界见 [DEPLOY.md](DEPLOY.md)。当前 runner、配置或某次成功部署的结论均须绑定实际 run 与目标证据。

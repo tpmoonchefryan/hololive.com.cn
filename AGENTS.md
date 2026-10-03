@@ -9,8 +9,8 @@
 | 分区 / 编号前缀 | `hololive.com.cn` / `TCRN-HOLOLIVE-CN` |
 | 本地链 | 平台根下 `.tcrn-workspace/hololive.com.cn/workspace` |
 | 签署目录 | 平台根下 `.tcrn-workspace/hololive.com.cn/attestations` |
-| 引擎 | 已验证的安装版 `~/.tcrn-workflow/tcrn-workflow`；接入版本 `1.2.1`，实际要求读取本分区设置 |
-| Helper | 已验证的安装版 `~/.agents/skills/tcrn-workflow-helper/SKILL.md` |
+| 引擎 | 通过父级平台入口和当前分区配置定位的已验证安装版；接入版本 `1.2.1`，实际要求读取本分区设置 |
+| Helper | 通过父级平台入口定位的已验证安装版 Helper |
 | 首个 INIT | `TCRN-HOLOLIVE-CN-INIT-001` / `work:97ad7cccb09fccd437d26f5a` |
 | 接入与范围批准 | `TCRN-HOLOLIVE-CN-MIN-001` / `minutes:24b2f4744d4b7b4007c4375a` |
 
@@ -25,4 +25,4 @@
 - 代码身份：`tpmoonchefryan <253097889+tpmoonchefryan@users.noreply.github.com>`，不添加 `Co-Authored-By`。
 - 本次批准包括本地修复、必要验证和有条件解耦；推送、发布、生产操作及真实第三方账号操作遵守平台既有独立授权边界。
 
-本地审查证据位于 `.context/review-2026-10-02/`，接入回执位于 `.context/governance-2026-10-02/`；它们不代替实时链。公开仓库文档不得嵌入本机私有路径、凭据或生产数据。
+本地审查证据与接入回执通过相关 live `work-show` 定位；它们不代替实时链。公开仓库文档不得嵌入本机私有路径、凭据或生产数据。
