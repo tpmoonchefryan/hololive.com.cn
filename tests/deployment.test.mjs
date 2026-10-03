@@ -6,7 +6,8 @@ import os from 'node:os';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter } from '../scripts/deployment.mjs';
+import { pocketbase, binaries, root as projectRoot } from './helpers/pocketbase.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const config = {
   approvedRevision: revision, previousRevision: oldRevision,
@@ -157,7 +158,7 @@ async function productionFixture(t, callback) {
     throw new Error('External command refused by isolated test');
   };
   Object.assign(process.env, { GITHUB_REPOSITORY: bound.repository, GITHUB_RUN_ID: '123', GITHUB_EVENT_NAME: 'workflow_dispatch' }); syncBuiltinESMExports();
-  try { await callback({ root, bundle, webRoot, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
+  try { await callback({ root, bundle, webRoot, config: bound, protectedFile, commands, adapter: productionAdapter(bundle, bound, revision, 2, configFile), executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
   finally {
     fs.readFileSync = originalRead; fs.statSync = originalStat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
     for (const [key, value] of Object.entries(environment)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -262,3 +263,104 @@ test('bundle structural parent aliases cannot make external ordinary files look 
   assert.throws(() => verifyBundle(bundle, revision), /Symlink/);
   assert.equal(fs.readFileSync(path.join(external, 'scripts/sync_velocity.js'), 'utf8'), 'candidate protected daemon');
 });
+
+function sealSnapshot(backup, webRoot, revisionValue, retainedHistory = [], sourceAbsentHistory = []) {
+  const snapshot = snapshotApplication(webRoot, backup);
+  const configFile = path.join(backup, 'fixture.env'); fs.writeFileSync(configFile, 'DISPOSABLE_SAMPLE=1\n', {mode:0o600});
+  const configurationRoot = path.join(backup,'configuration'), configRelative=configFile.slice(1);
+  fs.mkdirSync(path.dirname(path.join(configurationRoot,configRelative)),{recursive:true}); fs.copyFileSync(configFile,path.join(configurationRoot,configRelative));fs.chmodSync(path.join(configurationRoot,configRelative),0o600);
+  const stat=fs.statSync(configFile);
+  const value={revision:revisionValue,...snapshot,configuration:inventory(configurationRoot,[configRelative]),ownership:[{path:configRelative,uid:stat.uid,gid:stat.gid}],contract:checkDatabases(path.join(backup,'application/backend/pb_data')),retainedHistory,sourceAbsentHistory};
+  value.snapshotId=snapshotIdentity(value);fs.writeFileSync(path.join(backup,'backup.json'),JSON.stringify(value));return value;
+}
+for (const [version,binary] of binaries) test(`real PB snapshot, mixed history preservation and safe recovery ${version}`, async t => {
+  const root=temp(t), bundle=path.join(root,'bundle'),live=path.join(root,'live'),backup=path.join(root,'backup');
+  fs.mkdirSync(bundle);fs.mkdirSync(live);fs.mkdirSync(backup);createBundle(bundle);
+  // Candidate uses actual repository migrations/hooks, never the unknown target source.
+  fs.rmSync(path.join(bundle,'backend/pb_migrations'),{recursive:true});fs.cpSync(path.join(projectRoot,'backend/pb_migrations'),path.join(bundle,'backend/pb_migrations'),{recursive:true});
+  fs.rmSync(path.join(bundle,'backend/pb_hooks'),{recursive:true});fs.cpSync(path.join(projectRoot,'backend/pb_hooks'),path.join(bundle,'backend/pb_hooks'),{recursive:true});
+  fs.writeFileSync(path.join(bundle,'release.json'),JSON.stringify({revision,paths:artifactPaths,files:inventory(bundle)}));
+  const pb=await pocketbase(binary);
+  try {
+    const identities=[];
+    for (const role of ['admin','service']) {
+      const response=await pb.request('/api/collections/users/records',{token:pb.token,method:'POST',body:{email:role+'@example.invalid',password:'Disposable-Recovery-2026!',passwordConfirm:'Disposable-Recovery-2026!',verified:true,is_admin:true,service_account:role==='service'}});
+      assert.equal(response.status,200,JSON.stringify(response));identities.push({id:response.data.id,role});
+    }
+    await pb.service.close();
+    fs.cpSync(bundle,live,{recursive:true,verbatimSymlinks:true});fs.mkdirSync(path.join(live,'backend/pb_data'));fs.cpSync(path.join(pb.directory,'data'),path.join(live,'backend/pb_data'),{recursive:true});fs.copyFileSync(binary,path.join(live,'backend/pocketbase'));
+    fs.mkdirSync(path.join(live,'backend/pb_data/storage'),{recursive:true});fs.writeFileSync(path.join(live,'backend/pb_data/storage/sample.bin'),'anonymous media');
+    const full=sealSnapshot(backup,live,oldRevision);assert.equal(verifySnapshot(backup).snapshotId,full.snapshotId);
+    const restored=path.join(root,'full-restored');restoreBackup(backup,restored);assert.equal(fs.readFileSync(path.join(restored,'isolated-configuration',full.configuration[0].path),'utf8'),'DISPOSABLE_SAMPLE=1\n');assert.equal(fs.statSync(path.join(restored,'isolated-configuration',full.configuration[0].path)).mode&0o777,0o600);
+    const safe=createSafeRecovery(backup,live,bundle,revision,identities);const safeRestored=path.join(root,'safe-restored');const proof=restoreSafeRecovery(safe,safeRestored,revision);assert.equal(proof.sourceSnapshotId,full.snapshotId);assert.equal(proof.oldDaemonStarted,false);assert.equal(fs.readFileSync(path.join(safeRestored,'backend/pb_data/storage/sample.bin'),'utf8'),'anonymous media');
+    assert.throws(()=>restoreSafeRecovery(safe,path.join(root,'wrong-app'),oldRevision),/binding/);
+    assert.throws(()=>createSafeRecovery(backup,live,bundle,revision,[]),/identities/);
+    const unsafe=path.join(root,'unsafe-derived');fs.cpSync(live,unsafe,{recursive:true,verbatimSymlinks:true});
+    const sql=cp.spawnSync('python3',['-c',`import sqlite3,sys
+c=sqlite3.connect(sys.argv[1]);c.execute("update _collections set updateRule='' where name='posts'");c.commit()`,path.join(unsafe,'backend/pb_data/data.db')],{encoding:'utf8'});assert.equal(sql.status,0,sql.stderr);assert.throws(()=>createSafeRecovery(backup,unsafe,bundle,revision,identities),/Unsafe protected/);
+    fs.writeFileSync(path.join(unsafe,'backend/pb_data/storage/sample.bin'),'media drift');assert.throws(()=>createSafeRecovery(backup,unsafe,bundle,revision,identities),/Derived media mismatch/);
+    const safeManifest=JSON.parse(fs.readFileSync(path.join(safe,'backup.json')));safeManifest.identities[0].role='service';fs.writeFileSync(path.join(safe,'backup.json'),JSON.stringify(safeManifest));assert.throws(()=>restoreSafeRecovery(safe,path.join(root,'wrong-identity'),revision),/identity binding/);
+    const env=path.join(backup,'configuration',full.configuration[0].path);fs.writeFileSync(env,'tampered');assert.throws(()=>verifySnapshot(backup),/Configuration snapshot drift/);fs.writeFileSync(env,'DISPOSABLE_SAMPLE=1\n');
+    // Exact retained bytes are supplied only through private evidence in the governed run.
+    const retainedSource=process.env.PB_RETAINED_HISTORY_FILE;
+    if (!retainedSource) {t.diagnostic('Exact mixed retained-history case not-verifiable: private source path absent');return;}
+    const bytes=fs.readFileSync(retainedSource),digest=createHash('sha256').update(bytes).digest('hex');assert.equal(digest,'85f8f91d99a2cb72fec56515f08b980c26cf9f32350ef1caae53f6f904749d0c');
+    const extra='backend/pb_migrations/1765100008_add_velocity_advanced.js';fs.writeFileSync(path.join(live,extra),bytes,{mode:0o644});
+    const absent=['1770817921_updated_users.js','1770818121_updated_users.js','1770818775_updated_users.js'];
+    const inserted=cp.spawnSync('python3',['-c',`import sqlite3,sys,json
+c=sqlite3.connect(sys.argv[1])
+for file in json.loads(sys.argv[2]): c.execute('insert into _migrations (file,applied) values (?,?)',(file,1))
+c.commit()`,path.join(live,'backend/pb_data/data.db'),JSON.stringify([path.basename(extra),...absent])],{encoding:'utf8'});assert.equal(inserted.status,0,inserted.stderr);
+    fs.rmSync(path.join(live,'backend/pb_hooks'),{recursive:true}); // actual missing component is represented
+    const mixedBackup=path.join(root,'mixed-backup');fs.mkdirSync(mixedBackup);const retained=[{path:extra,sha256:digest,mode:0o644}],mixed=sealSnapshot(mixedBackup,live,null,retained,absent);
+    const baseline={kind:'mixed',sourceRevision:null,snapshotId:mixed.snapshotId,snapshotDirectory:mixedBackup,retainedHistory:retained,sourceAbsentHistory:absent};
+    assert.equal(validatePlan({...config,previousRevision:undefined,baseline},revision,3).revision,revision);verifySnapshot(mixedBackup,baseline);
+    assert.throws(()=>verifySnapshot(mixedBackup,{...baseline,snapshotId:'0'.repeat(64)}),/binding mismatch/);
+    assert.throws(()=>installBundle(bundle,live,revision,baseline),/complete snapshot/);
+    fs.writeFileSync(path.join(live,'dist/index.html'),'target drift');assert.throws(()=>installBundle(bundle,live,revision,baseline,mixedBackup),/Target changed/);fs.copyFileSync(path.join(mixedBackup,'application/dist/index.html'),path.join(live,'dist/index.html'));
+    installBundle(bundle,live,revision,baseline,mixedBackup);assert.deepEqual(fs.readFileSync(path.join(live,extra)),bytes);assert.deepEqual(checkDatabases(path.join(live,'backend/pb_data'))['data.db'].migrations,mixed.contract['data.db'].migrations);assert.equal(fs.existsSync(path.join(live,'backend/pb_migrations',absent[0])),false);assert.equal(fs.existsSync(path.join(live,'backend/pb_hooks')),true);
+    fs.writeFileSync(path.join(live,extra),'modified');assert.throws(()=>verifyImmutableMigrations(bundle,live,baseline),/Unknown or modified/);
+    fs.writeFileSync(path.join(live,extra),bytes);fs.writeFileSync(path.join(live,'backend/pb_migrations/new-unknown.js'),'unknown');assert.throws(()=>verifyImmutableMigrations(bundle,live,baseline),/Unknown or modified/);
+    const altered=JSON.parse(fs.readFileSync(path.join(mixedBackup,'backup.json')));altered.retainedHistory[0].sha256='0'.repeat(64);altered.snapshotId=snapshotIdentity(altered);fs.writeFileSync(path.join(mixedBackup,'backup.json'),JSON.stringify(altered));assert.throws(()=>verifySnapshot(mixedBackup,{...baseline,snapshotId:altered.snapshotId,retainedHistory:altered.retainedHistory}),/Unknown retained/);
+  } finally {if (pb.service.child.exitCode === null && pb.service.child.signalCode === null) await pb.close();}
+});
+
+test('productionAdapter mixed preflight/backup/rehearsal/install uses actual files and PB commands', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async t => productionFixture(t, async f => {
+  const pb=await pocketbase(binaries[0][1]);
+  let commandOverride=cp.execFileSync;
+  try {
+    const identities=[];
+    for (const role of ['admin','service']) {
+      const response=await pb.request('/api/collections/users/records',{token:pb.token,method:'POST',body:{email:role+'-adapter@example.invalid',password:'Disposable-Adapter-2026!',passwordConfirm:'Disposable-Adapter-2026!',verified:true,is_admin:true,service_account:role==='service'}});assert.equal(response.status,200);identities.push({id:response.data.id,role});
+    }
+    await pb.service.close();
+    fs.rmSync(path.join(f.bundle,'backend/pb_migrations'),{recursive:true});fs.cpSync(path.join(projectRoot,'backend/pb_migrations'),path.join(f.bundle,'backend/pb_migrations'),{recursive:true});
+    fs.rmSync(path.join(f.bundle,'backend/pb_hooks'),{recursive:true});fs.cpSync(path.join(projectRoot,'backend/pb_hooks'),path.join(f.bundle,'backend/pb_hooks'),{recursive:true});
+    fs.writeFileSync(path.join(f.bundle,'release.json'),JSON.stringify({revision,paths:artifactPaths,files:inventory(f.bundle)}));
+    fs.cpSync(f.bundle,f.webRoot,{recursive:true,verbatimSymlinks:true});
+    fs.rmSync(path.join(f.webRoot,'backend/pb_data'),{recursive:true});fs.cpSync(path.join(pb.directory,'data'),path.join(f.webRoot,'backend/pb_data'),{recursive:true});fs.copyFileSync(binaries[0][1],path.join(f.webRoot,'backend/pocketbase'));
+    const retainedSource=process.env.PB_RETAINED_HISTORY_FILE;
+    assert.ok(retainedSource,'governed exact-history adapter proof requires private source');
+    const extra='backend/pb_migrations/1765100008_add_velocity_advanced.js',bytes=fs.readFileSync(retainedSource);fs.writeFileSync(path.join(f.webRoot,extra),bytes,{mode:0o644});
+    const absent=['1770817921_updated_users.js','1770818121_updated_users.js','1770818775_updated_users.js'];
+    const inserted=cp.spawnSync('python3',['-c',`import sqlite3,sys,json
+c=sqlite3.connect(sys.argv[1])
+for file in json.loads(sys.argv[2]):c.execute('insert into _migrations (file,applied) values (?,?)',(file,1))
+c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.basename(extra),...absent])],{encoding:'utf8'});assert.equal(inserted.status,0,inserted.stderr);
+    fs.rmSync(path.join(f.webRoot,'backend/pb_hooks'),{recursive:true});
+    f.config.configurationFiles=[path.join(f.webRoot,'backend/.env')];f.config.recoveryIdentities=identities;
+    cp.execFileSync=(file,args,options)=>file==='python3'||(file.endsWith('/backend/pocketbase')&&args[0]!=='--version')?f.executeLocal(file,args,options):commandOverride(file,args,options);syncBuiltinESMExports();
+    const initial=f.adapter.backup();const raw=JSON.parse(fs.readFileSync(path.join(initial,'backup.json')));raw.revision=null;raw.retainedHistory=[{path:extra,sha256:createHash('sha256').update(bytes).digest('hex'),mode:0o644}];raw.sourceAbsentHistory=absent;raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));
+    f.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:raw.snapshotId,snapshotDirectory:initial,retainedHistory:raw.retainedHistory,sourceAbsentHistory:absent};delete f.config.previousRevision;
+    f.adapter.verify();f.adapter.assertCurrent();
+    const backup=f.adapter.backup();assert.equal(verifySnapshot(backup,f.config.baseline).snapshotId,raw.snapshotId);
+    f.adapter.rehearse(backup);f.adapter.baseline(backup);f.adapter.install();
+    assert.deepEqual(fs.readFileSync(path.join(f.webRoot,extra)),bytes);assert.equal(fs.readFileSync(path.join(f.webRoot,'backend/.env'),'utf8'),'retained environment');
+    f.adapter.record({status:'deployed',revision,runNumber:2,backup});const state=JSON.parse(fs.readFileSync(f.state));assert.equal(state.baseline,raw.snapshotId);assert.equal(state.candidateManifest.revision,revision);assert.deepEqual(state.retainedHistory,raw.retainedHistory);
+    // Unknown ledger fails preflight without service commands or application replacement.
+    raw.contract['data.db'].migrations.push(['unknown-applied.js',1]);raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));f.config.baseline.snapshotId=raw.snapshotId;assert.throws(()=>f.adapter.verify(),/contract drift|Target changed/);
+  } finally {
+    cp.execFileSync=commandOverride;syncBuiltinESMExports();
+    if(pb.service.child.exitCode===null&&pb.service.child.signalCode===null)await pb.close();
+  }
+}));

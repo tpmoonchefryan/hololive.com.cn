@@ -8,6 +8,10 @@ export function assertReplayState(collections, history, expectedMigrations) {
     const field = velocity.fields.find(f => f.name === name);
     if (!field || JSON.stringify(field.values) !== JSON.stringify(expected) || field.maxSelect !== 1) throw new Error(`Invalid select field: ${name}`);
   }
+  for (const [name, [min, max]] of Object.entries({ compression_threshold: [-1, 65535], compression_level: [-1, 9], login_ratelimit: [0, 600000], connection_timeout: [0, 600000], read_timeout: [0, 600000] })) {
+    const field = velocity.fields.find(f => f.name === name);
+    if (!field || field.type !== 'number' || field.min !== min || field.max !== max) throw new Error(`Invalid numeric field: ${name}`);
+  }
   const users = collections.find(c => c.name === 'users');
   if (!users.fields.some(f => f.name === 'is_admin') || users.updateRule !== null) throw new Error('Missing server-owned authorization');
   for (const file of expectedMigrations) if (!history.includes(file)) throw new Error(`Unapplied migration: ${file}`);
