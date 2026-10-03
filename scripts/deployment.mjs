@@ -164,21 +164,21 @@ function controlPath(file) {
   check(!stat || (stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (stat.mode & 0o077) === 0), 'Unsafe maintenance control endpoint');
   return stat;
 }
-function controlRead(file) {
-  const before = controlPath(file);
+function controlRead(file, validate = controlPath) {
+  const before = validate(file);
   if (!before) return null;
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
-    const opened = fs.fstatSync(fd), current = controlPath(file);
+    const opened = fs.fstatSync(fd), current = validate(file);
     check(current && opened.dev === current.dev && opened.ino === current.ino && opened.ino === before.ino, 'Maintenance endpoint changed during read');
     return JSON.parse(fs.readFileSync(fd, 'utf8'));
   } finally { fs.closeSync(fd); }
 }
-function controlWrite(file, value) {
-  const before = controlPath(file);
+function controlWrite(file, value, validate = controlPath) {
+  const before = validate(file);
   const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
   try {
-    const opened = fs.fstatSync(fd), current = controlPath(file);
+    const opened = fs.fstatSync(fd), current = validate(file);
     check(current && opened.isFile() && opened.nlink === 1 && opened.dev === current.dev && opened.ino === current.ino && (!before || opened.ino === before.ino), 'Maintenance endpoint changed during write');
     fs.fchmodSync(fd, 0o600);
     fs.ftruncateSync(fd, 0);
@@ -275,7 +275,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     check(expected && current.dev === expected.dev && current.ino === expected.ino, 'Maintenance parent binding changed');
     return controlPath(file);
   };
-  const writeControl = (file, value) => { boundControl(file); controlWrite(file, value); }; 
+  const writeControl = (file, value) => { boundControl(file); controlWrite(file, value, boundControl); };
   const systemctl = (action, unit) => {
     check(config.websiteServices.includes(unit) && units.includes(unit), 'Service outside whitelist');
     command('sudo', ['-n', 'systemctl', action, unit]);
@@ -287,7 +287,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   });
   const assertCurrent = () => {
     check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
-    boundControl(state); oldState = controlRead(state);
+    oldState = controlRead(state, boundControl);
     check(!oldState || (oldState.status === 'deployed' && runNumber > oldState.runNumber), 'Older/repeated run or unresolved failed deployment');
   };
   const migrateCopy = directory => command(pb, ['migrate', 'up', '--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
@@ -362,7 +362,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       check(config.velocityPorts?.length > 0, 'Velocity port inventory missing');
       writeJSON(path.join(backupPath, 'velocity-continuity.json'), { before, after });
     },
-    record: value => writeControl(state, JSON.stringify( { ...value, runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n'),
+    record: value => writeControl(state, JSON.stringify({ ...value, runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n'),
     failure: value => writeControl(state, JSON.stringify({ ...value, runNumber, failedAt: new Date().toISOString() }) + '\n'),
   };
 }
