@@ -1,3 +1,4 @@
+import { useAdminDraftGuard } from "../../hooks/useAdminDraftGuard";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Save, Pin } from "lucide-react";
@@ -65,6 +66,7 @@ export default function PostEditor() {
   const [loading, setLoading] = useState(isEditMode);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const draft = useAdminDraftGuard(formData, `${adminKey}:${id || "new"}`, !loading);
 
   // 分类选项
   const categories = ["公告", "文档", "更新日志"];
@@ -98,7 +100,13 @@ export default function PostEditor() {
 
   // 加载文章数据（编辑模式）
   useEffect(() => {
-    if (!isEditMode) return;
+    const operation = draft.begin("load");
+    setSaving(false);
+    setError(null);
+    if (!isEditMode) {
+      const blank = { title: {zh:"",en:"",ja:""}, slug:"", category:"公告", content:{zh:"",en:"",ja:""}, is_public:false, summary:{zh:"",en:"",ja:""}, cover_ref:null, is_pinned:false };
+      setFormData(blank); draft.establishBaseline(blank); setLoading(false); return;
+    }
 
     const fetchPost = async () => {
       try {
@@ -107,10 +115,11 @@ export default function PostEditor() {
           expand: "cover_ref",
         });
 
+        if (!draft.current(operation)) return;
         // 处理多语言字段：如果已经是对象则直接使用，如果是字符串则转换
         const normalizeField = (field) => Object.fromEntries(["zh", "en", "ja"].map(lang => [lang, typeof field === "string" ? field : field?.[lang] || ""]));
 
-        setFormData({
+        const loaded = {
           title: normalizeField(post.title),
           slug: post.slug || "",
           category: post.category || "公告",
@@ -119,21 +128,24 @@ export default function PostEditor() {
           summary: normalizeField(post.summary),
           cover_ref: post.cover_ref || null,
           is_pinned: post.is_pinned || false,
-        });
+        };
+        setFormData(loaded); draft.establishBaseline(loaded);
         setError(null);
       } catch (err) {
+        if (!draft.current(operation)) return;
         logger.error("Failed to fetch post:", err);
         setError(translateRef.current("admin.postEditor.toast.loadError"));
       } finally {
-        setLoading(false);
+        if (draft.current(operation)) setLoading(false);
       }
     };
 
     fetchPost();
-  }, [id, isEditMode]);
+  }, [id, isEditMode, adminKey, draft.routeKey]);
 
   // 一键智能翻译
   const handleAutoTranslate = async () => {
+    const operation = draft.begin("translate");
     try {
       const result = await translateFields({
         scene: "post_editor",
@@ -144,6 +156,7 @@ export default function PostEditor() {
         ],
       });
 
+      if (!draft.unchanged(operation)) return;
       if (result.changedCount === 0) {
         notify(t("admin.postEditor.toast.noContent"), "warning");
       } else {
@@ -159,6 +172,7 @@ export default function PostEditor() {
         );
       }
     } catch (err) {
+      if (!draft.unchanged(operation)) return;
       if (err?.code === "TRANSLATION_CANCELED") {
         notify(t("admin.translationJob.toast.canceled"), "warning");
         return;
@@ -186,6 +200,8 @@ export default function PostEditor() {
   // 保存文章
   const handleSave = async (e) => {
     e.preventDefault();
+    if (e.target !== e.currentTarget || saving) return;
+    const operation = draft.begin("save");
     setSaving(true);
     setError(null);
 
@@ -202,15 +218,20 @@ export default function PostEditor() {
         is_pinned: formData.is_pinned || false,
       };
 
+      const savedDraft = {...saveData, slug:saveData.slug || ""};
       if (isEditMode) {
-        await pb.collection("posts").update(id, saveData);
+        const saved = await pb.collection("posts").update(id, saveData);
+        if (!draft.current(operation)) { logger.warn("Post write completed after editor lifetime", {id:saved.id}); return; }
+        draft.establishBaseline(savedDraft);
         // 记录更新日志
         const title = typeof formData.title === "object"
           ? (formData.title.zh || formData.title.en || formData.title.ja || "Unknown Title")
           : formData.title || "Unknown Title";
         await logUpdate("Post Editor", `Updated post: ${title}`);
       } else {
-        await pb.collection("posts").create(saveData);
+        const saved = await pb.collection("posts").create(saveData);
+        if (!draft.current(operation)) { logger.warn("Post write completed after editor lifetime", {id:saved.id}); return; }
+        draft.establishBaseline(savedDraft);
         // 记录创建日志
         const title = typeof formData.title === "object"
           ? (formData.title.zh || formData.title.en || formData.title.ja || "Unknown Title")
@@ -218,20 +239,22 @@ export default function PostEditor() {
         await logCreate("Post Editor", `Created post: ${title}`);
       }
 
+      if (!draft.current(operation)) return;
+      if (!draft.unchanged(operation)) return;
+      setFormData(savedDraft);
       notify(
         isEditMode ? t("admin.postEditor.toast.updateSuccess") : t("admin.postEditor.toast.createSuccess"),
         "success"
       );
-      setTimeout(() => {
-        navigate(`/${adminKey}/webadmin/posts`);
-      }, 900);
+      draft.schedule(operation, savedDraft, () => navigate(`/${adminKey}/webadmin/posts`), 900);
     } catch (err) {
+      if (!draft.current(operation)) return;
       logger.error("Failed to save post:", err);
       const errorMsg = err?.response?.message || err?.message || t("admin.postEditor.toast.saveError");
       setError(errorMsg);
       notify(t("admin.postEditor.toast.saveError"), "error");
     } finally {
-      setSaving(false);
+      if (draft.current(operation)) setSaving(false);
     }
   };
 

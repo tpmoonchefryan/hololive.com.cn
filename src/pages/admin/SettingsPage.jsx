@@ -1,3 +1,4 @@
+import { useAdminDraftGuard } from "../../hooks/useAdminDraftGuard";
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { Save, Settings, AlertTriangle } from "lucide-react";
@@ -144,11 +145,17 @@ export default function SettingsPage() {
     enable_pb_public_entry: true,
     translation_config: { ...DEFAULT_TRANSLATION_CONFIG },
   });
+  const draft = useAdminDraftGuard({formData, translationTestText}, adminKey, !loading);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const pendingDraft = useRef(null);
   const [baiduExtractToast, setBaiduExtractToast] = useState(false);
 
   // 获取系统设置
   const fetchSettings = useCallback(async () => {
     const { t, notify } = feedbackRef.current;
+    const operation = draftRef.current.begin("load");
+    setSaving(false);
     try {
       setLoading(true);
       setError(null);
@@ -162,6 +169,7 @@ export default function SettingsPage() {
         }
       }
 
+      if (!draftRef.current.current(operation)) return;
       let translationRecord = null;
       try {
         const result = await pb.collection("translation_config").getList(1, 1, {
@@ -178,8 +186,9 @@ export default function SettingsPage() {
         logger.warn("translation_config is unavailable, fallback to defaults.");
       }
 
+      if (!draftRef.current.current(operation)) return;
       setTranslationConfigId(translationRecord?.id || "");
-      setFormData({
+      const loaded = {
         microsoft_auth_config: settingsData?.microsoft_auth_config || {},
         analytics_config: settingsData?.analytics_config || { google: "", baidu: "" },
         // 明文密钥已不再经 API 下发（字段为 hidden）。能渲染到这个页面就说明
@@ -187,8 +196,11 @@ export default function SettingsPage() {
         admin_entrance_key: adminKey || "",
         enable_pb_public_entry: settingsData?.enable_pb_public_entry !== false,
         translation_config: normalizeTranslationConfig(translationRecord || {}),
-      });
+      };
+      setFormData(loaded);
+      draftRef.current.establishBaseline({formData:loaded, translationTestText:DEFAULT_TRANSLATION_TEST_TEXT});
     } catch (error) {
+      if (!draftRef.current.current(operation)) return;
       logger.error("Failed to fetch settings:", error);
       // 如果记录不存在，使用默认值
       if (error?.status === 404) {
@@ -208,9 +220,9 @@ export default function SettingsPage() {
         );
       }
     } finally {
-      setLoading(false);
+      if (draftRef.current.current(operation)) setLoading(false);
     }
-  }, [adminKey]);
+  }, [adminKey, draft.routeKey]);
 
   useEffect(() => {
     fetchSettings();
@@ -230,7 +242,7 @@ export default function SettingsPage() {
     }));
   };
 
-  const saveTranslationConfig = async (updateData) => {
+  const saveTranslationConfig = async (updateData, operation) => {
     if (!updateData || typeof updateData !== "object") return;
 
     try {
@@ -242,15 +254,16 @@ export default function SettingsPage() {
       const list = await pb.collection("translation_config").getList(1, 1, {
         sort: "-updated",
       });
+      if (!draft.current(operation)) return;
       const existing = list?.items?.[0];
       if (existing?.id) {
         await pb.collection("translation_config").update(existing.id, updateData);
-        setTranslationConfigId(existing.id);
+        if (draft.current(operation)) setTranslationConfigId(existing.id);
         return;
       }
 
       const created = await pb.collection("translation_config").create(updateData);
-      if (created?.id) {
+      if (created?.id && draft.current(operation)) {
         setTranslationConfigId(created.id);
       }
     } catch (error) {
@@ -266,7 +279,9 @@ export default function SettingsPage() {
     }
   };
 
-  const saveSettings = async (updateData, translationUpdateData, nextKey = "") => {
+  const saveSettings = async (updateData, translationUpdateData, nextKey = "", submitted = pendingDraft.current) => {
+    if (saving || !submitted) return;
+    const operation = draft.begin("save");
     const keyChanged = Boolean(nextKey);
     setSaving(true);
     setError(null);
@@ -276,6 +291,7 @@ export default function SettingsPage() {
       try {
         await pb.collection("system_settings").update(SETTINGS_ID, updateData);
       } catch (err) {
+        if (!draft.current(operation)) return;
         if (err?.status === 404) {
           await pb.collection("system_settings").create({
             id: SETTINGS_ID,
@@ -287,8 +303,15 @@ export default function SettingsPage() {
       }
 
       // 保存翻译配置（单例）
-      await saveTranslationConfig(translationUpdateData);
+      if (!draft.current(operation)) { logger.warn("Settings write completed after editor lifetime", {id:SETTINGS_ID}); return; }
+      await saveTranslationConfig(translationUpdateData, operation);
+      if (!draft.current(operation)) { logger.warn("Settings configuration write completed after editor lifetime", {id:SETTINGS_ID}); return; }
 
+      const savedDraft = {formData:{...submitted.formData,
+        analytics_config:updateData.analytics_config, admin_entrance_key:nextKey || submitted.formData.admin_entrance_key.trim(),
+        enable_pb_public_entry:updateData.enable_pb_public_entry, translation_config:normalizeTranslationConfig(translationUpdateData)},
+        translationTestText:DEFAULT_TRANSLATION_TEST_TEXT};
+      draft.establishBaseline(savedDraft);
       // 记录系统设置更新日志
       const logDetails = keyChanged
         // 不记录密钥明文：audit_logs 对任何已登录用户可读，写进去等于又开一个泄露口
@@ -296,6 +319,7 @@ export default function SettingsPage() {
         : "Updated System Settings";
       await logSystemSettings(logDetails);
 
+      if (!draft.current(operation) || !draft.unchanged(operation)) return;
       // 如果 Key 改变了，直接跳转到新地址
       if (keyChanged) {
         const newUrl = `/${nextKey}/webadmin/settings`;
@@ -303,20 +327,22 @@ export default function SettingsPage() {
         return;
       }
 
-      await fetchSettings();
+      // Preserve the submitted draft and any newer typing; do not refetch over it.
       notify(t("admin.settingsPage.success"), "success");
     } catch (error) {
+      if (!draft.current(operation)) return;
       logger.error("Failed to save settings:", error);
       const errorMsg =
         error?.response?.message || error?.message || t("admin.settingsPage.error");
       setError(errorMsg);
       notify(`${t("admin.settingsPage.error")}: ${errorMsg}`, "error");
     } finally {
-      setSaving(false);
+      if (draft.current(operation)) setSaving(false);
     }
   };
 
   const handleTestTranslation = async () => {
+    const operation = draft.begin("translationTest");
     try {
       setTestingTranslation(true);
       setTranslationTestResult(null);
@@ -329,6 +355,7 @@ export default function SettingsPage() {
         overrideConfig,
       });
 
+      if (!draft.unchanged(operation)) return;
       setTranslationTestResult(result);
       if (result?.ok) {
         notify(t("admin.settingsPage.translation.test.success"), "success");
@@ -339,6 +366,7 @@ export default function SettingsPage() {
         );
       }
     } catch (error) {
+      if (!draft.unchanged(operation)) return;
       logger.error("Failed to test translation config:", error);
       const errorMsg =
         error?.response?.message ||
@@ -352,13 +380,16 @@ export default function SettingsPage() {
       });
       notify(`${t("admin.settingsPage.translation.test.failed")}: ${errorMsg}`, "error");
     } finally {
-      setTestingTranslation(false);
+      if (draft.current(operation)) setTestingTranslation(false);
     }
   };
 
   // 保存设置（含 Key 修改前置检查）
   const handleSave = async (e) => {
     e.preventDefault();
+    if (e.target !== e.currentTarget || saving) return;
+    const operation = draft.begin("prepareSave");
+    const submitted = structuredClone({formData, translationTestText});
     const normalizedKey = formData.admin_entrance_key.trim();
 
     if (normalizedKey.length < 8) {
@@ -381,6 +412,8 @@ export default function SettingsPage() {
       admin_entrance_key_hash: await sha256Hex(normalizedKey),
       enable_pb_public_entry: formData.enable_pb_public_entry !== false,
     };
+    if (!draft.unchanged(operation)) return;
+    pendingDraft.current = submitted;
     const translationUpdateData = normalizeTranslationConfigForSave(
       formData.translation_config
     );

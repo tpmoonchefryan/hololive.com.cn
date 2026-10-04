@@ -1,3 +1,4 @@
+import { useAdminDraftGuard } from "../../hooks/useAdminDraftGuard";
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Save, Plus, Trash2 } from "lucide-react";
@@ -63,18 +64,27 @@ export default function SectionEditor() {
   const [loading, setLoading] = useState(isEditMode);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const draft = useAdminDraftGuard(formData, `${adminKey}:${id || "new"}`, !loading);
   const [legacyBackgroundUrl, setLegacyBackgroundUrl] = useState(null);
 
   useEffect(() => {
+    const operation = draft.begin("load");
+    setSaving(false);
+    setError(null);
     if (!isEditMode) {
+      const blank = {title:emptyI18nMap(),subtitle:emptyI18nMap(),content:emptyI18nMap(),announcement:emptyI18nMap(),sort_order:1,buttons:[],background_ref:null};
+      setFormData(blank); draft.establishBaseline(blank); setLoading(false);
       const fetchMaxOrder = async () => {
         try {
           const result = await pb.collection("cms_sections").getList(1, 1, {
             sort: "-sort_order",
           });
+          if (!draft.unchanged(operation)) return;
           const maxOrder = result.items.length > 0 ? result.items[0].sort_order : 0;
-          setFormData((prev) => ({ ...prev, sort_order: maxOrder + 1 }));
+          const loaded = {...blank, sort_order:maxOrder + 1};
+          setFormData(loaded); draft.establishBaseline(loaded);
         } catch (err) {
+          if (!draft.current(operation)) return;
           logger.error("Failed to fetch max order:", err);
         }
       };
@@ -90,6 +100,7 @@ export default function SectionEditor() {
           expand: "background_ref",
         });
 
+        if (!draft.current(operation)) return;
         const normalizeMultilang = (value) => {
           if (value && typeof value === "object") {
             return {
@@ -107,13 +118,14 @@ export default function SectionEditor() {
 
         const normalizedButtons = Array.isArray(section.buttons)
           ? section.buttons.map((button) => ({
+              _uiKey: crypto.randomUUID(),
               label: normalizeMultilang(button?.label),
               link: button?.link || "#",
               style: button?.style || "primary",
             }))
           : [];
 
-        setFormData({
+        const loaded = {
           title: normalizeMultilang(section.title),
           subtitle: normalizeMultilang(section.subtitle),
           content: normalizeMultilang(section.content),
@@ -121,7 +133,8 @@ export default function SectionEditor() {
           sort_order: section.sort_order || 1,
           buttons: normalizedButtons,
           background_ref: section.background_ref || null,
-        });
+        };
+        setFormData(loaded); draft.establishBaseline(loaded);
 
         let legacyUrl = null;
         if (section.background_ref && section.expand?.background_ref?.file) {
@@ -133,15 +146,16 @@ export default function SectionEditor() {
 
         setError(null);
       } catch (err) {
+        if (!draft.current(operation)) return;
         logger.error("Failed to fetch section:", err);
         setError(translateRef.current("sectionEditor.toast.saveError"));
       } finally {
-        setLoading(false);
+        if (draft.current(operation)) setLoading(false);
       }
     };
 
     fetchSection();
-  }, [id, isEditMode]);
+  }, [id, isEditMode, adminKey, draft.routeKey]);
 
   const updateMultilangField = (field, lang, value) => {
     setFormData((prev) => ({
@@ -159,6 +173,7 @@ export default function SectionEditor() {
       buttons: [
         ...prev.buttons,
         {
+          _uiKey: crypto.randomUUID(),
           label: emptyI18nMap(),
           link: "#",
           style: "primary",
@@ -206,6 +221,7 @@ export default function SectionEditor() {
   };
 
   const handleAutoTranslate = async () => {
+    const operation = draft.begin("translate");
     try {
       const fieldsToTranslate = ["title", "subtitle", "content", "announcement"].map((key) => ({
         key,
@@ -223,6 +239,7 @@ export default function SectionEditor() {
         fields: fieldsToTranslate,
       });
 
+      if (!draft.unchanged(operation)) return;
       let nextButtons = [...formData.buttons];
       for (let index = 0; index < formData.buttons.length; index += 1) {
         const translatedButtonLabel = translatedResult?.fields?.[`button_label_${index}`];
@@ -254,6 +271,7 @@ export default function SectionEditor() {
         translatedResult.partial ? "warning" : "success"
       );
     } catch (err) {
+      if (!draft.unchanged(operation)) return;
       if (err?.code === "TRANSLATION_CANCELED") {
         notify(t("translationJob.toast.canceled"), "warning");
         return;
@@ -280,6 +298,8 @@ export default function SectionEditor() {
 
   const handleSave = async (event) => {
     event.preventDefault();
+    if (event.target !== event.currentTarget || saving) return;
+    const operation = draft.begin("save");
     setSaving(true);
     setError(null);
 
@@ -290,30 +310,34 @@ export default function SectionEditor() {
         content: formData.content,
         announcement: formData.announcement,
         sort_order: formData.sort_order,
-        buttons: formData.buttons,
+        buttons: formData.buttons.map(({ label, link, style }) => ({ label, link, style })),
         background_ref: formData.background_ref || null,
       };
 
       if (isEditMode) {
-        await pb.collection("cms_sections").update(id, payload);
+        const saved = await pb.collection("cms_sections").update(id, payload);
+        if (!draft.current(operation)) { logger.warn("Section write completed after editor lifetime", {id:saved.id}); return; }
       } else {
-        await pb.collection("cms_sections").create(payload);
+        const saved = await pb.collection("cms_sections").create(payload);
+        if (!draft.current(operation)) { logger.warn("Section write completed after editor lifetime", {id:saved.id}); return; }
       }
 
+      if (!draft.current(operation)) return;
+      draft.establishBaseline(payload);
+      if (!draft.unchanged(operation)) return;
       notify(
         isEditMode ? t("sectionEditor.toast.updated") : t("sectionEditor.toast.created"),
         "success"
       );
-      setTimeout(() => {
-        navigate(`/${adminKey}/webadmin/home`);
-      }, 600);
+      draft.schedule(operation, payload, () => navigate(`/${adminKey}/webadmin/home`), 600);
     } catch (err) {
+      if (!draft.current(operation)) return;
       logger.error("Failed to save section:", err);
       const errorMsg = err?.response?.message || err?.message || t("sectionEditor.toast.saveError");
       setError(errorMsg);
       notify(t("sectionEditor.toast.saveError"), "error");
     } finally {
-      setSaving(false);
+      if (draft.current(operation)) setSaving(false);
     }
   };
 
@@ -475,7 +499,7 @@ export default function SectionEditor() {
           ) : (
             <div className="space-y-3">
               {formData.buttons.map((button, index) => (
-                <ContentSubItemCard key={`${button.link}-${index}`}>
+                <ContentSubItemCard key={button._uiKey}>
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-medium text-slate-700">button {index + 1}</span>
                     <ContentIconActionButton
