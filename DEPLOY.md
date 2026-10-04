@@ -239,9 +239,20 @@ The standalone isolated restore cannot access production privilege.
 Stopped raw configuration bytes, owner/mode and absences stay sealed unchanged.
 Independent root-private receipts bind candidate, caller, lock, run, raw
 snapshot and original permission outside the safe set. Safe configuration adds
-only the two private EnvFiles and their corresponding EnvironmentFile unit
-bindings. Delivery validates all units before writing, reloads systemd only
-when a binding changed, then compares every property and actual bytes/owners.
+the two private EnvFiles and their corresponding EnvironmentFile unit
+bindings. The one supported legacy transition removes exactly one column-zero,
+unquoted, single `Environment=PB_EMAIL=<synthetic-email>` declaration and one
+`Environment=PB_PASS=<synthetic-password>` declaration from the single Service
+section of velocity-sync, replacing them with its approved optional EnvFile
+binding. Every other unit byte and the sealed raw bytes, modes and owners stay
+exact. Legacy values never supply the new credentials; independent approved
+material and expected safe configuration remain authoritative. Credential-free
+units and existing matching bindings remain accepted unchanged where applicable.
+Mixed, duplicate, incomplete, quoted, continued, unknown or wrong-unit credential
+layouts, PB_TOKEN, ambiguous Service sections and conflicting EnvFiles refuse
+before configuration writes. MCSM receives only its original EnvFile binding.
+Delivery validates both units before writing, reloads systemd only when unit
+bytes changed, then compares every property and actual bytes/owners.
 Service restarts retain their original position after target health; Java
 files and its service remain protected throughout.
 

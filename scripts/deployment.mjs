@@ -1001,17 +1001,38 @@ def private_handler():
  values=material()
  def envbytes(index): return ('PB_EMAIL='+['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn'][index]+'\nPB_PASS='+values[index]+'\n').encode()
  def unitbytes(unit):
-  file='/etc/systemd/system/'+unit+'.service'; data=private_read(backup+'/configuration/'+file.lstrip('/')); text=data.decode(); directive='EnvironmentFile=-/etc/default/'+unit
-  require(not re.search(r'^Environment=.*(?:PB_PASS|PB_EMAIL|PB_TOKEN)=',text,re.M),'Inline service credential')
-  matches=re.findall(r'^EnvironmentFile=(.*)$',text,re.M)
-  require(matches in ([],['-/etc/default/'+unit]),'Conflicting EnvironmentFile')
-  require(text.count('[Service]')==1,'Ambiguous unit service section')
-  return data if matches else text.replace('[Service]','[Service]\n'+directive,1).encode()
+  file='/etc/systemd/system/'+unit+'.service'; data=private_read(backup+'/configuration/'+file.lstrip('/')); lines=data.splitlines(keepends=True); directive=b'EnvironmentFile=-/etc/default/'+unit.encode()
+  require(unit in ['velocity-sync','mcsm-proxy'],'Wrong credential unit')
+  service=[]; credentials=[]; matches=[]; section=None
+  for index,line in enumerate(lines):
+   body=line.removesuffix(b'\n').removesuffix(b'\r'); stripped=body.strip()
+   if not stripped or stripped.startswith((b'#',b';')): continue
+   if b'[Service]' in body:
+    require(body==b'[Service]' and not (index and lines[index-1].rstrip(b'\r\n').endswith(b'\\')),'Ambiguous unit service section'); service.append(index)
+   if stripped.startswith(b'['): section=body
+   if re.match(rb'EnvironmentFile\b',stripped):
+    require(body==directive and section==b'[Service]' and not (index and lines[index-1].rstrip(b'\r\n').endswith(b'\\')),'Conflicting EnvironmentFile'); matches.append(index)
+   if re.search(rb'PB_(?:EMAIL|PASS|TOKEN)\b',body):
+    match=re.fullmatch(rb'Environment=(PB_EMAIL|PB_PASS)=([^\s\x00-\x1f\x7f\x22\x27\\]+)',body)
+    require(unit=='velocity-sync' and section==b'[Service]' and match and not (index and lines[index-1].rstrip(b'\r\n').endswith(b'\\')),'Inline service credential'); credentials.append((index,match[1]))
+  require(len(service)==1,'Ambiguous unit service section')
+  require(len(matches)<=1,'Conflicting EnvironmentFile')
+  require(not credentials or (len(credentials)==2 and {name for _,name in credentials}=={b'PB_EMAIL',b'PB_PASS'} and not matches),'Inline service credential')
+  removed={index for index,_ in credentials}; output=[]
+  for index,line in enumerate(lines):
+   if index in removed: continue
+   output.append(line)
+   if index==service[0] and not matches:
+    ending=b'\r\n' if line.endswith(b'\r\n') else b'\n'
+    if not line.endswith(b'\n'): output.append(ending)
+    output.append(directive+ending)
+  return b''.join(output)
  safeconfig=backup+'/safe-recovery/configuration'; expectedfile=private+'/derive-safe.json'
  if purpose=='derive-safe':
   check_stopped(); require(not os.path.lexists(safeconfig),'Existing private safe configuration')
+  unit_values={u:unitbytes(u) for u in ['velocity-sync','mcsm-proxy']}
   for file,item,owner in zip(whitelist,raw['configuration'],raw['ownership']):
-   data=unitbytes(file.split('/')[-1][:-8]) if file in ['/etc/systemd/system/velocity-sync.service','/etc/systemd/system/mcsm-proxy.service'] else private_read(backup+'/configuration/'+file.lstrip('/'))
+   data=unit_values[file.split('/')[-1][:-8]] if file in ['/etc/systemd/system/velocity-sync.service','/etc/systemd/system/mcsm-proxy.service'] else private_read(backup+'/configuration/'+file.lstrip('/'))
    dest=safeconfig+'/'+file.lstrip('/'); mkdirs(dest); write(dest,data,item['mode'],(owner['uid'],owner['gid']))
   for index,file in enumerate(envs):
    if file in whitelist: continue
