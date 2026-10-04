@@ -5,6 +5,7 @@ import { useUIFeedback } from "./useUIFeedback";
 import { createAppLogger } from "../lib/appLogger";
 
 const logger = createAppLogger("useVelocityData");
+const freshServerDraft = () => ({ name: "", address: "", try_order: 1, is_try_server: false });
 
 export default function useVelocityData() {
     const { t } = useTranslation();
@@ -18,7 +19,7 @@ export default function useVelocityData() {
     const [uploading, setUploading] = useState(false);
     const [restarting, setRestarting] = useState(false);
     const [testingMap, setTestingMap] = useState({});
-    const [newServer, setNewServer] = useState({ name: "", address: "", try_order: 0, is_try_server: false });
+    const [newServer, setNewServer] = useState(freshServerDraft);
     const [editingServer, setEditingServer] = useState(null);
     const [isServerModalOpen, setIsServerModalOpen] = useState(false);
     const [newForcedHost, setNewForcedHost] = useState({ hostname: "", server: [] });
@@ -119,7 +120,7 @@ export default function useVelocityData() {
 
     const handleAddServer = () => {
         setEditingServer(null);
-        setNewServer({ name: "", address: "", try_order: 0, is_try_server: false });
+        setNewServer(freshServerDraft());
         setIsServerModalOpen(true);
     };
 
@@ -145,17 +146,18 @@ export default function useVelocityData() {
     };
 
     const handleSaveServer = async () => {
-        if (!newServer.name || !newServer.address) return;
+        if (saving || !newServer.name.trim() || !newServer.address.trim() || !Number.isInteger(Number(newServer.try_order)) || Number(newServer.try_order) < 1) return;
         setSaving(true);
         try {
+            const payload = { ...newServer, try_order: Number(newServer.try_order) };
             if (editingServer) {
-                await pb.collection('velocity_servers').update(editingServer.id, newServer);
+                await pb.collection('velocity_servers').update(editingServer.id, payload);
             } else {
-                await pb.collection('velocity_servers').create(newServer);
+                await pb.collection('velocity_servers').create(payload);
             }
             setIsServerModalOpen(false);
             setEditingServer(null);
-            setNewServer({ name: "", address: "", try_order: 0, is_try_server: false });
+            setNewServer(freshServerDraft());
         } catch (err) {
             logger.error(err);
             notify(t("admin.velocity.actions.addServerError"), "error");

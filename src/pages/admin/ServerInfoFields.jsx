@@ -4,7 +4,6 @@ import {
   Plus,
   Server,
   GripVertical,
-  X,
   Save,
 } from "lucide-react";
 import pb from "../../lib/pocketbase";
@@ -25,8 +24,7 @@ import ContentSelectInput from "../../components/admin/content/ContentSelectInpu
 import ContentTextInput from "../../components/admin/content/ContentTextInput";
 import ContentListSurface from "../../components/admin/content/ContentListSurface";
 import ContentDraggableRow from "../../components/admin/content/ContentDraggableRow";
-import ContentCardSurface from "../../components/admin/content/ContentCardSurface";
-import ContentIconActionButton from "../../components/admin/content/ContentIconActionButton";
+import Modal from "../../components/admin/ui/Modal";
 import TranslationProgressModal from "../../components/admin/content/TranslationProgressModal";
 
 /**
@@ -266,25 +264,14 @@ export default function ServerInfoFields() {
         )}
       />
 
-      {(isCreating || editingId) && (
-        <ContentCardSurface className="rounded-xl p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-slate-900">
-              {editingId
-                ? t("admin.serverInfoFields.form.editTitle")
-                : t("admin.serverInfoFields.form.createTitle")}
-            </h2>
-            <ContentIconActionButton
-              onClick={resetForm}
-              tone="neutral"
-              icon={X}
-              size="sm"
-              iconSize={20}
-              title={t("actions.close", { ns: "common" })}
-              aria-label={t("actions.close", { ns: "common" })}
-            />
-          </div>
-
+      <Modal
+        isOpen={Boolean(isCreating || editingId)}
+        onClose={resetForm}
+        title={editingId
+          ? t("admin.serverInfoFields.form.editTitle")
+          : t("admin.serverInfoFields.form.createTitle")}
+      >
+        <div className="p-6">
           <form onSubmit={handleSave} className="space-y-4">
             <div>
               <ContentFieldLabel>
@@ -383,13 +370,13 @@ export default function ServerInfoFields() {
               >
                 {t("admin.serverInfoFields.form.save")}
               </ContentPrimaryButton>
-              <ContentSecondaryButton onClick={resetForm}>
+              <ContentSecondaryButton type="button" onClick={resetForm}>
                 {t("admin.serverInfoFields.form.cancel")}
               </ContentSecondaryButton>
             </div>
           </form>
-        </ContentCardSurface>
-      )}
+        </div>
+      </Modal>
 
       {loading || fields.length === 0 ? (
         <ContentStateBlock
