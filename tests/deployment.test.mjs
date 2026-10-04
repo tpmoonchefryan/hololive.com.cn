@@ -1033,3 +1033,88 @@ test('new fixed private families reject unknown schema/purpose without emitting 
     assert.equal(response.status, 0); const result = JSON.parse(response.stdout); assert.equal(result.ok, false); assert.deepEqual(result.attempted, []); assert.deepEqual(result.completed, []); assert.equal(Object.hasOwn(result,'credentials'),false); assert.deepEqual(fs.readdirSync(directory), []);
   }
 });
+
+// Execute the actual fixed child's derivation body with synthetic, local files.
+// This exercises conversion and prewrite refusal without claiming root delivery.
+function deriveSyntheticUnits(t, sync, mcsm = '[Service]\nExecStart=/fixture/mcsm\n') {
+  const directory = temp(t), backup = path.join(directory, 'backup'), files = ['velocity-sync','mcsm-proxy'].map(unit => '/etc/systemd/system/' + unit + '.service');
+  for (const [index, data] of [sync, mcsm].entries()) {
+    const file = path.join(backup, 'configuration', files[index]); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); fs.chmodSync(file, 0o644);
+  }
+  const source = fs.readFileSync(path.join(projectRoot,'scripts/deployment.mjs'),'utf8'), child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  const from = child.indexOf(' def envbytes(index):'), to = child.indexOf(" safe=purpose in ['restore-safe'", from); assert.ok(from > 0 && to > from);
+  const script = `import os,sys,json,hashlib,re
+request=json.load(sys.stdin); backup=request['backup']; private=backup+'/private'; binding={'fixture':True}; purpose='derive-safe'; values=['a'*64,'b'*64]
+whitelist=request['files']; envs=['/etc/default/velocity-sync','/etc/default/mcsm-proxy']; prepared={'snapshotId':'synthetic','materialSha256':'synthetic'}; writes=[]
+raw={'configuration':[{'mode':420} for _ in whitelist],'ownership':[{'uid':os.getuid(),'gid':os.getgid()} for _ in whitelist]}
+def require(ok,reason):
+ if not ok: raise ValueError(reason)
+def private_read(file):
+ with open(file,'rb') as stream: return stream.read()
+def check_stopped(): pass
+def mkdirs(file): os.makedirs(os.path.dirname(file),exist_ok=True)
+def write(file,data,mode=384,owner=None):
+ require(owner is None or owner==(os.getuid(),os.getgid()),'Synthetic owner drift')
+ with open(file,'xb') as stream: stream.write(data)
+ os.chmod(file,mode); writes.append(file)
+def observed(files,root):
+ return {'files':[{'path':file,'sha256':hashlib.sha256(private_read(root+'/'+file.lstrip('/'))).hexdigest(),'mode':os.stat(root+'/'+file.lstrip('/')).st_mode&511,'uid':os.stat(root+'/'+file.lstrip('/')).st_uid,'gid':os.stat(root+'/'+file.lstrip('/')).st_gid} for file in files]}
+def save_seal(value): pass
+def report(value): return value
+def derive():
+${child.slice(from,to)}
+try:
+ result=derive(); print(json.dumps({'ok':True,'writes':writes,'expected':result}))
+except Exception:
+ print(json.dumps({'ok':False,'writes':writes}))
+`;
+  // The production unitbytes and prewrite derivation body remain exact;
+  // local file helpers supply synthetic ownership and receipt observations.
+  const response = cp.spawnSync('python3',['-I','-c',script],{input:JSON.stringify({backup,files}),encoding:'utf8',timeout:30000});
+  assert.equal(response.status,0,response.stderr); const result=JSON.parse(response.stdout);
+  for (const [index, data] of [sync,mcsm].entries()) {
+    assert.deepEqual(fs.readFileSync(path.join(backup,'configuration',files[index])),Buffer.from(data));
+    assert.equal(fs.statSync(path.join(backup,'configuration',files[index])).mode&0o777,0o644);
+  }
+  return { result, backup, files, safe: unit => path.join(backup,'safe-recovery/configuration/etc/systemd/system',unit+'.service') };
+}
+test('reviewed legacy sync conversion preserves every unrelated byte and raw mode', t => {
+  for (const ending of ['\n','\r\n']) {
+    const before=['# synthetic comment','[Unit]','After=fixture.target','[Service]','Environment=PB_URL=http://fixture.invalid','Environment=PB_EMAIL=old@fixture.invalid','Environment=PB_PASS=synthetic-old','Environment=VELOCITY_DIR=/fixture/velocity','ExecStart=/usr/bin/node fixture.js','[Install]','WantedBy=fixture.target'].join(ending)+ending;
+    const f=deriveSyntheticUnits(t,before); assert.equal(f.result.ok,true);
+    const expected=before.replace('[Service]'+ending,'[Service]'+ending+'EnvironmentFile=-/etc/default/velocity-sync'+ending).replace('Environment=PB_EMAIL=old@fixture.invalid'+ending,'').replace('Environment=PB_PASS=synthetic-old'+ending,'');
+    assert.deepEqual(fs.readFileSync(f.safe('velocity-sync')),Buffer.from(expected));
+    assert.equal(fs.statSync(f.safe('velocity-sync')).mode&0o777,0o644);
+    const rawStat=fs.statSync(path.join(f.backup,'configuration',f.files[0])),safeStat=fs.statSync(f.safe('velocity-sync'));
+    assert.deepEqual([safeStat.uid,safeStat.gid],[rawStat.uid,rawStat.gid]);
+    assert.deepEqual(fs.readFileSync(f.safe('mcsm-proxy')),Buffer.from('[Service]\nEnvironmentFile=-/etc/default/mcsm-proxy\nExecStart=/fixture/mcsm\n'));
+    assert.equal(fs.readFileSync(path.join(f.backup,'safe-recovery/configuration/etc/default/velocity-sync'),'utf8'),'PB_EMAIL=velocity-sync@services.hololive.com.cn\nPB_PASS='+'a'.repeat(64)+'\n');
+    assert.equal(fs.readFileSync(path.join(f.backup,'safe-recovery/configuration/etc/default/mcsm-proxy'),'utf8'),'PB_EMAIL=mcsm-proxy@services.hololive.com.cn\nPB_PASS='+'b'.repeat(64)+'\n');
+  }
+});
+test('credential-free units and both approved matching bindings derive idempotently', t => {
+  const sync='# PB_EMAIL is only a comment\n[Service]\nEnvironment=PB_URL=http://fixture.invalid\nExecStart=/fixture/sync';
+  const f=deriveSyntheticUnits(t,sync); assert.equal(f.result.ok,true);
+  const safeSync=fs.readFileSync(f.safe('velocity-sync')), safeMcsm=fs.readFileSync(f.safe('mcsm-proxy'));
+  assert.deepEqual(safeSync,Buffer.from(sync.replace('[Service]\n','[Service]\nEnvironmentFile=-/etc/default/velocity-sync\n')));
+  const again=deriveSyntheticUnits(t,safeSync,safeMcsm); assert.equal(again.result.ok,true);
+  assert.deepEqual(fs.readFileSync(again.safe('velocity-sync')),safeSync); assert.deepEqual(fs.readFileSync(again.safe('mcsm-proxy')),safeMcsm);
+});
+test('unsupported credentials and unit layouts refuse both derived units before any write', t => {
+  const pair='Environment=PB_EMAIL=synthetic@fixture.invalid\nEnvironment=PB_PASS=synthetic\n', unit=body=>'[Service]\n'+body+'ExecStart=/fixture/sync\n';
+  const refused=[
+    unit('Environment=PB_EMAIL=synthetic\n'),unit('Environment=PB_PASS=synthetic\n'),unit(pair+'Environment=PB_PASS=duplicate\n'),
+    unit('Environment="PB_EMAIL=synthetic"\nEnvironment=PB_PASS=synthetic\n'),unit("Environment=PB_EMAIL='synthetic'\nEnvironment=PB_PASS=synthetic\n"),
+    unit('Environment=PB_EMAIL=synthetic PB_URL=http://fixture.invalid\nEnvironment=PB_PASS=synthetic\n'),unit(' Environment=PB_EMAIL=synthetic\nEnvironment=PB_PASS=synthetic\n'),
+    unit('Environment=PB_EMAIL=synthetic\\\nEnvironment=PB_PASS=synthetic\n'),unit('Environment=PB_URL=synthetic\\\n'+pair),unit('Environment=PB_EMAIL=\nEnvironment=PB_PASS=synthetic\n'),
+    unit(pair+'Environment=PB_TOKEN=synthetic\n'),unit('Environment=PB_TOKEN=synthetic\n'),unit('Environment : PB_EMAIL=synthetic\nEnvironment=PB_PASS=synthetic\n'),
+    '[Unit]\n'+pair+'[Service]\nExecStart=/fixture/sync\n',unit(pair)+'[Service]\n',unit(pair+'EnvironmentFile=-/etc/default/velocity-sync\n'),
+    unit('EnvironmentFile=/fixture/unknown\n'),unit('EnvironmentFile /fixture/unknown\n'),unit('EnvironmentFile=-/etc/default/mcsm-proxy\n'),unit('EnvironmentFile=-/etc/default/velocity-sync\nEnvironmentFile=-/etc/default/velocity-sync\n'),
+    '[Service]\n[Service]\n', '[Service] # ambiguous\n', '[Unit]\nEnvironmentFile=-/etc/default/velocity-sync\n[Service]\n',
+  ];
+  for (const input of refused) {const f=deriveSyntheticUnits(t,input);assert.equal(f.result.ok,false);assert.deepEqual(f.result.writes,[]);assert.equal(fs.existsSync(path.join(f.backup,'safe-recovery')),false);}
+  // A valid first unit must not be copied before the second unit is refused.
+  for (const mcsm of [unit(pair),unit('Environment=PB_TOKEN=synthetic\n'),unit('EnvironmentFile=-/etc/default/velocity-sync\n')]) {
+    const f=deriveSyntheticUnits(t,unit(pair),mcsm);assert.equal(f.result.ok,false);assert.deepEqual(f.result.writes,[]);assert.equal(fs.existsSync(path.join(f.backup,'safe-recovery')),false);
+  }
+});
