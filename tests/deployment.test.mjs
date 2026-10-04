@@ -7,7 +7,7 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts, decodeIdentitySupply } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const guardBindingNames = ['TCRN_SPAWN_GUARD','TCRN_TASK_OWNER','TCRN_SPAWN_REGISTRY'];
 function guardContext(environment) {
@@ -1112,6 +1112,23 @@ z.close()`;
     assert.equal(fs.existsSync(binary), false);
   }
 });
+test('identity supply decoder admits only a bounded closed bound private frame', () => {
+  const now = 2000000000;
+  const expected = { nonce: '4'.repeat(64), revision, runId: '123', humanId: 'j3o2wd17l18prla' };
+  const claims = { type: 'auth', id: expected.humanId, collectionId: 'pbc_3142635823', refreshable: false, exp: now + 900 };
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const token = value => encode({ alg: 'HS256', typ: 'JWT' }) + '.' + encode(value) + '.' + Buffer.alloc(32).toString('base64url');
+  const frame = (value = {}) => JSON.stringify({ ...expected, token: token(claims), ...value }) + '\n';
+  const accepted = decodeIdentitySupply(frame(), expected, now);
+  assert.ok(accepted.humanId === expected.humanId && accepted.collectionId === claims.collectionId, 'Identity decoder fixture binding refused');
+  const reject = (raw, binding = expected, time = now) => assert.throws(() => decodeIdentitySupply(raw, binding, time), error => error instanceof Error && error.message === 'Offline identity channel refused', 'Identity decoder must refuse privately');
+  for (const raw of [undefined, null, {}, '', frame().slice(0, -1), frame() + '\n', frame() + frame(), 'timestamp ' + frame(), '\u001b[0m' + frame(), ' ' + frame(), frame().replace('{', '{ '), frame().replace('{', '{"nonce":"duplicate",'), frame({ extra: true }), frame({ token: '' }), frame({ token: 'x'.repeat(8192) }), frame({ token: 'a.b.c' }), frame({ token: token(claims) + '=' }), frame({ humanId: null }), frame({ runId: 123 }), frame({ revision: 'b'.repeat(40) }), frame({ nonce: '5'.repeat(64) }), frame({ humanId: 'other0000000000' }), frame({ token: 'x'.repeat(16384) }), frame().replace('123', '\u00e9')]) reject(raw);
+  for (const key of ['nonce','revision','runId','humanId']) reject(frame(), { ...expected, [key]: 'wrong' });
+  for (const changed of [{ type: 'refresh' }, { id: 'other0000000000' }, { collectionId: '' }, { collectionId: null }, { collectionId: 'x'.repeat(65) }, { refreshable: true }, { refreshable: undefined }, { exp: now }, { exp: now - 1 }, { exp: now + 901 }, { exp: now + 0.5 }, { exp: String(now + 900) }]) reject(frame({ token: token({ ...claims, ...changed }) }));
+  for (const header of [{ alg: 'none', typ: 'JWT' }, { alg: 'HS256', typ: 'other' }]) reject(frame({ token: encode(header) + '.' + encode(claims) + '.' + Buffer.alloc(32).toString('base64url') }));
+  for (const body of ['{"type":"auth","type":"auth"}', 'null', '[]', '{', JSON.stringify({ ...claims, padding: 'x'.repeat(4096) })]) reject(frame({ token: encode({ alg: 'HS256', typ: 'JWT' }) + '.' + Buffer.from(body).toString('base64url') + '.' + Buffer.alloc(32).toString('base64url') }));
+  reject(frame(), expected, NaN);
+});
 for (const [version, binary] of binaries) test('offline exact identity supply and bounded same-target human/service proof: ' + version, async () => {
   const database = await pocketbase(binary);
   const humanId = 'j3o2wd17l18prla', ids = ['svcvsal7qgvfl12','svcmc31eh69zpuo'];
@@ -1124,16 +1141,19 @@ for (const [version, binary] of binaries) test('offline exact identity supply an
     const ordinary = await database.request('/api/collections/users/records', { token: database.token, method: 'POST', body: { email: 'ordinary@example.invalid', password: 'Ordinary-Fixture-2026!', passwordConfirm: 'Ordinary-Fixture-2026!', verified: true } }); assert.equal(ordinary.status, 200);
     await database.service.close();
     const before = checkDatabases(database.directory + '/data');
-    const run = value => cp.spawnSync(binary, ['deployment-identity-supply', '--dir', path.join(database.directory,'data'), '--migrationsDir', database.migrations, '--hooksDir', path.join(projectRoot,'backend/pb_hooks')], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(value) }, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] });
+    const run = value => cp.spawnSync(binary, ['deployment-identity-supply', '--dir', path.join(database.directory,'data'), '--migrationsDir', database.migrations, '--hooksDir', path.join(projectRoot,'backend/pb_hooks')], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(value) }, encoding: 'utf8', stdio: ['ignore','pipe','pipe'], timeout: 60000, maxBuffer: 65536 });
     for (const value of [{ ...input, arbitrary: true }, { ...input, permission: permission.slice(1) }, { ...input, credentials: { ...credentials, [ids[1]]: credentials[ids[0]] } }]) { assert.notEqual(run(value).status, 0); assert.deepEqual(checkDatabases(database.directory + '/data'), before); }
     const supplied = run(input); assert.equal(supplied.status, 0, 'Offline supply refused; private output withheld');
-    const proof = JSON.parse(supplied.stdout.trim().split('\n').at(-1));
+    const expected = { nonce: input.nonce, revision, runId: input.runId, humanId };
+    const proof = decodeIdentitySupply(supplied.stdout, expected);
     const payload = JSON.parse(Buffer.from(proof.token.split('.')[1], 'base64url'));
     assert.ok(payload.exp - Math.floor(Date.now() / 1000) <= 900 && payload.exp - Math.floor(Date.now() / 1000) >= 890); assert.equal(proof.humanId, humanId);
     const wrong = run({ ...input, credentials: { ...credentials, [ids[0]]: '5'.repeat(64) } }); assert.notEqual(wrong.status, 0);
-    assert.equal(run(input).status, 0);
+    const repeated = run(input); assert.equal(repeated.status, 0, 'Repeated offline supply refused; private output withheld');
+    const repeatedProof = decodeIdentitySupply(repeated.stdout, expected);
+    assert.ok(repeatedProof.humanId === humanId && repeatedProof.collectionId === proof.collectionId, 'Repeated identity binding refused');
     await database.restart();
-    const self = await database.request('/api/collections/users/records/' + humanId, { token: proof.token }); assert.equal(self.status, 200); assert.equal(self.data.is_admin, true); assert.equal(self.data.service_account, false); assert.equal(self.data.email, human.data.email);
+    const self = await database.request('/api/collections/users/records/' + humanId, { token: proof.token }); assert.equal(self.status, 200); assert.equal(self.data.is_admin, true); assert.equal(self.data.service_account, false); assert.equal(self.data.email, human.data.email); assert.ok(self.data.collectionId === proof.collectionId && self.data.collectionName === 'users', 'Same-target collection binding refused');
     assert.equal((await database.request('/api/collections/users/auth-refresh', { token: proof.token, method: 'POST' })).status, 401);
     for (const [i, id] of ids.entries()) {
       const auth = await database.request('/api/collections/users/auth-with-password', { method: 'POST', body: { identity: ['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn'][i], password: credentials[id] } }); assert.equal(auth.status, 200); assert.equal(auth.data.record.id, id);

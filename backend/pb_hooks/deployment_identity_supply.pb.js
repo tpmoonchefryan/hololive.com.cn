@@ -4,7 +4,7 @@
 $app.rootCmd.addCommand(new Command({
   use: 'deployment-identity-supply',
   short: 'Supply independently approved stopped deployment identities',
-  run: function () {
+  run: function (cmd) {
     var fail = function () { throw new Error('Deployment identity supply refused'); };
     var keys = function (v, expected) { if (!v || Object.keys(v).sort().join(',') !== expected.sort().join(',')) fail(); };
     var input;
@@ -20,6 +20,9 @@ $app.rootCmd.addCommand(new Command({
     keys(input.credentials, ['svcvsal7qgvfl12', 'svcmc31eh69zpuo']);
     var first = input.credentials.svcvsal7qgvfl12, second = input.credentials.svcmc31eh69zpuo;
     if (typeof first !== 'string' || typeof second !== 'string' || !/^[a-f0-9]{64}$/.test(first) || !/^[a-f0-9]{64}$/.test(second) || first === second) fail();
+    var writer;
+    try { writer = cmd.outOrStdout(); } catch (_) { fail(); }
+    if (!writer || typeof writer.write !== 'function') fail();
     if (!$app.isBootstrapped()) $app.bootstrap();
     var token;
     $app.runInTransaction(function (app) {
@@ -54,6 +57,7 @@ $app.rootCmd.addCommand(new Command({
     });
     // stdout is an anonymous pipe owned by the invoking deployment process.
     // It is never routed through command() or a persistent migration log.
-    console.log(JSON.stringify({ nonce: input.nonce, revision: input.revision, runId: input.runId, humanId: permitted[0].id, token: token }));
+    var frame = JSON.stringify({ nonce: input.nonce, revision: input.revision, runId: input.runId, humanId: permitted[0].id, token: token }) + '\n';
+    try { if (writer.write(frame) !== frame.length) fail(); } catch (_) { fail(); }
   }
 }));
