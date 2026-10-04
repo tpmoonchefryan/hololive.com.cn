@@ -16,6 +16,7 @@ const resources = {
         details: '(查看详情)',
         close: '关闭公告',
       },
+      draft: { title: '未保存的更改', message: '离开将丢弃未保存的更改。', discard: '丢弃并离开', keepEditing: '继续编辑' },
       feedback: {
         confirmTitle: '请确认操作',
         confirm: '确认',
@@ -1136,6 +1137,7 @@ const resources = {
         details: '(View Details)',
         close: 'Close announcement',
       },
+      draft: { title: 'Unsaved changes', message: 'Leaving will discard your unsaved changes.', discard: 'Discard and leave', keepEditing: 'Keep editing' },
       feedback: {
         confirmTitle: 'Please confirm this action',
         confirm: 'Confirm',
@@ -2242,6 +2244,7 @@ const resources = {
         details: '(詳細を見る)',
         close: 'お知らせを閉じる',
       },
+      draft: { title: '未保存の変更', message: '移動すると未保存の変更が破棄されます。', discard: '破棄して移動', keepEditing: '編集を続ける' },
       feedback: {
         confirmTitle: '操作を確認してください',
         confirm: '確認',

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import pb from "../lib/pocketbase";
 import { createQueryGate } from "../lib/contentQuery";
@@ -11,18 +11,20 @@ export function usePublicPostsByCategory({ category, loadErrorKey }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refresh, setRefresh] = useState(0);
+  const requestOwner = useId();
   const gate = useRef(createQueryGate());
   const reload = useCallback(() => setRefresh(value => value + 1), []);
 
   useEffect(() => {
     const token = gate.current.next();
+    const requestKey = `${requestOwner}:${token}`;
     setLoading(true);
     setError(null);
     pb.collection("posts").getList(page, 24, {
       filter: pb.filter('category = {:category} && is_public = true', { category }),
       sort: "-is_pinned,-created,-id",
       expand: "cover_ref",
-      requestKey: null,
+      requestKey,
     }).then(value => {
       if (gate.current.current(token)) setResult(value);
     }).catch(value => {
@@ -33,7 +35,7 @@ export function usePublicPostsByCategory({ category, loadErrorKey }) {
     }).finally(() => {
       if (gate.current.current(token)) setLoading(false);
     });
-    return () => { gate.current.next(); };
+    return () => { gate.current.next(); pb.cancelRequest(requestKey); };
   }, [category, page, refresh]);
 
   return {

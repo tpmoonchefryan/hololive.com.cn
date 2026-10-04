@@ -20,6 +20,7 @@ export default function Modal({ isOpen, onClose, title, children, size = "md", r
       aria-modal="true"
       aria-labelledby={title ? titleId : undefined}
       aria-label={title ? undefined : t("feedback.confirmTitle")}
+      onSubmit={(event) => event.stopPropagation()}
       onKeyDown={trapDialogTab}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onClick={(event) => { if (isBackdropClick(event)) onClose(); }}
