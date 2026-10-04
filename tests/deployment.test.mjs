@@ -533,7 +533,7 @@ async function closeOutcomeCases() {
     for(const row of guardCoverage)row.reason='all guard bindings absent; outside plain CI coverage and passed guard counts';
     let service;
     try {
-      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);
+      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);ownedChildren.push(service.child);
       assert.ok(service.child.spawnfile&&service.child.pid!==undefined,'local child did not spawn');
       const first=service.close(),concurrent=service.close();assert.equal(first,concurrent);
       const results=await Promise.allSettled([first,concurrent]);
@@ -559,7 +559,7 @@ async function closeOutcomeCases() {
       return rawSpawn(command,args,options);
     };syncBuiltinESMExports();
     try {
-      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);
+      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);ownedChildren.push(service.child);
       if(!service.child.spawnfile||service.child.pid===undefined)throw new Error('local child did not spawn');
       // A real active owned group must remain registered after a refused removal.
       const guardArgs=[guard,'deregister','--registry',registry,'--pgid',String(service.child.pid),'--purpose',owner];
@@ -599,6 +599,12 @@ async function closeOutcomeCases() {
     write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});
   }
 }
+const originals={readFileSync:fs.readFileSync,statSync:fs.statSync,lstatSync:fs.lstatSync,existsSync:fs.existsSync,realpathSync:fs.realpathSync,cpSync:fs.cpSync};
+const environment={...process.env}, forwardOutputs=[], ownedChildren=[];
+const ownedFilesystem={root,removed:false,retainedForwardOutputs:[],errors:[]};
+let bound, primaryError, closeoutError;
+function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});}
+try {
 await closeOutcomeCases();
 
 function sql(file, source, args = []) { return rawExec('python3', ['-c', source, file, ...args], {encoding:'utf8'}).trim(); }
@@ -629,7 +635,7 @@ async function fixture(version,binary, suffix = '') {
   const migration=rawExec(binary,['migrate','up',...common],{encoding:'utf8'});assert.doesNotMatch(migration,/Failed|Error:/);
   rawExec(binary,['superuser','upsert','probe@example.invalid','Disposable-Only-2026!',...common],{encoding:'utf8'});
   const port=await unusedPort(),base='http://127.0.0.1:'+port;
-  const service=await startOwned(binary,['serve','--automigrate=false','--http','127.0.0.1:'+port,...common]);
+  const service=await startOwned(binary,['serve','--automigrate=false','--http','127.0.0.1:'+port,...common]);ownedChildren.push(service.child);
   let identities,ordinary,post,settings;
   try{
     await waitFor(base+'/api/health',service);
@@ -662,15 +668,13 @@ async function fixture(version,binary, suffix = '') {
   const configFile=path.join(local,'config.json');write(configFile,config);
   const work=path.join(local,'approved-working');mkdir(path.join(work,'backend'));
   copyWithModes(path.join(webRoot,'backend/pb_data'),path.join(work,'backend/pb_data'),{recursive:true});
-  const forward=rawExec(binary,['migrate','up','--dir',path.join(work,'backend/pb_data'),'--migrationsDir',path.join(bundle,'backend/pb_migrations'),'--hooksDir',path.join(bundle,'backend/pb_hooks')],{encoding:'utf8'});assert.doesNotMatch(forward,/Failed|Error:/);fs.writeFileSync(path.join(local,'actual-forward.stdout'),forward,{mode:0o600});
+  const forward=rawExec(binary,['migrate','up','--dir',path.join(work,'backend/pb_data'),'--migrationsDir',path.join(bundle,'backend/pb_migrations'),'--hooksDir',path.join(bundle,'backend/pb_hooks')],{encoding:'utf8'});assert.doesNotMatch(forward,/Failed|Error:/);fs.writeFileSync(path.join(local,'actual-forward.stdout'),forward,{mode:0o600});forwardOutputs.push(path.join(local,'actual-forward.stdout'));
   sql(path.join(work,'backend/pb_data/data.db'),"import sqlite3,sys,json;c=sqlite3.connect(sys.argv[1]);[c.execute('update users set is_admin=1,service_account=? where id=?',(int(i['role']=='service'),i['id'])) for i in json.loads(sys.argv[2])];c.commit()",[JSON.stringify(identities)]);
   config.recoveryWorkingCopy=work;
   config.finiteStop={syncCodeSha256:sha(fs.readFileSync(path.join(webRoot,'backend/scripts/sync_velocity.js')))};write(configFile,config);
   return {local,webRoot,config,configFile,configMap,identities,ordinary,post,settings,base,binary,commands:[],running:null};
 }
 
-const originals={readFileSync:fs.readFileSync,statSync:fs.statSync,lstatSync:fs.lstatSync,existsSync:fs.existsSync,realpathSync:fs.realpathSync,cpSync:fs.cpSync};
-let bound;
 fs.readFileSync=(file,...args)=>file==='/etc/machine-id'?Buffer.from('isolated machine'):originals.readFileSync(bound?.configMap.get(file)??file,...args);
 fs.statSync=(file,...args)=>{const s=originals.statSync(bound?.configMap.get(file)??file,...args);return file===bound?.configFile?new Proxy(s,{get:(s,k)=>k==='uid'?0:Reflect.get(s,k)}):s;};
 fs.realpathSync=(file,...args)=>bound?.configMap.has(file)?file:originals.realpathSync(file,...args);
@@ -686,12 +690,12 @@ cp.execFileSync=(file,args,options)=>{
   if(file==='systemctl'&&args[0]==='show')return (args[1]==='velocity'&&args.includes('MainPID')?'MainPID=100\nExecMainStartTimestampMonotonic=123\nNRestarts=0\nActiveState=active':args[1]==='velocity'?(args.includes('ExecStart')?fixtureService(bound.config.velocityRoot,'velocity'):bound.config.velocityServiceBinding):bound.config.serviceBindings[args[1]])+'\n';
   if(file==='ss')return 'LISTEN 0 100 127.0.0.1:25565 0.0.0.0:*\n';
   if(file==='sudo'&&args[1]==='systemctl'){
-    if(args[2]==='start'&&args[3]==='pocketbase')bound.running=startOwned(bound.binary,['serve','--automigrate=false','--http',new URL(bound.base).host,'--dir',path.join(bound.webRoot,'backend/pb_data'),'--migrationsDir',path.join(bound.webRoot,'backend/pb_migrations'),'--hooksDir',path.join(bound.webRoot,'backend/pb_hooks')]);
+    if(args[2]==='start'&&args[3]==='pocketbase')bound.running=startOwned(bound.binary,['serve','--automigrate=false','--http',new URL(bound.base).host,'--dir',path.join(bound.webRoot,'backend/pb_data'),'--migrationsDir',path.join(bound.webRoot,'backend/pb_migrations'),'--hooksDir',path.join(bound.webRoot,'backend/pb_hooks')]).then(service=>{ownedChildren.push(service.child);return service;});
     return '';
   }
   throw new Error('Unapproved external command refused: '+file);
 };syncBuiltinESMExports();
-const environment={...process.env};Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
+Object.assign(process.env,{GITHUB_REPOSITORY:'fixture/acceptance006',GITHUB_RUN_ID:'6006',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SERVER_URL:'https://github.com'});
 const adapter=(run=6)=>{
   const domain=bound;write(domain.configFile,domain.config);
   const actual=productionAdapter(bundle,domain.config,candidate,run,domain.configFile), stop=actual.stop;
@@ -699,9 +703,7 @@ const adapter=(run=6)=>{
   return actual;
 };
 function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
-function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
-try{
   // Keep these copies inside the original independent fixture root. Mutating a
   // destination must not alter its source or sibling, including chmod and links.
   const copyRoot=path.join(root,'copy-independence'),source=path.join(copyRoot,'source');mkdir(source);
@@ -994,11 +996,38 @@ try{
     }
   }
 
-}finally{
-  if(bound?.running){const service=await bound.running;await service.close();}
-  Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];
+} catch(error) {
+  primaryError=error;
+} finally {
+  const closeoutFailure=(stage,error)=>{ownedFilesystem.errors.push({stage,message:'Owned fixture closeout failed'});closeoutError??=error;};
+  let childrenClosed=true;
+  try {if(bound?.running){const service=await bound.running;await service.close();bound.running=null;}}
+  catch(error){childrenClosed=false;closeoutFailure('child-close',error);}
+  // Restoration and evidence persistence still run when setup or child close fails.
+  try {Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];}
+  catch(error){closeoutFailure('restore',error);}
+  const persist=()=>write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,isolation:'original productionAdapter/deploy and actual PB/file/SQLite operations; only finite host/service/command/external config bindings substituted; synthetic identities and anonymous records',lifecycleContext,guardCoverage,observations,ownedFilesystem});
+  try {
+    for(const source of forwardOutputs) {
+      const relativeSource=path.relative(root,source), bytes=fs.readFileSync(source);
+      assert.ok(!relativeSource.startsWith('..')&&!path.isAbsolute(relativeSource),'Owned forward evidence locator refused');
+      const retained=path.join(evidence,'retained-forward',relativeSource);mkdir(path.dirname(retained));
+      fs.writeFileSync(retained,bytes,{mode:0o600});
+      assert.ok(fs.readFileSync(retained).equals(bytes),'Owned forward evidence preservation refused');
+      ownedFilesystem.retainedForwardOutputs.push({relativeSource,retainedPath:path.relative(evidence,retained),bytes:bytes.length,sha256:sha(bytes)});
+    }
+    persist();
+    if(childrenClosed&&!closeoutError) {
+      assert.ok(ownedChildren.every(child=>child.exitCode!==null||child.signalCode!==null),'Owned fixture child termination refused');
+      assert.ok(path.dirname(root)===evidence&&fs.realpathSync(root)===root&&!fs.lstatSync(root).isSymbolicLink(),'Owned fixture root binding refused');
+      fs.rmSync(root,{recursive:true});ownedFilesystem.removed=!fs.existsSync(root);
+      assert.ok(ownedFilesystem.removed,'Owned fixture removal refused');
+    }
+  } catch(error){closeoutFailure('preserve-or-remove',error);}
+  try {persist();}catch(error){closeoutFailure('final-probes',error);}
 }
-write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,isolation:'original productionAdapter/deploy and actual PB/file/SQLite operations; only finite host/service/command/external config bindings substituted; synthetic identities and anonymous records',lifecycleContext,guardCoverage,observations});
+if(primaryError)throw primaryError;
+if(closeoutError)throw closeoutError;
 console.log(JSON.stringify({lifecycleContext,guardCoverage,guardCasesVerified:guardCoverage.filter(x=>x.status==='verified').length,guardCasesUnverified:guardCoverage.filter(x=>x.status!=='verified').length,observations:observations.length,passed:observations.filter(x=>x.passed).length,failed:observations.filter(x=>!x.passed).length,root,production:false}));
 process.exitCode=observations.every(x=>x.passed)?0:1;
 
@@ -1154,7 +1183,17 @@ for (const [version, binary] of binaries) test('offline exact identity supply an
     assert.ok(repeatedProof.humanId === humanId && repeatedProof.collectionId === proof.collectionId, 'Repeated identity binding refused');
     await database.restart();
     const self = await database.request('/api/collections/users/records/' + humanId, { token: proof.token }); assert.equal(self.status, 200); assert.equal(self.data.is_admin, true); assert.equal(self.data.service_account, false); assert.equal(self.data.email, human.data.email); assert.ok(self.data.collectionId === proof.collectionId && self.data.collectionName === 'users', 'Same-target collection binding refused');
-    assert.equal((await database.request('/api/collections/users/auth-refresh', { token: proof.token, method: 'POST' })).status, 401);
+    const humanRefresh = await database.request('/api/collections/users/auth-refresh', { token: proof.token, method: 'POST' });
+    assert.equal(humanRefresh.status, version === '0.26.5' ? 403 : 200);
+    if(version === '0.34.2') {
+      assert.ok(typeof humanRefresh.data.token === 'string' && humanRefresh.data.token === proof.token, 'Human refresh token preservation refused');
+      const now = Math.floor(Date.now() / 1000);
+      const refreshedProof = decodeIdentitySupply(JSON.stringify({ ...expected, token: humanRefresh.data.token }) + '\n', expected, now);
+      const refreshedClaims = JSON.parse(Buffer.from(refreshedProof.token.split('.')[1], 'base64url'));
+      assert.ok(Number.isSafeInteger(refreshedClaims.exp) && refreshedClaims.exp === payload.exp && refreshedClaims.id === payload.id && refreshedClaims.collectionId === payload.collectionId && refreshedClaims.type === payload.type && refreshedClaims.type === 'auth' && refreshedClaims.refreshable === false && refreshedClaims.exp - now > 0 && refreshedClaims.exp - now <= 900, 'Human refresh bounded claim preservation refused');
+      const record = humanRefresh.data.record;
+      assert.ok(record && record.id === humanId && record.collectionId === proof.collectionId && record.collectionName === 'users' && record.verified === true && record.email === human.data.email && record.is_admin === true && record.service_account === false, 'Human refresh same-target record binding refused');
+    }
     for (const [i, id] of ids.entries()) {
       const auth = await database.request('/api/collections/users/auth-with-password', { method: 'POST', body: { identity: ['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn'][i], password: credentials[id] } }); assert.equal(auth.status, 200); assert.equal(auth.data.record.id, id);
       assert.equal((await database.request('/api/collections/users/auth-refresh', { token: auth.data.token, method: 'POST' })).status, 200);
