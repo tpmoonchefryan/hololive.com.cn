@@ -27,4 +27,47 @@ stop 可能在返回前已部分写保护或尝试冻结。失败保留保护与
 
 完整服务配置读取使用 `systemctl show <unit> --all` 请求原全部属性。执行状态支持完整 `0/0` 字符串并保留五个动态字段；`pid=0` 或 `[n/a]` 不证明停止或启动阶段成立。实际特权阶段与目标 systemctl 表示仍须真实证据。
 
-预检按实际 EUID 与 groups 核对配置 UID/GID 可恢复性，在停服务前拒绝无法证明的属主恢复。隔离恢复在复制任何应用内容前核对完整、唯一且与配置文件对应的 ownership 清单和合法 UID/GID；非 root 进程仅接受自己的 UID 及实际组。原 chown 和最终精确属主核对保留。真实 root 配置相对非 root runner 缺恢复能力时保守停止；本实现未新增特权 helper 或第四操作。原三个有限操作仍为 `stop`、`cleanup-sync`、`cleanup-java`。CI 供应及永久身份提案继续待裁，合成 fixture 身份与本地服务映射不证明生产恢复或部署成功。
+本地直接隔离恢复保留原 EUID/groups、完整唯一 ownership 清单、合法 UID/GID 及复制前拒绝检查。生产路径在原固定 Python 子调用内增加已批准的有限配置/属主/凭据用途，并保留原 `stop`、`cleanup-sync`、`cleanup-java` 三个操作。当前 CI 与指定身份方向已获批准，具体边界见下节；源码、合成 fixture 和本地映射不证明真实 Linux 特权恢复或生产部署成功。
+
+## Finite current-host prerequisites
+
+The existing job uses a secret-free immutable root-owned deployment config
+readable by the actual runner group (`0640`). Bind the real repository,
+candidate revision, runner user, machine digest, current absolute host roots,
+all fourteen properties for each website unit, original Java bindings and the
+complete configuration inventory. Record missing configuration as unconfigured;
+examples do not grant host or identity authority.
+
+`runnerResources` has exactly `unit`, `CPUQuota`, `MemoryHigh`, `MemoryMax` and
+`TasksMax`. The approved finite values are 100%, 1879048192, 2147483648 and 256;
+the unit is the observed runner service. Enforcement requires matching
+controller files, actual job membership and bounded descendants. Parent CPU
+controller absence is a dependent host provisioning stop. The input helper
+makes no controller, hierarchy, restart, system package or Java policy change.
+Memory/OOM/throttle observations remain available and no automatic increase or
+retry occurs. IO enforcement remains unknown.
+
+Provisioned backup/state roots must be private to the actual runner. The fixed
+child alone creates root-owned private configuration/material subtrees. Its
+root config must declare the reviewed seven existing configuration files and
+the two approved absent service EnvFiles. Actual root capability, no-follow
+parent/file descriptors, caller process, config inode/hash, candidate manifest,
+Actions run, held lock and stopped service/Java evidence are required. A boolean
+capability flag does not substitute for readback. No generic helper, sudoers
+installer, caller-selected root script or whole-root apply is provided.
+
+Capability inspection is read-only before lock. Raw stopped capture seals the
+original bytes and absences; credentials are generated after that seal in the
+same backup position, then remain immutable. Two isolated configuration
+restorations derive their destinations from that current run and perform owner
+and byte/mode readback. Only the two service EnvFiles and exact corresponding
+unit EnvironmentFile deltas are delivered during the existing install position.
+The original post-health service order is preserved. Failures retain the guard,
+partial attempt evidence and failed-run refusal and never report deployed.
+
+Typed D-Bus empty-array proof is required when systemctl omits complex empty
+properties; the installed `busctl` must support `--system --json=short` and the
+actual signatures. Missing support refuses instead of guessing a binding.
+Actual privileged Linux success, effective runner resources, target identity
+proof, production run and continuous Java/player evidence must be obtained on
+the approved target. Local passing tests cannot provision or prove them.

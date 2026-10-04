@@ -201,4 +201,76 @@ Owner 已允许必要的迁移专用临时超级用户通过 CLI 分别创建，
 
 完整服务配置读取使用 `systemctl show <unit> --all` 请求原全部属性。执行状态支持完整 `0/0` 字符串并保留五个动态字段；`pid=0` 或 `[n/a]` 不证明停止或启动阶段成立。实际特权阶段与目标 systemctl 表示仍须真实证据。
 
-预检按实际 EUID 与 groups 核对配置 UID/GID 可恢复性，在停服务前拒绝无法证明的属主恢复。隔离恢复在复制任何应用内容前核对完整、唯一且与配置文件对应的 ownership 清单和合法 UID/GID；非 root 进程仅接受自己的 UID 及实际组。原 chown 和最终精确属主核对保留。真实 root 配置相对非 root runner 缺恢复能力时保守停止；本实现未新增特权 helper 或第四操作。原三个有限操作仍为 `stop`、`cleanup-sync`、`cleanup-java`。CI 供应及永久身份提案继续待裁，合成 fixture 身份与本地服务映射不证明生产恢复或部署成功。
+本地直接隔离恢复保留原 EUID/groups、完整唯一 ownership 清单、合法 UID/GID 及复制前拒绝检查。生产路径在原固定 Python 子调用内增加已批准的有限配置/属主/凭据用途，并保留原 `stop`、`cleanup-sync`、`cleanup-java` 三个操作。当前 CI 与指定身份方向已获批准，具体边界见下节；源码、合成 fixture 和本地映射不证明真实 Linux 特权恢复或生产部署成功。
+
+## Current bounded deployment input and recovery contract
+
+The existing self-hosted job validates the actual root-owned `DEPLOY_CONFIG`
+and effective runner cgroup before locked dependencies. The config is secret
+free, root:runner-group `0640`; private configuration and credential material
+remain root:root under `0700` parents. The finite runner policy is CPU 100%,
+MemoryHigh 1879048192, MemoryMax 2147483648 and TasksMax 256. Actual membership,
+controller files, systemd agreement and descendants are checked. Missing parent
+CPU enablement refuses deployment; this code does not provision controllers,
+move the runner, raise limits, install packages or apply limits to Java. IO
+coverage remains unknown.
+
+The existing verification step downloads only the reviewed official Linux
+amd64 PocketBase 0.26.5 and 0.34.2 archives with immutable SHA256 pins. It
+extracts only a bounded regular ELF binary, verifies its actual version and
+supplies the exact 2249-byte retained migration as private test input. Retained
+history is never executed as a new candidate migration. CI runs migrations,
+lint, production audit, one build, bundle check and the original deployment and
+Velocity tests. The native local verification command keeps its existing order.
+
+The production config's `configurationFiles` is the complete ordered six
+website unit files followed by the inventoried nginx file.
+`configurationAbsent` explicitly contains the two approved `/etc/default`
+service EnvFiles on the first absent-service run. A later binding with matching
+existing identities includes both root-private EnvFiles in the whitelist and an
+empty absence list; it verifies and reuses credentials without rotation. The fixed inline Python interface has closed purposes:
+capability check before lock; source observation; stopped raw capture; current
+run material preparation; safe derivation; raw and safe isolated copies; two
+owner restorations with actual readback; and approved credential delivery in
+install. No arbitrary file, UID/GID, destination, unit, command or secret value
+is accepted. Local owner-compatible isolated restores retain their direct path.
+The standalone isolated restore cannot access production privilege.
+
+Stopped raw configuration bytes, owner/mode and absences stay sealed unchanged.
+Independent root-private receipts bind candidate, caller, lock, run, raw
+snapshot and original permission outside the safe set. Safe configuration adds
+only the two private EnvFiles and their corresponding EnvironmentFile unit
+bindings. Delivery validates all units before writing, reloads systemd only
+when a binding changed, then compares every property and actual bytes/owners.
+Service restarts retain their original position after target health; Java
+files and its service remain protected throughout.
+
+After each original candidate `migrate up`, the closed offline PocketBase
+command validates the independently approved human and two service identities,
+then writes only their approved role delta or absent service records in one
+transaction. It preserves the human's password, email, token key and existing
+local login setting. Material is generated with OS randomness only after raw
+absence proof and reused unchanged for rehearsal, safe derivation and target.
+It crosses the privileged boundary only on an inherited anonymous pipe; no
+credential is stored in runner-readable evidence or migration logs. Existing
+matching service identities are checked without rotation. A 15-minute,
+nonrefreshable users token proves the human through target self-record and
+protected reads. Each service uses its own password, actual users login and
+refresh; no superuser or different-copy fallback is accepted.
+
+Systemd can omit empty complex properties even with `--all`. Each omitted
+execution array or EnvironmentFiles must be confirmed by a typed D-Bus
+GetUnit/property read with exactly the expected signature and empty payload.
+Missing scalar, nonempty array, unknown field or duplicate still refuses.
+
+Story010 remains dependent on the actual Story009 run/SHA, full release
+manifest, stopped raw baseline and safe recovery. Its original R1–R6 require
+same-run frontend/hooks/scripts/dependency version evidence, bounded service
+and application logs, actual schema/fields/select/rules/index/full ledger,
+content/user/media/settings relations and explained transformations, actual
+configuration/identity and restoration readbacks, and Java/player continuity
+across the entire deployment and observation interval. A job exit, online
+metadata, local fixture or HTTP200 cannot replace this evidence. Record each
+actual result as passed, failed or not-verifiable with its time and private
+locator. Neither local implementation nor machine checks grant Owner visual
+acceptance or external release authorization.

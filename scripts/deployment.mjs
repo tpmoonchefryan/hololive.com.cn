@@ -4,8 +4,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const artifactPaths = ['dist', 'backend/pb_migrations', 'backend/pb_hooks', 'backend/scripts', 'package.json', 'package-lock.json', 'node_modules'];
@@ -57,10 +57,24 @@ export function serviceFacts(raw) {
   }
   return { configuration, runtime, environment };
 }
-const showService = unit => command('systemctl', ['show', unit, '--all', ...serviceNames.flatMap(name => ['-p', name])]);
+export const showService = unit => {
+  const raw = command('systemctl', ['show', unit, '--all', ...serviceNames.flatMap(name => ['-p', name])]);
+  const present = new Set(raw.split('\n').map(line => line.slice(0, line.indexOf('='))));
+  const missing = serviceNames.filter(name => !present.has(name));
+  if (!missing.length) return raw;
+  check(missing.every(name => executionNames.includes(name) || name === 'EnvironmentFiles'), 'Missing nonarray systemd property');
+  const object = JSON.parse(command('/usr/bin/busctl', ['--system', '--json=short', 'call', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1', 'org.freedesktop.systemd1.Manager', 'GetUnit', 's', unit.endsWith('.service') ? unit : unit + '.service']));
+  check(Object.keys(object).sort().join(',') === 'data,type' && object.type === 'o' && Array.isArray(object.data) && object.data.length === 1 && /^\/org\/freedesktop\/systemd1\/unit\/[A-Za-z0-9_]+$/.test(object.data[0]), 'Missing typed systemd unit object');
+  for (const name of missing) {
+    const typed = JSON.parse(command('/usr/bin/busctl', ['--system', '--json=short', 'get-property', 'org.freedesktop.systemd1', object.data[0], 'org.freedesktop.systemd1.Service', name]));
+    check(Object.keys(typed).sort().join(',') === 'data,type' && typed.type === (name === 'EnvironmentFiles' ? 'a(sb)' : 'a(sasbttttuii)') && Array.isArray(typed.data) && typed.data.length === 0, 'Missing property lacks typed empty-array proof');
+  }
+  return raw + '\n' + missing.map(name => name + '=').join('\n');
+};
 function serviceEnvironment(facts, config) {
   return facts.environment.map(item => {
-    check(config.configurationFiles.includes(item.path), 'EnvironmentFile outside approved configuration inventory');
+    check(config.configurationFiles.includes(item.path) || config.configurationAbsent?.includes(item.path), 'EnvironmentFile outside approved configuration inventory');
+    if (item.ignore_errors === 'yes' && config.configurationAbsent?.includes(item.path) && !fs.existsSync(item.path)) return { ...item, absent: true };
     assertRealPath(item.path);
     const stat = fs.lstatSync(item.path);
     check(stat.isFile() && stat.nlink === 1, 'Unsafe EnvironmentFile');
@@ -346,13 +360,13 @@ for (const record of inventory(webRoot, ['backend/pb_migrations'])) {
   }
 }
 
-export function installBundle(bundle, webRoot, revision, baseline, backup) {
+export function installBundle(bundle, webRoot, revision, baseline, backup, privateIO) {
   const manifest = verifyBundle(bundle, revision);
   assertRealPath(webRoot);
   verifyImmutableMigrations(bundle, webRoot, baseline);
   if (baseline?.kind === 'mixed') {
-    verifySnapshot(backup, baseline);
-    assertSnapshotTarget(backup, webRoot);
+    verifySnapshot(backup, baseline, privateIO);
+    assertSnapshotTarget(backup, webRoot, privateIO);
   }
   const retained = (baseline?.retainedHistory ?? []).map(item => ({ ...item, bytes: fs.readFileSync(path.join(webRoot, item.path)) }));
   verifyInstallTargets(webRoot);
@@ -385,9 +399,10 @@ export function snapshotIdentity(manifest) {
   return sha(JSON.stringify({ revision: manifest.revision ?? null, present: manifest.present, missing: manifest.missing,
     application: manifest.application, configuration: manifest.configuration, ownership: manifest.ownership,
     contract: manifest.contract, retainedHistory: manifest.retainedHistory, sourceAbsentHistory: manifest.sourceAbsentHistory,
+    ...(manifest.configurationAbsent ? { configurationAbsent: manifest.configurationAbsent } : {}),
     ...(manifest.captureBinding ? { captureBinding: manifest.captureBinding } : {}) }));
 }
-export function verifySnapshot(backup, baseline) {
+export function verifySnapshot(backup, baseline, privateIO) {
   check(typeof backup === 'string' && path.isAbsolute(backup), 'Missing complete snapshot');
   assertRealPath(backup);
   const manifest = json(path.join(backup, 'backup.json'));
@@ -398,7 +413,10 @@ export function verifySnapshot(backup, baseline) {
   check(Array.isArray(manifest.configuration) && manifest.configuration.length > 0 && Array.isArray(manifest.ownership), 'Missing snapshot configuration');
   const names = manifest.configuration.map(item => item.path);
   check(names.every(safeRelative) && manifest.configuration.every(item => item.sha256 && !item.link && !item.directory), 'Invalid configuration manifest');
-  check(JSON.stringify(inventory(path.join(backup, 'configuration'), names)) === JSON.stringify(manifest.configuration), 'Configuration snapshot drift');
+  if (privateIO) {
+    const report = privateIO('inspect', backup);
+    check(JSON.stringify(report.configuration) === JSON.stringify(manifest.configuration) && JSON.stringify(report.ownership) === JSON.stringify(manifest.ownership) && JSON.stringify(report.absent) === JSON.stringify(manifest.configurationAbsent), 'Configuration snapshot drift');
+  } else check(JSON.stringify(inventory(path.join(backup, 'configuration'), names)) === JSON.stringify(manifest.configuration), 'Configuration snapshot drift');
   check(names.every(name => manifest.ownership.some(item => item.path === name && Number.isInteger(item.uid) && Number.isInteger(item.gid))), 'Missing configuration ownership metadata');
   check(JSON.stringify(checkDatabases(path.join(backup, 'application/backend/pb_data'))) === JSON.stringify(manifest.contract), 'Snapshot contract drift');
   if (baseline?.kind === 'mixed') {
@@ -413,10 +431,15 @@ export function verifySnapshot(backup, baseline) {
   }
   return manifest;
 }
-function assertSnapshotTarget(backup, webRoot) {
+function assertSnapshotTarget(backup, webRoot, privateIO) {
   const manifest = json(path.join(backup, 'backup.json'));
   check(JSON.stringify(inventory(webRoot, manifest.present)) === JSON.stringify(manifest.application), 'Target changed since stopped snapshot');
   for (const name of manifest.missing) check(!fs.existsSync(path.join(webRoot, name)), 'Previously missing target appeared');
+  if (privateIO) {
+    const report = privateIO('observe-source', backup);
+    check(JSON.stringify(report.configuration) === JSON.stringify(manifest.configuration) && JSON.stringify(report.ownership) === JSON.stringify(manifest.ownership) && JSON.stringify(report.absent) === JSON.stringify(manifest.configurationAbsent), 'Target private configuration drift');
+    return;
+  }
   for (const item of manifest.configuration) {
     const file = '/' + item.path;
     const stat = fs.statSync(file), owner = manifest.ownership.find(value => value.path === item.path);
@@ -528,8 +551,8 @@ function verifyRecoveryContract(directory, expected, rawContract) {
   const actual = checkDatabases(path.join(directory, 'backend/pb_data'))['data.db'].migrations;
   check(rawContract['data.db'].migrations.every(row => actual.some(current => JSON.stringify(current) === JSON.stringify(row))), 'Original migration ledger changed');
 }
-export function createSafeRecovery(backup, migrated, bundle, revision, identities, expectedDirectory) {
-  const raw = verifySnapshot(backup);
+export function createSafeRecovery(backup, migrated, bundle, revision, identities, expectedDirectory, privateIO) {
+  const raw = verifySnapshot(backup, undefined, privateIO);
   verifyBundle(bundle, revision);
   if (!expectedDirectory) {
     expectedDirectory = path.join(backup, 'candidate-contract-rehearsal');
@@ -558,30 +581,31 @@ export function createSafeRecovery(backup, migrated, bundle, revision, identitie
   copyPaths(migrated, path.join(safe, 'application'), ['backend/pb_data']);
   copyPaths(path.join(backup, 'application'), path.join(safe, 'application'), ['backend/pocketbase']);
   for (const item of raw.retainedHistory ?? []) copyPaths(path.join(backup, 'application'), path.join(safe, 'application'), [item.path]);
-  copyPaths(path.join(backup, 'configuration'), path.join(safe, 'configuration'), raw.configuration.map(item => item.path));
+  const derivedConfiguration = privateIO ? privateIO('derive-safe', backup) : null;
+  if (!privateIO) copyPaths(path.join(backup, 'configuration'), path.join(safe, 'configuration'), raw.configuration.map(item => item.path));
   const present = [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'];
   const manifest = { revision, sourceSnapshotId: raw.snapshotId, present, missing: [], application: inventory(path.join(safe, 'application'), present),
-    configuration: raw.configuration, ownership: raw.ownership, contract: checkDatabases(path.join(safe, 'application/backend/pb_data')),
+    configuration: derivedConfiguration?.configuration ?? raw.configuration, ownership: derivedConfiguration?.ownership ?? raw.ownership, configurationAbsent: derivedConfiguration?.absent ?? raw.configurationAbsent, contract: checkDatabases(path.join(safe, 'application/backend/pb_data')),
     retainedHistory: raw.retainedHistory, sourceAbsentHistory: raw.sourceAbsentHistory, expectedContract, identities, candidateFiles: verifyBundle(bundle, revision).files };
   manifest.snapshotId = snapshotIdentity(manifest);
   manifest.recoveryId = sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: raw.snapshotId, identities, candidateFiles: manifest.candidateFiles }));
   writeJSON(path.join(safe, 'backup.json'), manifest);
   return safe;
 }
-export function restoreSafeRecovery(safe, destination, revision) {
-  const manifest = verifySnapshot(safe);
+export function restoreSafeRecovery(safe, destination, revision, privateIO) {
+  const manifest = verifySnapshot(safe, undefined, privateIO);
   check(manifest.revision === revision && /^[a-f0-9]{40}$/.test(revision) && /^[a-f0-9]{64}$/.test(manifest.sourceSnapshotId ?? ''), 'Recovery app/data binding mismatch');
   check(manifest.recoveryId === sha(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: manifest.sourceSnapshotId, identities: manifest.identities, candidateFiles: manifest.candidateFiles })), 'Recovery identity binding mismatch');
   const app = manifest.application.filter(item => !item.path.startsWith('backend/pb_data') && item.path !== 'backend/pocketbase' && !(manifest.retainedHistory ?? []).some(old => old.path === item.path));
   check(JSON.stringify(app) === JSON.stringify(manifest.candidateFiles), 'Recovery candidate mismatch');
-  const source = verifySnapshot(path.dirname(safe));
+  const source = verifySnapshot(path.dirname(safe), undefined, privateIO);
   const expectation = json(path.join(path.dirname(safe), 'expected-recovery-contract.json'));
   check(source.snapshotId === manifest.sourceSnapshotId && expectation.sourceSnapshotId === source.snapshotId && expectation.revision === revision && JSON.stringify(expectation.candidateFiles) === JSON.stringify(manifest.candidateFiles) && JSON.stringify(expectation.expectedContract) === JSON.stringify(manifest.expectedContract), 'Recovery expected contract binding mismatch');
   check(Array.isArray(expectation.identities) && JSON.stringify(expectation.identities) === JSON.stringify(manifest.identities), 'Recovery original identities permission binding mismatch');
   verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), expectation.identities);
   verifyRecoveryContract(path.join(safe, 'application'), expectation.expectedContract, source.contract);
   verifyRecoverySecurity(path.join(safe, 'application'), expectation.identities);
-  const result = restoreBackup(safe, destination);
+  const result = restoreBackup(safe, destination, privateIO);
   verifyRecoverySecurity(destination, expectation.identities);
   verifyRecoveryContract(destination, expectation.expectedContract, source.contract);
   return { ...result, recoveryId: manifest.recoveryId, sourceSnapshotId: manifest.sourceSnapshotId, oldDaemonStarted: false };
@@ -613,7 +637,16 @@ def file_flags(p):
 def ctl(args): return subprocess.check_output(['/usr/bin/systemctl']+args,text=True,timeout=10).strip()
 def props(unit,names):
  out=ctl(['show',unit,'--all']+sum((['-p',n] for n in names),[])); rows=[line.split('=',1) for line in out.splitlines()]
- require(all(len(row)==2 for row in rows) and len(rows)==len(names) and len(set(row[0] for row in rows))==len(names) and set(row[0] for row in rows)==set(names),'Missing/duplicate/unknown unit property'); return dict(rows)
+ require(all(len(row)==2 for row in rows) and len(set(row[0] for row in rows))==len(rows) and set(row[0] for row in rows).issubset(names),'Duplicate/unknown unit property')
+ missing=[name for name in names if name not in dict(rows)]
+ if missing:
+  require(all(name in ['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost','EnvironmentFiles'] for name in missing),'Missing nonarray property')
+  object=json.loads(subprocess.check_output(['/usr/bin/busctl','--system','--json=short','call','org.freedesktop.systemd1','/org/freedesktop/systemd1','org.freedesktop.systemd1.Manager','GetUnit','s',unit if unit.endswith('.service') else unit+'.service'],text=True,timeout=10))
+  require(set(object)=={'type','data'} and object['type']=='o' and isinstance(object['data'],list) and len(object['data'])==1 and re.fullmatch('/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+',object['data'][0]),'Missing typed unit object')
+  for name in missing:
+   typed=json.loads(subprocess.check_output(['/usr/bin/busctl','--system','--json=short','get-property','org.freedesktop.systemd1',object['data'][0],'org.freedesktop.systemd1.Service',name],text=True,timeout=10))
+   require(set(typed)=={'type','data'} and typed['type']==('a(sb)' if name=='EnvironmentFiles' else 'a(sasbttttuii)') and typed['data']==[],'Missing property lacks typed empty proof'); rows.append([name,''])
+ require(len(rows)==len(names) and set(row[0] for row in rows)==set(names),'Missing typed unit property'); return dict(rows)
 marker_names=['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState','ControlGroup']
 execution_names=['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost']
 service_names=execution_names+['WorkingDirectory','User','Group','EnvironmentFiles','Requires','BindsTo','PartOf']
@@ -636,7 +669,9 @@ def facts(value):
  while rest:
   m=re.match(r'(/[^\s\\()]+) \(ignore_errors=(yes|no)\)(?: |$)',rest)
   require(m and os.path.normpath(m[1])==m[1] and not any(x['path']==m[1] for x in environment),'Ambiguous EnvironmentFiles')
-  f=real(m[1]); require(f in config['configurationFiles'],'EnvironmentFile outside approved configuration inventory')
+  f=real(m[1]); require(f in config['configurationFiles'] or f in config.get('configurationAbsent',[]),'EnvironmentFile outside approved configuration inventory')
+  if not os.path.exists(f) and m[2]=='yes' and f in config.get('configurationAbsent',[]):
+   environment.append({'path':f,'ignore_errors':m[2],'absent':True}); rest=rest[m.end():]; continue
   i=identity(f); environment.append({'path':f,'ignore_errors':m[2],'sha256':digest(read(f)),'mode':i[4],'uid':i[2],'gid':i[3]}); rest=rest[m.end():]
  return {'configuration':configuration,'runtime':runtime,'environment':environment}
 def configured(unit,value=None):
@@ -644,7 +679,13 @@ def configured(unit,value=None):
  if unit in config['websiteServices']:
   rows=[line.split('=',1) for line in config['serviceBindings'][unit].splitlines()]
   require(all(len(row)==2 for row in rows) and len(rows)==len(service_names) and set(row[0] for row in rows)==set(service_names),'Malformed approved service binding')
-  require(actual['configuration']==facts(dict(rows))['configuration'],'Root-approved service configuration drift')
+  approved_configuration=facts(dict(rows))['configuration']
+  if result.get('privateBackupName'):
+   require(re.fullmatch('run-'+str(r['runNumber'])+'-[A-Za-z0-9]+',result['privateBackupName']) is not None,'Wrong delivered backup')
+   delivered=json.loads(read(config['backupRoot']+'/'+result['privateBackupName']+'/private-seal/deliver-approved-config.json'))
+   require(delivered['binding']['revision']==r['revision'] and delivered['binding']['runId']==r['runId'] and delivered['binding']['configSha256']==r['configSha256'],'Private delivered binding drift')
+   approved_configuration=facts(delivered['serviceBindings'][unit])['configuration']
+  require(actual['configuration']==approved_configuration,'Root-approved service configuration drift')
  require(actual['configuration']==expected['configuration'] and actual['environment']==expected['environment'],'Configured service/environment drift: '+unit)
  return actual
 def running(value):
@@ -783,6 +824,263 @@ def remove(unit):
   if not os.listdir(directory): os.rmdir(directory); del result['directories'][unit]
  ctl(['daemon-reload']); now=effective()
  require(now[unit]==result['originalProperties'][unit],'Runtime properties not restored')
+# These purposes share the original fixed child, but never accept arbitrary paths,
+# ownership, bytes, commands or identities. The config and root-private seal are authority.
+private_attempts=[]; private_completed=[]
+def private_handler():
+ global config
+ parent_bindings={}
+ def parentfd(file):
+  real(file); fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); current='/'
+  try:
+   for part in file.strip('/').split('/')[:-1]:
+    current=os.path.join(current,part); nextfd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd); os.close(fd); fd=nextfd
+    value=os.fstat(fd); binding=[value.st_dev,value.st_ino,value.st_uid,value.st_gid,stat.S_IMODE(value.st_mode)]
+    require(identity(current)[:5]==binding,'Private parent descriptor drift')
+    if current in parent_bindings: require(parent_bindings[current]==binding,'Private parent inode drift')
+    else: parent_bindings[current]=binding
+   return fd
+  except:
+   os.close(fd); raise
+ def private_read(file):
+  fd=parentfd(file)
+  try: leaf=os.open(os.path.basename(file),os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+  finally: os.close(fd)
+  try:
+   value=os.fstat(leaf); require(stat.S_ISREG(value.st_mode) and value.st_nlink==1,'Private nonregular read')
+   with os.fdopen(leaf,'rb',closefd=False) as stream: data=stream.read(134217729)
+   require(len(data)<=134217728 and identity(file)==[value.st_dev,value.st_ino,value.st_uid,value.st_gid,stat.S_IMODE(value.st_mode),value.st_nlink],'Private read replaced')
+   verify=parentfd(file); os.close(verify); return data
+  finally: os.close(leaf)
+ allowed={'restore-configuration-ownership':['capability-check','raw','safe'], 'private-configuration':['observe-source','capture-stopped','derive-safe','restore-raw','restore-safe'], 'service-credential-material':['prepare-current-run','deliver-approved-config']}
+ require(set(r)=={'operation','purpose','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','serviceEvidence','state','backupName','nonce','view'},'Unknown private request field')
+ op=r['operation']; purpose=r['purpose']; require(purpose in allowed[op],'Unknown private purpose')
+ require(r['view'] in ['source','raw','safe'] and (purpose=='observe-source' or r['view']=='source'),'Unknown private report view')
+ require(os.geteuid()==0 and (stat.S_ISFIFO(os.fstat(1).st_mode) or stat.S_ISSOCK(os.fstat(1).st_mode)),'Private child requires root and anonymous output pipe')
+ if stat.S_ISSOCK(os.fstat(1).st_mode):
+  import socket,struct
+  channel=socket.fromfd(1,socket.AF_UNIX,socket.SOCK_STREAM)
+  try: peer=struct.unpack('3i',channel.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12)); require(peer[0]==r['runnerPID'] and peer[1]==r['runnerUID'] and peer[2]==r['runnerGID'],'Wrong anonymous channel peer')
+  finally: channel.close()
+ require(re.fullmatch('[a-f0-9]{64}',r['nonce']) is not None,'Invalid request nonce')
+ config=json.loads(private_read(real(r['configFile'])))
+ require(identity(r['configFile'])==r['configIdentity'] and digest(private_read(r['configFile']))==r['configSha256'],'Private config drift')
+ caller=pwd.getpwnam(config['runnerUser'])
+ require(os.environ.get('SUDO_USER')==config['runnerUser'] and caller.pw_uid==r['runnerUID']!=0 and caller.pw_gid==r['runnerGID'],'Wrong private caller')
+ require(identity(r['configFile'])[2:5]==[0,caller.pw_gid,0o640],'Private config owner/mode drift')
+ require(digest(private_read('/etc/machine-id'))==config['machineIdSha256'],'Wrong private host')
+ require(config['approvedRevision']==r['revision'] and config['repository']==r['repository'] and re.fullmatch('[0-9]+',r['runId']) is not None,'Private Actions drift')
+ require(re.fullmatch('[a-f0-9]{40}',r['revision']) is not None and isinstance(r['runNumber'],int) and r['runNumber']>0,'Private revision/run drift')
+ process='/proc/'+str(r['runnerPID']); status=dict(x.split(':',1) for x in private_read(process+'/status').decode().splitlines() if ':' in x)
+ require([int(x) for x in status['Uid'].split()]==[caller.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[caller.pw_gid]*4,'Private runner process drift')
+ manifest=real(r['bundle']+'/release.json'); require(digest(private_read(manifest))==r['candidateManifestSha256'] and json.loads(private_read(manifest))['revision']==r['revision'],'Private candidate drift')
+ envs=['/etc/default/velocity-sync','/etc/default/mcsm-proxy']
+ whitelist=config['configurationFiles']; absent=config.get('configurationAbsent')
+ require(isinstance(whitelist,list) and len(set(whitelist))==len(whitelist) and absent in [envs,[]] and not any(x in whitelist for x in absent),'Private whitelist/absence drift')
+ expected=['/etc/systemd/system/'+u+'.service' for u in config['websiteServices']]+[config['nginxSiteFile']]
+ require(whitelist==expected+(envs if not absent else []) and len(expected)==7,'Private source must be complete reviewed seven-file inventory')
+ permission=[{'id':'j3o2wd17l18prla','role':'admin'},{'id':'svcvsal7qgvfl12','role':'service'},{'id':'svcmc31eh69zpuo','role':'service'}]
+ require(config.get('recoveryIdentities')==permission,'Independent role permission drift')
+ roots=[real(config[k]) for k in ['webRoot','stateRoot','backupRoot','velocityRoot']]
+ require(all(a!='/' and not(a==b or a.startswith(b+'/') or b.startswith(a+'/')) for i,a in enumerate(roots) for b in roots[i+1:]),'Private overlapping roots')
+ def parents(file):
+  current='/'
+  for part in file.strip('/').split('/')[:-1]:
+   current=os.path.join(current,part); i=identity(real(current)); require(stat.S_ISDIR(os.lstat(current).st_mode),'Private parent is not directory')
+   require(i[2] in [0,caller.pw_uid] and i[4]&0o022==0,'Writable/foreign private parent')
+  return identity(os.path.dirname(file))
+ def observed(files,root='/'):
+  values=[]; owners=[]
+  for file in files:
+   relative=file.lstrip('/'); target=root.rstrip('/')+'/'+relative; before=parents(target); data=private_read(target); i=identity(target)
+   require(parents(target)==before,'Private parent replaced')
+   values.append({'path':relative,'sha256':digest(data),'mode':i[4]}); owners.append({'path':relative,'uid':i[2],'gid':i[3]})
+  return {'configuration':values,'ownership':owners}
+ def source():
+  value=observed(whitelist)
+  require(all(not os.path.lexists(x) for x in absent),'Source EnvFile drift')
+  require(all(x['uid']==0 and x['gid']==0 for x in value['ownership']) and all(x['mode']==(0o600 if '/'+x['path'] in envs else 0o644) for x in value['configuration']),'Source owner/mode drift')
+  value['absent']=absent; return value
+ def check_stopped():
+  require(props('pocketbase',['ActiveState','MainPID'])=={'ActiveState':'inactive','MainPID':'0'},'PocketBase not stopped')
+  require(props('velocity-sync',['ActiveState','MainPID'])=={'ActiveState':'inactive','MainPID':'0'},'Sync not stopped')
+ def current():
+  require(identity(r['configFile'])==r['configIdentity'] and digest(private_read(r['configFile']))==r['configSha256'],'Private config replaced')
+  require(digest(private_read(manifest))==r['candidateManifestSha256'],'Private candidate replaced')
+  lock=real(config['stateRoot']+'/deployment.lock'); require(identity(lock)==r['lockIdentity'],'Private lock replaced')
+  require(json.loads(private_read(lock))=={'revision':r['revision'],'runNumber':r['runNumber'],'pid':r['runnerPID']},'Private lock/run drift')
+  fds=os.listdir(process+'/fd'); require(any(os.path.exists(process+'/fd/'+f) and os.stat(process+'/fd/'+f).st_ino==r['lockIdentity'][1] and os.stat(process+'/fd/'+f).st_dev==r['lockIdentity'][0] for f in fds),'Private caller has no open lock')
+  require(private_read(config['webRoot']+'/backend/.velocity-maintenance'),'Missing private maintenance guard')
+  require(r['state'] and r['state'].get('stopped') and r['velocityEvidence'] and r['serviceEvidence'],'Missing original stop evidence')
+  require(props('velocity', ['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState'])==dict(line.split('=',1) for line in r['velocityEvidence']['service'].splitlines()),'Private Java runtime drift')
+  for entry in r['velocityEvidence']['files']:
+   require(digest(private_read(config['velocityRoot']+'/'+entry['path']))==entry['sha256'] and identity(config['velocityRoot']+'/'+entry['path'])[4]==entry['mode'],'Private Java bytes drift')
+ def report(v):
+  v.update({'nonce':r['nonce'],'purpose':purpose,'rootEUID':0,'runnerUID':caller.pw_uid,'runnerGID':caller.pw_gid,'attempted':list(private_attempts),'completed':list(private_completed)}); return v
+ if purpose=='capability-check':
+  require(r['lockIdentity'] is None and r['backupName'] is None and r['state'] is None,'Capability check must precede lock')
+  value=source(); value['capChown']=bool(int(status.get('CapEff','0').strip(),16)&1); value['rootCapChown']=bool(int(dict(x.split(':',1) for x in private_read('/proc/'+str(os.getpid())+'/status').decode().splitlines() if ':' in x)['CapEff'].strip(),16)&1)
+  require(value['rootCapChown'],'Root child lacks CAP_CHOWN'); return report(value)
+ if purpose=='observe-source' and r['lockIdentity'] is None:
+  require(r['view']=='source','Prelock snapshot read refused'); return report(source())
+ current()
+ if purpose=='observe-source' and r['view']=='source': return report(source())
+ require(isinstance(r['backupName'],str) and re.fullmatch('run-'+str(r['runNumber'])+'-[A-Za-z0-9]+',r['backupName']) is not None,'Invalid derived backup name')
+ backup=real(config['backupRoot']+'/'+r['backupName']); bi=identity(backup)
+ require(bi[2:5]==[caller.pw_uid,caller.pw_gid,0o700] and stat.S_ISDIR(os.lstat(backup).st_mode),'Private backup parent drift')
+ private=backup+'/private-seal'; sealfile=private+'/seal.json'
+ binding={'revision':r['revision'],'runNumber':r['runNumber'],'runId':r['runId'],'repository':r['repository'],'backupIdentity':bi[:5],'configSha256':r['configSha256'],'candidateManifestSha256':r['candidateManifestSha256'],'permission':permission}
+ def mkdirs(file):
+  current=backup
+  for part in os.path.relpath(os.path.dirname(file),backup).split('/'):
+   require(part not in ('..','.'),'Invalid derived private parent'); current=os.path.join(current,part)
+   if not os.path.exists(current):
+    directory=parentfd(current)
+    try: os.mkdir(os.path.basename(current),0o700,dir_fd=directory)
+    finally: os.close(directory)
+   expected_owner=[caller.pw_uid,caller.pw_gid,0o700] if current in [backup+'/safe-recovery',backup+'/rehearsal',backup+'/safe-recovery-rehearsal'] else [0,0,0o700]
+   require(identity(real(current))[2:5]==expected_owner and stat.S_ISDIR(os.lstat(current).st_mode),'Private subtree ownership drift')
+ def write(file,data,mode=0o600,owner=(0,0)):
+  private_attempts.append(os.path.relpath(file,backup) if file.startswith(backup+'/') else file); current_binding=parents(file); parent=parentfd(file)
+  try: fd=os.open(os.path.basename(file),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode,dir_fd=parent)
+  finally: os.close(parent)
+  try:
+   require(parents(file)==current_binding,'Private write parent replaced'); require(os.write(fd,data)==len(data),'Short private write'); os.fsync(fd); os.fchmod(fd,mode); os.fchown(fd,*owner)
+   require(os.fstat(fd).st_nlink==1 and identity(file)[1]==os.fstat(fd).st_ino,'Private write replaced')
+  finally: os.close(fd)
+  private_completed.append(os.path.relpath(file,backup) if file.startswith(backup+'/') else file)
+ def save_seal(seal):
+  # Each step seals a distinct immutable receipt, never rewrites prior permission.
+  file=private+'/'+purpose+'.json'; require(not os.path.lexists(file),'Private purpose already attempted'); write(file,json.dumps(seal,separators=(',',':')).encode())
+ if purpose=='capture-stopped':
+  check_stopped(); raw=source(); require(not os.path.lexists(private) and not os.path.lexists(backup+'/configuration'),'Existing private capture')
+  os.mkdir(private,0o700)
+  for file,item,owner in zip(whitelist,raw['configuration'],raw['ownership']):
+   current(); check_stopped(); dest=backup+'/configuration/'+file.lstrip('/'); mkdirs(dest); data=private_read(file); require(digest(data)==item['sha256'],'Capture source drift'); write(dest,data,item['mode'],(owner['uid'],owner['gid']))
+  require(source()==raw and observed(whitelist,backup+'/configuration')=={k:raw[k] for k in ['configuration','ownership']},'Capture postreadback drift')
+  seal={'binding':binding,'raw':raw}; write(sealfile,json.dumps(seal,separators=(',',':')).encode()); save_seal(seal); return report(raw)
+ require(identity(real(private))[2:5]==[0,0,0o700] and identity(sealfile)[2:5]==[0,0,0o600],'Unsafe independent private seal')
+ seal=json.loads(private_read(sealfile)); require(seal['binding']==binding,'Independent private binding drift')
+ raw=seal['raw']; require(observed(whitelist,backup+'/configuration')=={k:raw[k] for k in ['configuration','ownership']},'Raw private seal drift')
+ if purpose=='observe-source' and r['view']=='raw': return report(raw)
+ materialfile=private+'/credentials'
+ def material():
+  require(identity(materialfile)[2:5]==[0,0,0o600],'Private credential mode drift'); values=private_read(materialfile).decode().splitlines()
+  require(len(values)==2 and values[0]!=values[1] and all(re.fullmatch('[a-f0-9]{64}',x) for x in values),'Invalid current material'); return values
+ if purpose=='prepare-current-run':
+  check_stopped(); raw_manifest=json.loads(private_read(backup+'/backup.json'))
+  require(raw_manifest['configuration']==raw['configuration'] and raw_manifest['ownership']==raw['ownership'] and raw_manifest['configurationAbsent']==raw['absent'],'Raw parent seal mismatch')
+  # Bind stopped application bytes before exposing current-run material.
+  app=backup+'/application'
+  require(isinstance(raw_manifest.get('application'),list) and len(raw_manifest['application'])<=20000,'Missing raw application closure')
+  for item in raw_manifest['application']:
+   name=item['path']; require(isinstance(name,str) and not name.startswith('/') and all(x not in ['','..','.'] for x in name.split('/')) and '\\' not in name,'Unsafe raw material source')
+   target=app+'/'+name; require(os.path.realpath(target).startswith(app+'/'),'Raw material source escape')
+   if item.get('directory'): require(stat.S_ISDIR(os.lstat(target).st_mode) and identity(target)[4]==item['mode'],'Raw source directory drift')
+   elif 'link' in item: require(os.path.islink(app+'/'+name) and os.readlink(app+'/'+name)==item['link'],'Raw source link drift')
+   else: require(digest(private_read(target))==item['sha256'] and identity(target)[4]==item['mode'],'Raw source bytes drift')
+  import sqlite3
+  wal=backup+'/application/backend/pb_data/data.db-wal'; require(not os.path.exists(wal) or os.stat(wal).st_size==0,'Uncheckpointed stopped identity source')
+  database=sqlite3.connect('file:'+backup+'/application/backend/pb_data/data.db?mode=ro&immutable=1',uri=True)
+  require(database.execute('select verified from users where id=?',(permission[0]['id'],)).fetchone()==(1,),'Unverified raw human')
+  for entry,email in zip(permission[1:],['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn']):
+   rows=database.execute('select id,email from users where id=? or email=?',(entry['id'],email)).fetchall()
+   require(rows==[] if absent else rows==[(entry['id'],email)],'Raw service collision')
+   if not absent: require(database.execute('select is_admin,service_account from users where id=?',(entry['id'],)).fetchone()==(1,1),'Existing raw service role drift')
+  database.close()
+  if not os.path.exists(materialfile):
+   if absent: values=[os.urandom(32).hex(),os.urandom(32).hex()]
+   else:
+    values=[]
+    for file,email in zip(envs,['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn']):
+     content=private_read(backup+'/configuration/'+file.lstrip('/')).decode(); match=re.fullmatch('PB_EMAIL='+re.escape(email)+r'\nPB_PASS=([a-f0-9]{64})\n',content); require(match,'Existing private credential contract drift'); values.append(match[1])
+   write(materialfile,('\n'.join(values)+'\n').encode())
+  values=material(); value={'binding':binding,'snapshotId':raw_manifest['snapshotId'],'materialSha256':digest(private_read(materialfile)),'rawManifestSha256':digest(private_read(backup+'/backup.json'))}; save_seal(value)
+  sys.stderr.write(json.dumps(report(value))); sys.stdout.write('\n'.join(values)+'\n'); return None
+ prepared=json.loads(private_read(private+'/prepare-current-run.json')); require(prepared['binding']==binding and prepared['materialSha256']==digest(private_read(materialfile)) and prepared['rawManifestSha256']==digest(private_read(backup+'/backup.json')),'Prepared permission/material drift')
+ values=material()
+ def envbytes(index): return ('PB_EMAIL='+['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn'][index]+'\nPB_PASS='+values[index]+'\n').encode()
+ def unitbytes(unit):
+  file='/etc/systemd/system/'+unit+'.service'; data=private_read(backup+'/configuration/'+file.lstrip('/')); text=data.decode(); directive='EnvironmentFile=-/etc/default/'+unit
+  require(not re.search(r'^Environment=.*(?:PB_PASS|PB_EMAIL|PB_TOKEN)=',text,re.M),'Inline service credential')
+  matches=re.findall(r'^EnvironmentFile=(.*)$',text,re.M)
+  require(matches in ([],['-/etc/default/'+unit]),'Conflicting EnvironmentFile')
+  require(text.count('[Service]')==1,'Ambiguous unit service section')
+  return data if matches else text.replace('[Service]','[Service]\n'+directive,1).encode()
+ safeconfig=backup+'/safe-recovery/configuration'; expectedfile=private+'/derive-safe.json'
+ if purpose=='derive-safe':
+  check_stopped(); require(not os.path.lexists(safeconfig),'Existing private safe configuration')
+  for file,item,owner in zip(whitelist,raw['configuration'],raw['ownership']):
+   data=unitbytes(file.split('/')[-1][:-8]) if file in ['/etc/systemd/system/velocity-sync.service','/etc/systemd/system/mcsm-proxy.service'] else private_read(backup+'/configuration/'+file.lstrip('/'))
+   dest=safeconfig+'/'+file.lstrip('/'); mkdirs(dest); write(dest,data,item['mode'],(owner['uid'],owner['gid']))
+  for index,file in enumerate(envs):
+   if file in whitelist: continue
+   dest=safeconfig+'/'+file.lstrip('/'); mkdirs(dest); write(dest,envbytes(index))
+  expected=observed(list(dict.fromkeys(whitelist+envs)),safeconfig); expected['absent']=[]
+  save_seal({'binding':binding,'expected':expected,'snapshotId':prepared['snapshotId'],'materialSha256':prepared['materialSha256']}); return report(expected)
+ safe=purpose in ['restore-safe','safe','deliver-approved-config'] or (purpose=='observe-source' and r['view']=='safe')
+ expected=json.loads(private_read(expectedfile)) if safe else None
+ if safe:
+  require(expected['binding']==binding and expected['snapshotId']==prepared['snapshotId'] and expected['materialSha256']==prepared['materialSha256'],'Independent safe permission drift')
+  require(observed(list(dict.fromkeys(whitelist+envs)),safeconfig)=={k:expected['expected'][k] for k in ['configuration','ownership']},'Safe private bytes drift')
+ wanted=expected['expected'] if safe else raw; files=list(dict.fromkeys(whitelist+envs)) if safe else whitelist
+ if purpose=='observe-source' and r['view']=='safe': return report(wanted)
+ if purpose.startswith('restore-') or purpose in ['raw','safe']:
+  check_stopped(); destination=backup+('/safe-recovery-rehearsal' if safe else '/rehearsal')+'/isolated-configuration'; source_root=safeconfig if safe else backup+'/configuration'
+  require(stat.S_ISDIR(os.lstat(os.path.dirname(destination)).st_mode) and identity(os.path.dirname(destination))[2:5]==[caller.pw_uid,caller.pw_gid,0o700],'Wrong isolated parent')
+  if purpose.startswith('restore-'):
+   require(not os.path.lexists(destination),'Existing isolated private destination')
+   for file,item in zip(files,wanted['configuration']):
+    current(); dest=destination+'/'+file.lstrip('/'); mkdirs(dest); write(dest,private_read(source_root+'/'+file.lstrip('/')),item['mode'])
+   copied=observed(files,destination); save_seal({'binding':binding,'destinationIdentity':identity(destination),'copied':copied}); return report({'configuration':copied['configuration'],'ownership':wanted['ownership']})
+  copied=json.loads(private_read(private+'/restore-'+purpose+'.json')); require(copied['binding']==binding and copied['destinationIdentity']==identity(destination),'Isolated parent/inode drift')
+  require(observed(files,destination)==copied['copied'],'Isolated preowner bytes drift')
+  for file,owner in zip(files,wanted['ownership']):
+   current(); target=destination+'/'+file.lstrip('/'); parent=parents(target); directory=parentfd(target)
+   try: fd=os.open(os.path.basename(target),os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+   finally: os.close(directory)
+   try:
+    require(parents(target)==parent and os.fstat(fd).st_nlink==1,'Isolated owner endpoint drift'); os.fchown(fd,owner['uid'],owner['gid'])
+   finally: os.close(fd)
+  post=observed(files,destination); require(post=={k:wanted[k] for k in ['configuration','ownership']},'Actual ownership postreadback drift'); save_seal({'binding':binding,'post':post}); return report(wanted)
+ require(purpose=='deliver-approved-config','Unknown private application')
+ check_stopped()
+ require(source()==raw,'Private install source drift')
+ # Validate both complete unit deltas and all bindings before first live write.
+ unit_values={u:unitbytes(u) for u in ['velocity-sync','mcsm-proxy']}
+ original={u:props(u,service_names) for u in config['websiteServices']}
+ for u,value in original.items():
+  require(facts(value)['configuration']==facts(dict(line.split('=',1) for line in config['serviceBindings'][u].splitlines()))['configuration'],'Private delivery service drift')
+ for index,file in enumerate(envs):
+  current()
+  if file in absent: write(file,envbytes(index))
+  else: require(private_read(file)==envbytes(index),'Existing approved credential drift')
+ changed=False
+ for unit,data in unit_values.items():
+  file='/etc/systemd/system/'+unit+'.service'; old=private_read(file)
+  if old!=data:
+   current(); parent=parents(file); directory=parentfd(file)
+   try: fd=os.open(os.path.basename(file),os.O_WRONLY|os.O_NOFOLLOW,dir_fd=directory)
+   finally: os.close(directory)
+   try:
+    require(parents(file)==parent and digest(old)==next(x['sha256'] for x in raw['configuration'] if x['path']==file.lstrip('/')),'Unit delta source drift'); os.ftruncate(fd,0); require(os.write(fd,data)==len(data),'Short approved unit write'); os.fsync(fd)
+   finally: os.close(fd)
+   changed=True
+ if changed: ctl(['daemon-reload'])
+ for unit,before in original.items():
+  after=props(unit,service_names); target=dict(before)
+  if unit in unit_values: target['EnvironmentFiles']='/etc/default/'+unit+' (ignore_errors=yes)'
+  require(after==target,'Unexpected delivered service property drift')
+ post=observed(list(dict.fromkeys(whitelist+envs))); require(post=={k:wanted[k] for k in ['configuration','ownership']},'Live private delivery postreadback drift')
+ save_seal({'binding':binding,'post':post,'serviceBindings':{u:props(u,service_names) for u in config['websiteServices']}}); return report(dict(wanted,serviceBindings={u:props(u,service_names) for u in config['websiteServices']}))
+if r.get('operation') in ['restore-configuration-ownership','private-configuration','service-credential-material']:
+ try:
+  response=private_handler()
+  if response is not None: print(json.dumps(dict(response,ok=True)))
+ except Exception:
+  # Neither SQLite errors nor request/secret values are exposed.
+  print(json.dumps({'ok':False,'reason':'Bounded private configuration operation refused','purpose':r.get('purpose'),'nonce':r.get('nonce'),'rootEUID':os.geteuid(),'attempted':private_attempts,'completed':private_completed}))
+ sys.exit(0)
 try:
  require(set(r)=={'operation','configFile','configIdentity','configSha256','lockIdentity','revision','runNumber','runId','repository','runnerPID','runnerUID','runnerGID','bundle','candidateManifestSha256','velocityEvidence','serviceEvidence','state'},'Unknown finite request field')
  require(r['operation'] in ['stop','cleanup-sync','cleanup-java'],'Unknown finite operation')
@@ -874,13 +1172,15 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
   const pb = path.join(config.webRoot, 'backend/pocketbase');
   let lockFd, backupPath, oldState, effectiveBaseline = config.baseline, captured = false, onlineLedger, preflightSources, configIdentity, configSha256, maintenance = null, installed = false, migrated = false, authenticated = false, velocityBaseline, serviceEvidence;
+  const privateBridge = config.configurationAbsent !== undefined;
+  let credentialMaterial, humanTargetToken, suppliedProof;
   const firstCapture = config.baseline?.capture === 'stopped-backup';
   const captureDescriptor = firstCapture ? JSON.stringify(config.baseline) : null;
   const captureBinding = directory => ({ revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, snapshotDirectory: directory });
   const assertCaptured = backup => {
     if (firstCapture) check(backup === backupPath, 'Capture snapshot directory mismatch');
     if (firstCapture) check(captured && config.approvedRevision === revision && config.repository === process.env.GITHUB_REPOSITORY && JSON.stringify(config.baseline) === captureDescriptor && JSON.stringify(effectiveBaseline.captureBinding) === JSON.stringify(captureBinding(backup)), 'Capture candidate/run binding mismatch');
-    return verifySnapshot(backup, effectiveBaseline);
+    return verifySnapshot(backup, effectiveBaseline, privateBridge ? privateIO : undefined);
   };
   const controlParents = new Map([state, guard, lock].map(file => [path.dirname(file), fs.lstatSync(path.dirname(file))]));
   const boundControl = file => {
@@ -891,7 +1191,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   const writeControl = (file, value) => { boundControl(file); controlWrite(file, value, boundControl); };
   const sourceBindings = () => ({
     migrations: fs.existsSync(path.join(config.webRoot, 'backend/pb_migrations')) ? inventory(config.webRoot, ['backend/pb_migrations']) : [],
-    configuration: config.configurationFiles.map(file => { const stat = fs.lstatSync(file); check(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, 'Unsafe declared configuration'); return { path: file, sha256: sha(fs.readFileSync(file)), mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid }; }),
+    configuration: privateBridge ? privateOperation('private-configuration', 'observe-source').configuration.map(item => { const owner = privateOperationOwners.find(x => x.path === item.path); return { path: '/' + item.path, sha256: item.sha256, mode: item.mode, uid: owner.uid, gid: owner.gid }; }) : config.configurationFiles.map(file => { const stat = fs.lstatSync(file); check(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, 'Unsafe declared configuration'); return { path: file, sha256: sha(fs.readFileSync(file)), mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid }; }),
   });
   const assertSources = () => { if (preflightSources) check(JSON.stringify(sourceBindings()) === JSON.stringify(preflightSources), 'Migration/configuration changed since preflight'); };
   const finiteRoot = operation => {
@@ -914,6 +1214,31 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     check(maintenance && typeof maintenance.changed === 'boolean', 'Missing finite maintenance state');
     return maintenance;
   };
+  let privateOperationOwners = [];
+  const privateOperation = (operation, purpose, view = 'source') => {
+    check(configIdentity && configSha256 && config.configurationAbsent, 'Missing private capability binding');
+    verifyBundle(bundle, revision);
+    const runner = os.userInfo(), opened = lockFd === undefined ? null : fs.fstatSync(lockFd);
+    const request = { operation, purpose, view, configFile, configIdentity, configSha256, lockIdentity: opened ? [opened.dev, opened.ino, opened.uid, opened.gid, opened.mode & 0o7777, opened.nlink] : null, revision, runNumber, runId: process.env.GITHUB_RUN_ID, repository: process.env.GITHUB_REPOSITORY, runnerPID: process.pid, runnerUID: runner.uid, runnerGID: runner.gid, bundle, candidateManifestSha256: sha(fs.readFileSync(path.join(bundle, 'release.json'))), velocityEvidence: velocityBaseline ?? null, serviceEvidence: serviceEvidence ?? null, state: maintenance, backupName: backupPath ? path.basename(backupPath) : null, nonce: randomBytes(32).toString('hex') };
+    if (maintenance) (maintenance.privateAttempts ??= []).push({ operation, purpose, nonce: request.nonce, status: 'attempted' });
+    const result = spawnSync('sudo', ['-n', '/usr/bin/python3', '-I', '-c', finiteRootSource], { input: JSON.stringify(request), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000, maxBuffer: 1048576 });
+    let report;
+    try { report = JSON.parse(purpose === 'prepare-current-run' ? result.stderr : result.stdout); } catch { check(false, 'Private child result unavailable'); }
+    if (maintenance) Object.assign(maintenance.privateAttempts.at(-1), { status: report.ok === false ? 'refused' : 'completed', attempted: report.attempted ?? [], completed: report.completed ?? [], postcondition: report.configuration ?? null });
+    check(!result.error && result.status === 0 && report.ok !== false && report.rootEUID === 0 && report.nonce === request.nonce && report.purpose === purpose && report.runnerUID === runner.uid && report.runnerGID === runner.gid, 'Private child binding refused');
+    if (purpose === 'prepare-current-run') {
+      const values = result.stdout.trim().split('\n');
+      check(values.length === 2 && values[0] !== values[1] && values.every(x => /^[a-f0-9]{64}$/.test(x)), 'Private material channel refused');
+      credentialMaterial = { svcvsal7qgvfl12: values[0], svcmc31eh69zpuo: values[1] };
+    }
+    privateOperationOwners = report.ownership ?? privateOperationOwners;
+    return report;
+  };
+  const privateIO = (purpose, directory) => {
+    check(directory === backupPath || directory === path.join(backupPath, 'safe-recovery'), 'Unbound private configuration context');
+    const actual = purpose === 'inspect' ? 'observe-source' : purpose;
+    return privateOperation(['raw', 'safe'].includes(actual) ? 'restore-configuration-ownership' : 'private-configuration', actual, purpose === 'inspect' ? (directory === backupPath ? 'raw' : 'safe') : 'source');
+  };
   const systemctl = (action, unit) => {
     check(config.websiteServices.includes(unit) && units.includes(unit), 'Service outside whitelist');
     command('sudo', ['-n', 'systemctl', action, unit]);
@@ -935,6 +1260,24 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   };
   const authenticateTarget = async () => {
     const identities = config.recoveryIdentities;
+    if (privateBridge) {
+      check(suppliedProof?.directory === config.webRoot && suppliedProof.revision === revision && suppliedProof.runId === process.env.GITHUB_RUN_ID && humanTargetToken && credentialMaterial, 'Missing same-target identity supply');
+      const base = new URL(config.pocketbaseHealthUrl).origin;
+      for (const [index, item] of identities.entries()) {
+        let token = humanTargetToken, record;
+        if (item.role === 'service') {
+          const email = index === 1 ? 'velocity-sync@services.hololive.com.cn' : 'mcsm-proxy@services.hololive.com.cn';
+          const auth = await fetch(base + '/api/collections/users/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: email, password: credentialMaterial[item.id] }), signal: AbortSignal.timeout(3000) });
+          const data = await auth.json(); check(auth.ok && typeof data.token === 'string', 'Target service authentication failed');
+          const refresh = await fetch(base + '/api/collections/users/auth-refresh', { method: 'POST', headers: { Authorization: data.token }, signal: AbortSignal.timeout(3000) });
+          const refreshed = await refresh.json(); check(refresh.ok && refreshed.record?.id === item.id && typeof refreshed.token === 'string', 'Target service refresh failed'); token = refreshed.token;
+        }
+        const self = await fetch(base + '/api/collections/users/records/' + item.id, { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); record = await self.json();
+        check(self.ok && record.id === item.id && record.collectionName === 'users' && record.is_admin === true && record.service_account === (item.role === 'service') && (item.role === 'service' || record.verified === true), 'Target users self proof failed');
+        for (const collection of ['velocity_settings', 'mcsm_config']) { const response = await fetch(base + '/api/collections/' + collection + '/records', { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); check(response.ok && Array.isArray((await response.json()).items), 'Target protected identity read failed'); }
+      }
+      return;
+    }
     check(Array.isArray(config.targetAuthentication) && config.targetAuthentication.length === identities.length, 'Missing target authentication bindings');
     const base = new URL(config.pocketbaseHealthUrl).origin;
     for (const item of identities) {
@@ -951,11 +1294,27 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     }
     for (const unit of config.websiteServices.filter(unit => /velocity-sync|mcsm/.test(unit))) check(config.targetAuthentication.some(item => item.role === 'service' && item.services?.includes(unit)), 'Missing dependent service authentication binding');
   };
-  const migrateCopy = directory => command(pb, ['migrate', 'up', '--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
+  const migrateCopy = directory => {
+    const args = ['--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')];
+    const output = command(pb, ['migrate', 'up', ...args]);
+    check(!/Failed|Error:/i.test(output), 'Candidate migration failed before identity supply');
+    if (privateBridge) {
+      check(credentialMaterial && backupPath, 'Missing stopped current-run identity material');
+      const permission = config.recoveryIdentities, raw = json(path.join(backupPath, 'backup.json'));
+      const input = { revision, runId: process.env.GITHUB_RUN_ID, snapshotId: raw.snapshotId, permissionSha256: sha(JSON.stringify(permission)), permission, credentials: credentialMaterial, nonce: randomBytes(32).toString('hex') };
+      const supplied = spawnSync(pb, ['deployment-identity-supply', ...args], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(input) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000, maxBuffer: 65536 });
+      check(!supplied.error && supplied.status === 0, 'Offline identity supply failed');
+      let proof;
+      try { proof = JSON.parse(supplied.stdout.trim().split('\n').at(-1)); } catch { check(false, 'Offline identity channel failed'); }
+      check(proof.nonce === input.nonce && proof.revision === revision && proof.runId === input.runId && proof.humanId === permission[0].id && typeof proof.token === 'string' && proof.token.length < 8192, 'Offline identity proof binding failed');
+      if (directory === config.webRoot) { humanTargetToken = proof.token; suppliedProof = { directory, revision, runId: input.runId, humanId: proof.humanId }; }
+    }
+    return output;
+  };
   return {
     verify: () => {
       assertRunState(controlRead(state, boundControl));
-      for (const file of config.configurationFiles) {
+      if (!privateBridge) for (const file of config.configurationFiles) {
         assertRealPath(file);
         const owner = fs.statSync(file);
         assertRecoverableOwners([{ uid: owner.uid, gid: owner.gid }]);
@@ -973,7 +1332,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
         }
       }
       verifyInstallTargets(config.webRoot, config.configurationFiles);
-      preflightSources = sourceBindings();
+      if (!privateBridge) preflightSources = sourceBindings();
       for (const endpoint of [state, guard, lock]) boundControl(endpoint);
       check(process.env.GITHUB_REPOSITORY === config.repository && /^[0-9]+$/.test(process.env.GITHUB_RUN_ID ?? '') && ['push', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME), 'Missing actual Actions run/repository binding');
       assertRealPath(configFile);
@@ -982,6 +1341,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       configIdentity = [configStat.dev, configStat.ino, configStat.uid, configStat.gid, configStat.mode & 0o7777, configStat.nlink];
       configSha256 = sha(fs.readFileSync(configFile));
       check(configStat.uid === 0 && (configStat.mode & 0o022) === 0, 'Production config must be root-owned and not group/world writable');
+      if (privateBridge) { privateOperation('restore-configuration-ownership', 'capability-check'); preflightSources = sourceBindings(); }
       for (const root of [config.webRoot, config.backupRoot, config.stateRoot, config.velocityRoot]) assertRealPath(root);
       for (const root of [config.backupRoot, config.stateRoot]) check((fs.statSync(root).mode & 0o077) === 0, 'Private backup/state directory permissions required');
       for (const relative of artifactPaths) { const dest = path.join(config.webRoot, relative); if (fs.existsSync(dest)) assertRealPath(dest); }
@@ -994,7 +1354,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
         const facts = serviceFacts(showService(unit)), approved = serviceFacts(config.serviceBindings[unit]);
         check(JSON.stringify(facts.configuration) === JSON.stringify(approved.configuration), 'Service binding drift: ' + unit);
         serviceEvidence ??= {};
-        serviceEvidence[unit] = { configuration: facts.configuration, runtime: facts.runtime, environment: serviceEnvironment(facts, config) };
+        serviceEvidence[unit] = { configuration: facts.configuration, runtime: facts.runtime, environment: privateBridge ? facts.environment.map(item => { const source = preflightSources.configuration.find(x => x.path === item.path); return source ? { ...item, ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'path')) } : { ...item, absent: true }; }) : serviceEnvironment(facts, config) };
       }
       const javaFacts = serviceFacts(showService('velocity'));
       serviceEvidence.velocity = { configuration: javaFacts.configuration, runtime: javaFacts.runtime, environment: serviceEnvironment(javaFacts, config) };
@@ -1017,16 +1377,17 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       fs.chmodSync(backupPath, 0o700);
       const snapshot = snapshotApplication(config.webRoot, backupPath);
       check(JSON.stringify(inventory(config.webRoot, snapshot.present)) === JSON.stringify(snapshot.application), 'Application capture drift/incomplete copy');
-      copyPaths('/', path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
+      const privateCapture = privateBridge ? privateOperation('private-configuration', 'capture-stopped') : null;
+      if (!privateBridge) copyPaths('/', path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
       const contract = checkDatabases(path.join(backupPath, 'application/backend/pb_data'));
-      const configuration = inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
-      const ownership = config.configurationFiles.map(file => { const stat = fs.statSync(file); return { path: file.slice(1), uid: stat.uid, gid: stat.gid }; });
+      const configuration = privateCapture?.configuration ?? inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)));
+      const ownership = privateCapture?.ownership ?? config.configurationFiles.map(file => { const stat = fs.statSync(file); return { path: file.slice(1), uid: stat.uid, gid: stat.gid }; });
       assertSources();
       if (preflightSources) check(JSON.stringify(fs.existsSync(path.join(backupPath, 'application/backend/pb_migrations')) ? inventory(path.join(backupPath, 'application'), ['backend/pb_migrations']) : []) === JSON.stringify(preflightSources.migrations), 'Migration capture drift');
-      check(JSON.stringify(configuration) === JSON.stringify(inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)))), 'Configuration capture drift');
-      for (const item of preflightSources?.configuration ?? []) { const copied = path.join(backupPath, 'configuration', item.path.slice(1)), stat = fs.statSync(copied); check(sha(fs.readFileSync(copied)) === item.sha256 && (stat.mode & 0o777) === item.mode, 'Configuration capture ownership/content drift'); }
+      check(JSON.stringify(configuration) === JSON.stringify(privateBridge ? privateIO('inspect', backupPath).configuration : inventory(path.join(backupPath, 'configuration'), config.configurationFiles.map(file => file.slice(1)))), 'Configuration capture drift');
+      if (!privateBridge) for (const item of preflightSources?.configuration ?? []) { const copied = path.join(backupPath, 'configuration', item.path.slice(1)), stat = fs.statSync(copied); check(sha(fs.readFileSync(copied)) === item.sha256 && (stat.mode & 0o777) === item.mode, 'Configuration capture ownership/content drift'); }
       if (preflightSources) check(JSON.stringify(ownership) === JSON.stringify(preflightSources.configuration.map(item => ({ path: item.path.slice(1), uid: item.uid, gid: item.gid }))), 'Configuration source ownership drift');
-      const value = { revision: config.baseline?.kind === 'mixed' ? null : oldState?.revision ?? config.previousRevision, ...snapshot, configuration, ownership, contract, retainedHistory: config.baseline?.retainedHistory ?? [], sourceAbsentHistory: config.baseline?.sourceAbsentHistory ?? [] };
+      const value = { revision: config.baseline?.kind === 'mixed' ? null : oldState?.revision ?? config.previousRevision, ...snapshot, configuration, ownership, ...(privateCapture ? { configurationAbsent: privateCapture.absent } : {}), contract, retainedHistory: config.baseline?.retainedHistory ?? [], sourceAbsentHistory: config.baseline?.sourceAbsentHistory ?? [] };
       if (firstCapture) {
         verifyMixedHistory(bundle, path.join(backupPath, 'application'), config.baseline, contract['data.db'].migrations);
         check(JSON.stringify(contract['data.db'].migrations) === JSON.stringify(onlineLedger), 'Applied history changed since preflight');
@@ -1036,6 +1397,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       writeJSON(path.join(backupPath, 'backup.json'), value);
       if (firstCapture) { effectiveBaseline = { ...config.baseline, snapshotId: value.snapshotId, snapshotDirectory: backupPath, captureBinding: value.captureBinding }; captured = true; }
       if (config.baseline?.kind === 'mixed') assertCaptured(backupPath);
+      if (privateBridge) privateOperation('service-credential-material', 'prepare-current-run');
       return backupPath;
     },
     rehearse: backup => {
@@ -1044,7 +1406,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Backup digest mismatch');
       checkDatabases(path.join(backup, 'application/backend/pb_data'));
       const isolated = path.join(backup, 'rehearsal');
-      restoreBackup(backup, isolated);
+      restoreBackup(backup, isolated, privateBridge ? privateIO : undefined);
       check(JSON.stringify(inventory(isolated, manifest.present)) === JSON.stringify(manifest.application), 'Restore rehearsal differs from snapshot');
       checkDatabases(path.join(isolated, 'backend/pb_data'));
       const migrationLog = migrateCopy(isolated);
@@ -1053,11 +1415,22 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       writeJSON(path.join(backup, 'isolated-migrated-contract.json'), checkDatabases(path.join(isolated, 'backend/pb_data')));
       // A migration rehearsal never promotes raw permissive data to safe recovery.
       // The approved identities must already exist in the derived database.
-      const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities, isolated);
-      restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision);
+      const safe = createSafeRecovery(backup, config.recoveryWorkingCopy ?? isolated, bundle, revision, config.recoveryIdentities, isolated, privateBridge ? privateIO : undefined);
+      restoreSafeRecovery(safe, path.join(backup, 'safe-recovery-rehearsal'), revision, privateBridge ? privateIO : undefined);
     },
     baseline: backup => { assertCaptured(backup); writeJSON(path.join(backup, 'before-contract.json'), checkDatabases(path.join(backup, 'application/backend/pb_data'))); },
-    install: () => { assertSources(); verifyInstallTargets(config.webRoot, config.configurationFiles); assertCaptured(backupPath); installBundle(bundle, config.webRoot, revision, effectiveBaseline, backupPath); installed = true; },
+    install: () => { assertSources(); verifyInstallTargets(config.webRoot, config.configurationFiles); assertCaptured(backupPath); installBundle(bundle, config.webRoot, revision, effectiveBaseline, backupPath, privateBridge ? privateIO : undefined);
+      if (privateBridge) {
+        const delivery = privateOperation('service-credential-material', 'deliver-approved-config');
+        maintenance.privateBackupName = path.basename(backupPath);
+        for (const unit of ['velocity-sync', 'mcsm-proxy']) {
+          const env = delivery.serviceBindings[unit].EnvironmentFiles;
+          if (unit === 'velocity-sync') { maintenance.stoppedSync.EnvironmentFiles = env; maintenance.sync.EnvironmentFiles = env; }
+          for (const phase of Object.values(maintenance.servicePhases ?? {})) if (phase[unit]?.properties) phase[unit].properties.EnvironmentFiles = env;
+        }
+        for (const unit of config.websiteServices) { const facts = serviceFacts(Object.entries(delivery.serviceBindings[unit]).map(([k,v]) => k + '=' + v).join('\n')); serviceEvidence[unit].configuration = facts.configuration; serviceEvidence[unit].environment = facts.environment.map(item => { const entry = delivery.configuration.find(x => '/' + x.path === item.path), owner = delivery.ownership.find(x => x.path === entry?.path); check(entry && owner, 'Missing delivered environment report'); return { ...item, sha256: entry.sha256, mode: entry.mode, uid: owner.uid, gid: owner.gid }; }); }
+      }
+      installed = true; },
     migrate: () => { const output = migrateCopy(config.webRoot); check(!/Failed|Error:/i.test(output), 'Production migration failed'); fs.writeFileSync(path.join(backupPath, 'production-migration.log'), output, { mode: 0o600 }); verifyRecoverySecurity(config.webRoot, config.recoveryIdentities); const expected = json(path.join(backupPath, 'expected-recovery-contract.json')); verifyRecoveryContract(config.webRoot, expected.expectedContract, json(path.join(backupPath, 'backup.json')).contract); migrated = true; },
     start: unit => {
       if (unit === 'velocity-sync') {
@@ -1087,9 +1460,10 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     record: value => {
       boundControl(state);
       const backupManifest = backupPath ? assertCaptured(backupPath) : null;
+      humanTargetToken = undefined; credentialMaterial = undefined;
       writeControl(state, JSON.stringify({ ...value, baseline: backupManifest?.snapshotId ?? null, candidateManifest: verifyBundle(bundle, revision), retainedHistory: config.baseline?.retainedHistory ?? [], runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n');
     },
-    failure: value => writeControl(state, JSON.stringify({ ...value, backup: backupPath ?? value.backup, runNumber, failedAt: new Date().toISOString() }) + '\n'),
+    failure: value => { humanTargetToken = undefined; credentialMaterial = undefined; writeControl(state, JSON.stringify({ ...value, backup: backupPath ?? value.backup, runNumber, failedAt: new Date().toISOString() }) + '\n'); },
   };
 }
 
@@ -1101,23 +1475,30 @@ function assertRecoverableOwners(owners) {
   }
 }
 
-export function restoreBackup(backup, destination) {
+export function restoreBackup(backup, destination, privateIO) {
   // Always isolated; never silently restores a running production directory.
   check(!fs.existsSync(destination), 'Restore destination must be new');
   const manifest = json(path.join(backup, 'backup.json'));
   check(manifest.present.every(name => [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'].includes(name)), 'Backup whitelist mismatch');
   check(JSON.stringify(inventory(path.join(backup, 'application'), manifest.present)) === JSON.stringify(manifest.application), 'Corrupt backup');
-  if (manifest.snapshotId) verifySnapshot(backup);
+  if (manifest.snapshotId) verifySnapshot(backup, undefined, privateIO);
   if (manifest.configuration) {
     const names = manifest.configuration.map(item => item.path);
     check(names.every(safeRelative) && new Set(names).size === names.length && manifest.configuration.every(item => item.sha256 && !item.link && !item.directory), 'Invalid configuration manifest');
     check(Array.isArray(manifest.ownership) && manifest.ownership.length === names.length && new Set(manifest.ownership.map(item => item.path)).size === names.length && manifest.ownership.every(item => names.includes(item.path)), 'Missing/duplicate configuration ownership metadata');
-    assertRecoverableOwners(manifest.ownership);
-    check(JSON.stringify(inventory(path.join(backup, 'configuration'), manifest.configuration.filter(item => !item.directory && !item.link).map(item => item.path))) === JSON.stringify(manifest.configuration), 'Corrupt configuration backup');
+    if (!privateIO) assertRecoverableOwners(manifest.ownership);
+    check(JSON.stringify(privateIO ? privateIO('inspect', backup).configuration : inventory(path.join(backup, 'configuration'), manifest.configuration.filter(item => !item.directory && !item.link).map(item => item.path))) === JSON.stringify(manifest.configuration), 'Corrupt configuration backup');
   }
   copyPaths(path.join(backup, 'application'), destination, manifest.present);
   if (manifest.configuration) {
     const names = manifest.configuration.map(item => item.path);
+    if (privateIO) {
+      const purpose = path.basename(backup) === 'safe-recovery' ? 'restore-safe' : 'restore-raw';
+      const report = privateIO(purpose, backup);
+      check(JSON.stringify(report.configuration) === JSON.stringify(manifest.configuration) && JSON.stringify(report.ownership) === JSON.stringify(manifest.ownership), 'Private copy readback mismatch');
+      const owners = privateIO(purpose === 'restore-safe' ? 'safe' : 'raw', backup);
+      check(JSON.stringify(owners.configuration) === JSON.stringify(manifest.configuration) && JSON.stringify(owners.ownership) === JSON.stringify(manifest.ownership), 'Private ownership postreadback mismatch');
+    } else {
     copyPaths(path.join(backup, 'configuration'), path.join(destination, 'isolated-configuration'), names);
     check(JSON.stringify(inventory(path.join(destination, 'isolated-configuration'), names)) === JSON.stringify(manifest.configuration), 'Configuration restore verification failed');
     for (const item of manifest.ownership ?? []) {
@@ -1126,6 +1507,7 @@ export function restoreBackup(backup, destination) {
       if (stat.uid !== item.uid || stat.gid !== item.gid) fs.chownSync(file, item.uid, item.gid);
       stat = fs.statSync(file);
       check(stat.uid === item.uid && stat.gid === item.gid, 'Configuration ownership restore failed');
+    }
     }
     writeJSON(path.join(destination, 'configuration-ownership.json'), manifest.ownership ?? []);
   }
