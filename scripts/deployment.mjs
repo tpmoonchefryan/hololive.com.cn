@@ -18,6 +18,35 @@ const safeRelative = name => typeof name === 'string' && !path.isAbsolute(name) 
 const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const writeJSON = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
 
+// This checks the closed private channel and token claims; authentication is
+// proved separately by the same target's users and protected collection APIs.
+export function decodeIdentitySupply(raw, expected, now = Math.floor(Date.now() / 1000)) {
+  const fail = () => { throw new Error('Offline identity channel refused'); };
+  try {
+    if (typeof raw !== 'string' || raw.length > 16384 || !/^[\x20-\x7e]+\n$/.test(raw)) fail();
+    const frame = raw.slice(0, -1), proof = JSON.parse(frame);
+    if (!proof || Array.isArray(proof) || Object.keys(proof).join(',') !== 'nonce,revision,runId,humanId,token' || JSON.stringify(proof) !== frame) fail();
+    if (!/^[a-f0-9]{64}$/.test(proof.nonce) || !/^[a-f0-9]{40}$/.test(proof.revision) || !/^[0-9]+$/.test(proof.runId) || !/^[a-z0-9]{15}$/.test(proof.humanId)) fail();
+    for (const key of ['nonce', 'revision', 'runId', 'humanId']) if (typeof proof[key] !== 'string' || proof[key] !== expected[key]) fail();
+    if (typeof proof.token !== 'string' || !proof.token.length || proof.token.length >= 8192) fail();
+    const parts = proof.token.split('.');
+    if (parts.length !== 3 || parts.some(part => !/^[A-Za-z0-9_-]+$/.test(part) || Buffer.from(part, 'base64url').toString('base64url') !== part)) fail();
+    const decode = part => {
+      const bytes = Buffer.from(part, 'base64url');
+      if (bytes.length > 4096) fail();
+      const text = bytes.toString('utf8');
+      if (!Buffer.from(text, 'utf8').equals(bytes)) fail();
+      const value = JSON.parse(text);
+      if (!value || typeof value !== 'object' || Array.isArray(value) || JSON.stringify(value) !== text) fail();
+      return value;
+    };
+    const header = decode(parts[0]), claims = decode(parts[1]);
+    if (header.alg !== 'HS256' || header.typ !== 'JWT' || Buffer.from(parts[2], 'base64url').length !== 32) fail();
+    if (claims.type !== 'auth' || claims.id !== proof.humanId || typeof claims.collectionId !== 'string' || !/^[A-Za-z0-9_]{1,64}$/.test(claims.collectionId) || claims.refreshable !== false || !Number.isSafeInteger(now) || !Number.isSafeInteger(claims.exp) || claims.exp - now <= 0 || claims.exp - now > 900) fail();
+    return { ...proof, collectionId: claims.collectionId };
+  } catch { fail(); }
+}
+
 // systemctl's command values combine immutable configuration and execution
 // records. Only the documented, unambiguous representation is admitted.
 const executionNames = ['ExecCondition', 'ExecStartPre', 'ExecStart', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'];
@@ -1294,7 +1323,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
           const refreshed = await refresh.json(); check(refresh.ok && refreshed.record?.id === item.id && typeof refreshed.token === 'string', 'Target service refresh failed'); token = refreshed.token;
         }
         const self = await fetch(base + '/api/collections/users/records/' + item.id, { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); record = await self.json();
-        check(self.ok && record.id === item.id && record.collectionName === 'users' && record.is_admin === true && record.service_account === (item.role === 'service') && (item.role === 'service' || record.verified === true), 'Target users self proof failed');
+        check(self.ok && record.id === item.id && record.collectionName === 'users' && record.is_admin === true && record.service_account === (item.role === 'service') && (item.role === 'service' || (record.verified === true && record.collectionId === suppliedProof.collectionId)), 'Target users self proof failed');
         for (const collection of ['velocity_settings', 'mcsm_config']) { const response = await fetch(base + '/api/collections/' + collection + '/records', { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); check(response.ok && Array.isArray((await response.json()).items), 'Target protected identity read failed'); }
       }
       return;
@@ -1325,10 +1354,8 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       const input = { revision, runId: process.env.GITHUB_RUN_ID, snapshotId: raw.snapshotId, permissionSha256: sha(JSON.stringify(permission)), permission, credentials: credentialMaterial, nonce: randomBytes(32).toString('hex') };
       const supplied = spawnSync(pb, ['deployment-identity-supply', ...args], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(input) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000, maxBuffer: 65536 });
       check(!supplied.error && supplied.status === 0, 'Offline identity supply failed');
-      let proof;
-      try { proof = JSON.parse(supplied.stdout.trim().split('\n').at(-1)); } catch { check(false, 'Offline identity channel failed'); }
-      check(proof.nonce === input.nonce && proof.revision === revision && proof.runId === input.runId && proof.humanId === permission[0].id && typeof proof.token === 'string' && proof.token.length < 8192, 'Offline identity proof binding failed');
-      if (directory === config.webRoot) { humanTargetToken = proof.token; suppliedProof = { directory, revision, runId: input.runId, humanId: proof.humanId }; }
+      const proof = decodeIdentitySupply(supplied.stdout, { nonce: input.nonce, revision, runId: input.runId, humanId: permission[0].id });
+      if (directory === config.webRoot) { humanTargetToken = proof.token; suppliedProof = { directory, revision, runId: input.runId, humanId: proof.humanId, collectionId: proof.collectionId }; }
     }
     return output;
   };
