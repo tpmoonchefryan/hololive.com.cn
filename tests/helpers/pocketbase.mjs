@@ -23,14 +23,21 @@ export async function startOwned(command, args, env = {}) {
     const result = spawnSync(process.execPath, [guard, 'register', '--registry', registry, '--pgid', String(child.pid), '--pattern', path.basename(command), '--purpose', owner], { encoding: 'utf8' });
     if (result.status !== 0) { child.kill(); throw new Error(result.stderr || result.stdout); }
   }
+  let closePromise;
   return {
     child, output: () => output,
-    async close() {
-      if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
-      if (guard && owner && registry) {
-        const result = spawnSync(process.execPath, [guard, 'deregister', '--registry', registry, '--pgid', String(child.pid), '--purpose', owner], { encoding: 'utf8' });
-        if (result.status !== 0) throw new Error(result.stderr || result.stdout);
-      }
+    close() {
+      // Publish the outcome before termination or cleanup can run. Every caller
+      // observes the same first result, including an owner-scoped rejection.
+      if (closePromise) return closePromise;
+      closePromise = Promise.resolve().then(async () => {
+        if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
+        if (guard && owner && registry) {
+          const result = spawnSync(process.execPath, [guard, 'deregister', '--registry', registry, '--pgid', String(child.pid), '--purpose', owner], { encoding: 'utf8' });
+          if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+        }
+      });
+      return closePromise;
     },
   };
 }

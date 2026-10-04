@@ -486,10 +486,69 @@ const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
 const rawExec = cp.execFileSync;
 function copyWithModes(from,to,options) {
-  fs.cpSync(from,to,options);
+  fs.cpSync(from,to,{...options,mode:(options?.mode??0)|fs.constants.COPYFILE_FICLONE});
   const preserve=(source,target)=>{const info=fs.lstatSync(source);if(info.isSymbolicLink())return;fs.chmodSync(target,info.mode&0o777);if(info.isDirectory())for(const name of fs.readdirSync(source))preserve(path.join(source,name),path.join(target,name));};
   preserve(from,to);
 }
+
+// Exercise the shared close outcome using a real local child and the supplied
+// installed guard. The adapter changes only this probe's first cleanup purpose;
+// the guard itself decides owner and active-group refusals without substitution.
+async function closeOutcomeCases() {
+  const guard=process.env.TCRN_SPAWN_GUARD,owner=process.env.TCRN_TASK_OWNER,registry=process.env.TCRN_SPAWN_REGISTRY;
+  assert.ok(guard&&owner&&registry,'owned lifecycle cases require the actual guard bindings');
+  const rawSpawn=cp.spawnSync;
+  for(const failCleanup of [false,true]) {
+    let service,registrations=0,deregistrations=0,cleanupRefused=false;
+    cp.spawnSync=(command,args,options)=>{
+      if(command===process.execPath&&args[0]===guard) {
+        if(args[1]==='register')registrations++;
+        if(args[1]==='deregister') {
+          deregistrations++;
+          if(failCleanup){args=[...args];args[args.indexOf('--purpose')+1]=owner+'-foreign-close-probe';}
+        }
+      }
+      return rawSpawn(command,args,options);
+    };syncBuiltinESMExports();
+    try {
+      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);
+      if(!service.child.spawnfile||service.child.pid===undefined)throw new Error('local child did not spawn');
+      // A real active owned group must remain registered after a refused removal.
+      const guardArgs=[guard,'deregister','--registry',registry,'--pgid',String(service.child.pid),'--purpose',owner];
+      const active=rawSpawn(process.execPath,guardArgs,{encoding:'utf8'});
+      assert.notEqual(active.status,0);assert.match(active.stderr,/SPAWN_GUARD_OWNED_GROUP_STILL_ACTIVE/);
+      const first=service.close(),concurrent=service.close();assert.equal(first,concurrent);
+      const results=await Promise.allSettled([first,concurrent]);
+      assert.equal(registrations,1);assert.equal(deregistrations,1);
+      assert.ok(service.child.exitCode!==null||service.child.signalCode!==null);
+      const serial=service.close();assert.equal(serial,first);
+      if(failCleanup) {
+        cleanupRefused=true;
+        assert.equal(results[0].status,'rejected');assert.equal(results[1].status,'rejected');
+        assert.equal(results[0].reason,results[1].reason);assert.match(results[0].reason.message,/SPAWN_GUARD_OWNER_MISMATCH/);
+        await assert.rejects(serial,error=>error===results[0].reason);
+      } else {
+        assert.deepEqual(results,[{status:'fulfilled',value:undefined},{status:'fulfilled',value:undefined}]);await serial;
+      }
+      assert.equal(deregistrations,1);
+      observe('fixture-close-'+(failCleanup?'first-rejection':'shared-success'),'actual child shares concurrent and serial close outcome; one helper cleanup; strict active/owner refusals',{passed:true});
+    } finally {
+      try {
+        if(service) {
+          const result=await Promise.allSettled([service.close()]);
+          // The intentional foreign-purpose refusal leaves the real owner's
+          // registration intact. Recover only this terminal probe's exact group.
+          if(failCleanup&&result[0].status==='rejected') {
+            const cleanup=rawSpawn(process.execPath,[guard,'deregister','--registry',registry,'--pgid',String(service.child.pid),'--purpose',owner],{encoding:'utf8'});
+            assert.equal(cleanup.status,0,cleanup.stderr||cleanup.stdout);
+          } else if(result[0].status==='rejected')throw result[0].reason;
+        }
+      } finally {cp.spawnSync=rawSpawn;syncBuiltinESMExports();}
+    }
+    if(failCleanup)assert.equal(cleanupRefused,true);
+  }
+}
+await closeOutcomeCases();
 
 function sql(file, source, args = []) { return rawExec('python3', ['-c', source, file, ...args], {encoding:'utf8'}).trim(); }
 const names = fs.readdirSync(path.join(project, 'backend/pb_migrations')).filter(x=>x.endsWith('.js')).sort();
@@ -514,7 +573,7 @@ async function fixture(version,binary, suffix = '') {
   // observed target. Synthetic records are created through real PB APIs.
   for(const name of names.filter(x=>!beforeNames.includes(x)))fs.unlinkSync(path.join(webRoot,'backend/pb_migrations',name));
   fs.renameSync(path.join(webRoot,'backend/pb_hooks'),path.join(local,'uninstalled-candidate-hooks'));
-  fs.copyFileSync(binary,path.join(webRoot,'backend/pocketbase'));
+  fs.copyFileSync(binary,path.join(webRoot,'backend/pocketbase'),fs.constants.COPYFILE_FICLONE);
   const common=['--dir',path.join(webRoot,'backend/pb_data'),'--migrationsDir',path.join(webRoot,'backend/pb_migrations'),'--hooksDir',path.join(local,'uninstalled-candidate-hooks')];
   const migration=rawExec(binary,['migrate','up',...common],{encoding:'utf8'});assert.doesNotMatch(migration,/Failed|Error:/);
   rawExec(binary,['superuser','upsert','probe@example.invalid','Disposable-Only-2026!',...common],{encoding:'utf8'});
@@ -566,7 +625,7 @@ fs.statSync=(file,...args)=>{const s=originals.statSync(bound?.configMap.get(fil
 fs.realpathSync=(file,...args)=>bound?.configMap.has(file)?file:originals.realpathSync(file,...args);
 fs.existsSync=(file)=>originals.existsSync(bound?.configMap.get(file)??file);
 fs.lstatSync=(file,...args)=>originals.lstatSync(bound?.configMap.get(file)??file,...args);
-fs.cpSync=(from,to,...args)=>originals.cpSync(bound?.configMap.get(from)??from,to,...args);
+fs.cpSync=(from,to,options)=>originals.cpSync(bound?.configMap.get(from)??from,to,{...options,mode:(options?.mode??0)|fs.constants.COPYFILE_FICLONE});
 cp.execFileSync=(file,args,options)=>{
   if(file==='sudo'&&args[1]==='/usr/bin/python3') return finiteHostResponse(JSON.parse(options.input), {root:bound.local,commands:bound.commands,fail:bound.finiteFailure});
   bound.commands.push({file,args});
@@ -592,6 +651,33 @@ function initializeBaseline(){delete bound.config.baseline;bound.config.previous
 function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
 try{
+  // Keep these copies inside the original independent fixture root. Mutating a
+  // destination must not alter its source or sibling, including chmod and links.
+  const copyRoot=path.join(root,'copy-independence'),source=path.join(copyRoot,'source');mkdir(source);
+  const originalBytes=Buffer.from('independent fixture bytes\n'),stamp=new Date('2020-01-02T03:04:05Z');
+  fs.writeFileSync(path.join(source,'regular'),originalBytes,{mode:0o640});fs.utimesSync(path.join(source,'regular'),stamp,stamp);
+  fs.writeFileSync(path.join(source,'filtered'),'filter must survive unchanged',{mode:0o600});
+  fs.symlinkSync('regular',path.join(source,'link'));
+  const left=path.join(copyRoot,'left'),right=path.join(copyRoot,'right'),scoped=path.join(copyRoot,'scoped');
+  const options={recursive:true,preserveTimestamps:true,dereference:false,verbatimSymlinks:true,mode:fs.constants.COPYFILE_EXCL};
+  copyWithModes(source,left,options);copyWithModes(source,right,options);
+  fs.cpSync(source,scoped,{...options,filter:file=>path.basename(file)!=='filtered'});
+  assert.equal(fs.existsSync(path.join(scoped,'filtered')),false);
+  for(const destination of [left,right,scoped]) {
+    const file=path.join(destination,'regular'),info=fs.lstatSync(file);
+    assert.equal(info.isFile(),true);assert.deepEqual(fs.readFileSync(file),originalBytes);assert.equal(info.mode&0o777,0o640);
+    assert.equal(info.mtimeMs,fs.statSync(path.join(source,'regular')).mtimeMs);
+    assert.equal(fs.lstatSync(path.join(destination,'link')).isSymbolicLink(),true);assert.equal(fs.readlinkSync(path.join(destination,'link')),'regular');
+    assert.notEqual(info.ino,fs.statSync(path.join(source,'regular')).ino);
+  }
+  fs.writeFileSync(path.join(left,'regular'),'destination changed');fs.chmodSync(path.join(left,'regular'),0o600);fs.unlinkSync(path.join(left,'link'));fs.symlinkSync('filtered',path.join(left,'link'));
+  for(const untouched of [source,right,scoped]) {
+    assert.deepEqual(fs.readFileSync(path.join(untouched,'regular')),originalBytes);assert.equal(fs.statSync(path.join(untouched,'regular')).mode&0o777,0o640);
+    assert.equal(fs.readlinkSync(path.join(untouched,'link')),'regular');
+  }
+  fs.cpSync(path.join(left,'regular'),path.join(right,'regular'),{force:false});assert.deepEqual(fs.readFileSync(path.join(right,'regular')),originalBytes);
+  assert.throws(()=>fs.cpSync(path.join(left,'regular'),path.join(right,'regular'),{force:false,errorOnExist:true}),error=>error.code==='ERR_FS_CP_EEXIST');
+  observe('fixture-independent-copies','complete regular independent copies retain bytes/modes/timestamps/links, supplied mode, filter and overwrite refusal',{passed:true});
   for(const [version,binary] of binaries){
     bound=await fixture(version,binary);initializeBaseline();adapter().verify();
     const newBackup=()=>adapter().backup();
