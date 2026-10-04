@@ -9,6 +9,7 @@ WorkingDirectory=/var/www/hololive.com.cn/backend/scripts
 ExecStart=/usr/bin/node mcsm_proxy.js
 Restart=always
 RestartSec=5
+EnvironmentFile=-/etc/default/mcsm-proxy
 Environment=PB_URL=http://127.0.0.1:8090
 Environment=MCSM_PROXY_PORT=18091
 Environment=MCSM_ALLOWED_ORIGIN=https://hololive.com.cn

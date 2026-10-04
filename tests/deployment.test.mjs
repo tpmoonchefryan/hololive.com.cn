@@ -936,3 +936,100 @@ test('fixed Python child rejects extra fields, unknown operation and actual unpr
   try {f.adapter.stop('velocity-sync');assert.equal(f.adapter.maintenance().stopped,true);}
   finally {cp.execFileSync=original;syncBuiltinESMExports();f.adapter.unlock();}
 }));
+
+// These cases extend the existing aggregate. They never weaken the retained
+// full-entry scenarios or turn absent runtime/privileged evidence into success.
+test('CI resource policy refuses ineffective controller/readback and wrong membership', async () => {
+  const { validateResources } = await import('../scripts/deployment-inputs.mjs');
+  const config = { runnerResources: { unit: 'actions.runner.fixture.service', CPUQuota: '100%', MemoryHigh: 1879048192, MemoryMax: 2147483648, TasksMax: 256 } };
+  const facts = { unit: config.runnerResources.unit, member: true, descendantsBound: true, controllers: ['cpu', 'memory', 'pids'], cpuMax: '100000 100000', memoryHigh: '1879048192', memoryMax: '2147483648', pidsMax: '256' };
+  assert.equal(validateResources(config, facts).ioEnforcement, 'unknown');
+  for (const delta of [{ member: false }, { descendantsBound: false }, { cpuMax: 'max 100000' }, { cpuMax: '200000 100000' }, { memoryMax: 'max' }, { pidsMax: 'max' }, { controllers: ['memory', 'pids'] }, { unit: 'other.service' }]) assert.throws(() => validateResources(config, { ...facts, ...delta }));
+  for (const delta of [{ CPUQuota: '200%' }, { MemoryHigh: 2147483648 }, { TasksMax: 512 }, { arbitrary: true }]) assert.throws(() => validateResources({ runnerResources: { ...config.runnerResources, ...delta } }, facts));
+});
+test('CI retained input requires exact bytes and rejects alias/hardlink/special input', async t => {
+  const { regular, validateRetained, validateArchive } = await import('../scripts/deployment-inputs.mjs');
+  for (const version of ['0.26.5','0.34.2','unknown']) assert.throws(() => validateArchive(Buffer.from('wrong'), version), /Archive/);
+  const directory = temp(t), file = path.join(directory, 'input'); fs.writeFileSync(file, 'wrong');
+  assert.throws(() => validateRetained(fs.readFileSync(file)), /Retained/);
+  const link = path.join(directory, 'alias'); fs.symlinkSync(file, link); assert.throws(() => regular(link), /Aliased/);
+  fs.linkSync(file, path.join(directory, 'hard')); assert.throws(() => regular(file), /Nonregular/);
+  assert.throws(() => regular(directory), /Nonregular/);
+  if (process.env.PB_RETAINED_HISTORY_FILE) assert.equal(validateRetained(fs.readFileSync(process.env.PB_RETAINED_HISTORY_FILE)).length, 2249);
+});
+test('CI ZIP extraction rejects traversal, duplicate, link, missing and unexpected targets before binary writes', async t => {
+  const { zipExtractor } = await import('../scripts/deployment-inputs.mjs');
+  const directory = temp(t);
+  const makeZip = String.raw`import sys,zipfile,stat
+z=zipfile.ZipFile(sys.argv[1],'w'); mode=sys.argv[2]
+if mode=='missing': z.writestr('LICENSE.md','license')
+elif mode=='duplicate': z.writestr('pocketbase','wrong'); z.writestr('pocketbase','wrong')
+elif mode=='link':
+ i=zipfile.ZipInfo('pocketbase'); i.external_attr=(stat.S_IFLNK|0o777)<<16; z.writestr(i,'elsewhere')
+else: z.writestr({'traversal':'../pocketbase','absolute':'/pocketbase','extra':'arbitrary','architecture':'pocketbase'}[mode],'wrong')
+z.close()`;
+  for (const mode of ['missing','duplicate','link','traversal','absolute','extra','architecture']) {
+    const zip = path.join(directory, mode + '.zip'), binary = path.join(directory, mode);
+    cp.execFileSync('python3', ['-I', '-c', makeZip, zip, mode], { stdio: ['ignore','pipe','pipe'] });
+    assert.throws(() => cp.execFileSync('python3', ['-I', '-c', zipExtractor, zip, binary], { stdio: ['ignore','pipe','pipe'] }));
+    assert.equal(fs.existsSync(binary), false);
+  }
+});
+for (const [version, binary] of binaries) test('offline exact identity supply and bounded same-target human/service proof: ' + version, async () => {
+  const database = await pocketbase(binary);
+  const humanId = 'j3o2wd17l18prla', ids = ['svcvsal7qgvfl12','svcmc31eh69zpuo'];
+  const permission = [{ id: humanId, role: 'admin' }, ...ids.map(id => ({ id, role: 'service' }))];
+  const credentials = { [ids[0]]: '1'.repeat(64), [ids[1]]: '2'.repeat(64) };
+  const input = { revision, runId: '123', snapshotId: '3'.repeat(64), permissionSha256: createHash('sha256').update(JSON.stringify(permission)).digest('hex'), permission, credentials, nonce: '4'.repeat(64) };
+  try {
+    const human = await database.request('/api/collections/users/records', { token: database.token, method: 'POST', body: { id: humanId, email: 'human@example.invalid', password: 'Human-Fixture-2026!', passwordConfirm: 'Human-Fixture-2026!', verified: true } });
+    assert.equal(human.status, 200);
+    const ordinary = await database.request('/api/collections/users/records', { token: database.token, method: 'POST', body: { email: 'ordinary@example.invalid', password: 'Ordinary-Fixture-2026!', passwordConfirm: 'Ordinary-Fixture-2026!', verified: true } }); assert.equal(ordinary.status, 200);
+    const before = checkDatabases(database.directory + '/data');
+    await database.service.close();
+    const run = value => cp.spawnSync(binary, ['deployment-identity-supply', '--dir', path.join(database.directory,'data'), '--migrationsDir', database.migrations, '--hooksDir', path.join(projectRoot,'backend/pb_hooks')], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(value) }, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] });
+    for (const value of [{ ...input, arbitrary: true }, { ...input, permission: permission.slice(1) }, { ...input, credentials: { ...credentials, [ids[1]]: credentials[ids[0]] } }]) { assert.notEqual(run(value).status, 0); assert.deepEqual(checkDatabases(database.directory + '/data'), before); }
+    const supplied = run(input); assert.equal(supplied.status, 0, 'Offline supply refused; private output withheld');
+    const proof = JSON.parse(supplied.stdout.trim().split('\n').at(-1));
+    const payload = JSON.parse(Buffer.from(proof.token.split('.')[1], 'base64url'));
+    assert.ok(payload.exp - Math.floor(Date.now() / 1000) <= 900 && payload.exp - Math.floor(Date.now() / 1000) >= 890); assert.equal(proof.humanId, humanId);
+    const wrong = run({ ...input, credentials: { ...credentials, [ids[0]]: '5'.repeat(64) } }); assert.notEqual(wrong.status, 0);
+    assert.equal(run(input).status, 0);
+    await database.restart();
+    const self = await database.request('/api/collections/users/records/' + humanId, { token: proof.token }); assert.equal(self.status, 200); assert.equal(self.data.is_admin, true); assert.equal(self.data.service_account, false); assert.equal(self.data.email, human.data.email);
+    assert.equal((await database.request('/api/collections/users/auth-refresh', { token: proof.token, method: 'POST' })).status, 401);
+    for (const [i, id] of ids.entries()) {
+      const auth = await database.request('/api/collections/users/auth-with-password', { method: 'POST', body: { identity: ['velocity-sync@services.hololive.com.cn','mcsm-proxy@services.hololive.com.cn'][i], password: credentials[id] } }); assert.equal(auth.status, 200); assert.equal(auth.data.record.id, id);
+      assert.equal((await database.request('/api/collections/users/auth-refresh', { token: auth.data.token, method: 'POST' })).status, 200);
+      assert.equal((await database.request('/api/collections/mcsm_config/records', { token: auth.data.token })).status, 200);
+      assert.equal((await database.request('/api/collections/users/auth-with-password', { method: 'POST', body: { identity: auth.data.record.email, password: credentials[ids[1-i]] } })).status, 400);
+    }
+    const unchanged = await database.request('/api/collections/users/records/' + ordinary.data.id, { token: database.token }); assert.equal(unchanged.data.is_admin, false); assert.equal(unchanged.data.service_account, false);
+    assert.equal((await database.request('/api/collections/velocity_settings/records', { token: proof.token })).status, 200);
+  } finally { await database.close(); }
+});
+test('omitted systemd complex properties require actual typed empty D-Bus payloads', async () => {
+  const { showService } = await import('../scripts/deployment.mjs');
+  const original = cp.execFileSync;
+  const full = fixtureService('/fixture/backend'), omitted = full.split('\n').filter(line => !['ExecStop=','EnvironmentFiles='].includes(line)).join('\n');
+  let payload = { type: 'a(sasbttttuii)', data: [] }, scalarMissing = false;
+  cp.execFileSync = (command, args) => {
+    if (command === 'systemctl') return scalarMissing ? omitted.replace('User=fixture\n','') : omitted;
+    assert.equal(command, '/usr/bin/busctl'); assert.equal(args[0], '--system'); assert.equal(args[1], '--json=short');
+    if (args[2] === 'call') return JSON.stringify({ type: 'o', data: ['/org/freedesktop/systemd1/unit/fixture_2eservice'] });
+    return JSON.stringify(args.at(-1) === 'EnvironmentFiles' ? { type: 'a(sb)', data: [] } : payload);
+  }; syncBuiltinESMExports();
+  try {
+    assert.deepEqual(serviceFacts(showService('fixture')), serviceFacts(full));
+    for (const wrong of [{ type: 'as', data: [] }, { type: 'a(sasbttttuii)', data: [[]] }, { type: 'a(sasbttttuii)', data: [], extra: true }, { type: 'a(sasbttttuii)' }]) { payload = wrong; assert.throws(() => showService('fixture'), /typed empty/); }
+    scalarMissing = true; assert.throws(() => showService('fixture'), /nonarray/);
+  } finally { cp.execFileSync = original; syncBuiltinESMExports(); }
+});
+test('new fixed private families reject unknown schema/purpose without emitting material or writing', t => {
+  const directory = temp(t), source = fs.readFileSync(path.join(projectRoot,'scripts/deployment.mjs'),'utf8');
+  const script = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(script);
+  for (const operation of ['restore-configuration-ownership','private-configuration','service-credential-material']) {
+    const response = cp.spawnSync('python3', ['-I','-c',script], { input: JSON.stringify({ operation, purpose: 'arbitrary', destination: directory, uid: 0 }), encoding: 'utf8', stdio: ['pipe','pipe','pipe'] });
+    assert.equal(response.status, 0); const result = JSON.parse(response.stdout); assert.equal(result.ok, false); assert.deepEqual(result.attempted, []); assert.deepEqual(result.completed, []); assert.equal(Object.hasOwn(result,'credentials'),false); assert.deepEqual(fs.readdirSync(directory), []);
+  }
+});
