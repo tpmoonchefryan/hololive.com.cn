@@ -1122,8 +1122,8 @@ for (const [version, binary] of binaries) test('offline exact identity supply an
     const human = await database.request('/api/collections/users/records', { token: database.token, method: 'POST', body: { id: humanId, email: 'human@example.invalid', password: 'Human-Fixture-2026!', passwordConfirm: 'Human-Fixture-2026!', verified: true } });
     assert.equal(human.status, 200);
     const ordinary = await database.request('/api/collections/users/records', { token: database.token, method: 'POST', body: { email: 'ordinary@example.invalid', password: 'Ordinary-Fixture-2026!', passwordConfirm: 'Ordinary-Fixture-2026!', verified: true } }); assert.equal(ordinary.status, 200);
-    const before = checkDatabases(database.directory + '/data');
     await database.service.close();
+    const before = checkDatabases(database.directory + '/data');
     const run = value => cp.spawnSync(binary, ['deployment-identity-supply', '--dir', path.join(database.directory,'data'), '--migrationsDir', database.migrations, '--hooksDir', path.join(projectRoot,'backend/pb_hooks')], { env: { ...process.env, PB_DEPLOYMENT_IDENTITY_INPUT: JSON.stringify(value) }, encoding: 'utf8', stdio: ['ignore','pipe','pipe'] });
     for (const value of [{ ...input, arbitrary: true }, { ...input, permission: permission.slice(1) }, { ...input, credentials: { ...credentials, [ids[1]]: credentials[ids[0]] } }]) { assert.notEqual(run(value).status, 0); assert.deepEqual(checkDatabases(database.directory + '/data'), before); }
     const supplied = run(input); assert.equal(supplied.status, 0, 'Offline supply refused; private output withheld');
