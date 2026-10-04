@@ -9,6 +9,29 @@ import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
 import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
+const guardBindingNames = ['TCRN_SPAWN_GUARD','TCRN_TASK_OWNER','TCRN_SPAWN_REGISTRY'];
+function guardContext(environment) {
+  const present=guardBindingNames.filter(name=>environment[name]!==undefined);
+  const unusable=present.filter(name=>typeof environment[name]!=='string'||environment[name].trim()==='');
+  return {mode:present.length===0?'plain':present.length===3&&unusable.length===0?'configured':'invalid',present,missing:guardBindingNames.filter(name=>!present.includes(name)),unusable};
+}
+test('lifecycle guard context admits only absent or complete bindings without changing the environment', () => {
+  const actual=Object.fromEntries(guardBindingNames.map(name=>[name,process.env[name]]));
+  for(let mask=0;mask<8;mask++) {
+    const environment=Object.fromEntries(guardBindingNames.filter((_,index)=>mask&(1<<index)).map(name=>[name,'fixture-binding']));
+    const before={...environment},context=guardContext(environment);
+    assert.equal(context.mode,mask===0?'plain':mask===7?'configured':'invalid');
+    assert.equal(context.present.length,mask.toString(2).replaceAll('0','').length);
+    assert.deepEqual(environment,before);
+  }
+  for(const name of guardBindingNames)for(const value of ['', '   ']) {
+    const environment=Object.fromEntries(guardBindingNames.map(binding=>[binding,'fixture-binding']));
+    environment[name]=value;assert.equal(guardContext(environment).mode,'invalid');
+    assert.deepEqual(guardContext(environment).unusable,[name]);
+    assert.equal(guardContext({[name]:value}).mode,'invalid');
+  }
+  assert.deepEqual(Object.fromEntries(guardBindingNames.map(name=>[name,process.env[name]])),actual);
+});
 function fixtureService(directory, unit = 'velocity-sync', phase = 'running') {
   const executable = unit === 'pocketbase' ? directory + '/pocketbase' : '/usr/bin/node';
   const argv = unit === 'pocketbase' ? executable + ' serve --automigrate=false' : '/usr/bin/node ' + (unit === 'velocity-sync' ? 'sync_velocity.js' : unit + '.js');
@@ -481,6 +504,10 @@ const absent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const root = fs.realpathSync(fs.mkdtempSync(path.join(evidence, 'independent-')));
 const observations = [];
+// Coverage is separate from passed product observations: plain CI cannot prove
+// installed guard registration/refusal behavior.
+const guardCoverage = ['fixture-close-shared-success','fixture-close-first-rejection'].map(id=>({id,status:'unverified',reason:'actual configured guard case has not completed'}));
+let lifecycleContext;
 const mkdir = file => fs.mkdirSync(file, { recursive: true, mode: 0o700 });
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
@@ -491,12 +518,33 @@ function copyWithModes(from,to,options) {
   preserve(from,to);
 }
 
-// Exercise the shared close outcome using a real local child and the supplied
-// installed guard. The adapter changes only this probe's first cleanup purpose;
-// the guard itself decides owner and active-group refusals without substitution.
+// Exercise a real local child in the actual plain or configured context. In
+// configured mode the adapter changes only this probe's first cleanup purpose;
+// the installed guard decides owner and active-group refusals itself.
 async function closeOutcomeCases() {
   const guard=process.env.TCRN_SPAWN_GUARD,owner=process.env.TCRN_TASK_OWNER,registry=process.env.TCRN_SPAWN_REGISTRY;
-  assert.ok(guard&&owner&&registry,'owned lifecycle cases require the actual guard bindings');
+  lifecycleContext=guardContext(process.env);
+  if(lifecycleContext.mode==='invalid') {
+    for(const row of guardCoverage)row.reason='partial or empty guard bindings: invalid/not-verifiable';
+    write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});
+    assert.fail('Lifecycle guard context invalid/not-verifiable; missing: '+lifecycleContext.missing.join(',')+'; unusable: '+lifecycleContext.unusable.join(','));
+  }
+  if(lifecycleContext.mode==='plain') {
+    for(const row of guardCoverage)row.reason='all guard bindings absent; outside plain CI coverage and passed guard counts';
+    let service;
+    try {
+      service=await startOwned(process.execPath,['-e','setInterval(()=>{},1000)']);
+      assert.ok(service.child.spawnfile&&service.child.pid!==undefined,'local child did not spawn');
+      const first=service.close(),concurrent=service.close();assert.equal(first,concurrent);
+      const results=await Promise.allSettled([first,concurrent]);
+      assert.deepEqual(results,[{status:'fulfilled',value:undefined},{status:'fulfilled',value:undefined}]);
+      assert.ok(service.child.exitCode!==null||service.child.signalCode!==null);
+      const serial=service.close();assert.equal(serial,first);await serial;
+      observe('fixture-close-plain-shared-success','actual unguarded child shares concurrent and serial close result and is terminal',{passed:true,guardCoverage:'unverified'});
+    } finally {if(service)await service.close();}
+    return;
+  }
+  write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});
   const rawSpawn=cp.spawnSync;
   for(const failCleanup of [false,true]) {
     let service,registrations=0,deregistrations=0,cleanupRefused=false;
@@ -539,6 +587,7 @@ async function closeOutcomeCases() {
           // The intentional foreign-purpose refusal leaves the real owner's
           // registration intact. Recover only this terminal probe's exact group.
           if(failCleanup&&result[0].status==='rejected') {
+            assert.ok(service.child.exitCode!==null||service.child.signalCode!==null,'exact-owner cleanup requires the probe child to be terminal');
             const cleanup=rawSpawn(process.execPath,[guard,'deregister','--registry',registry,'--pgid',String(service.child.pid),'--purpose',owner],{encoding:'utf8'});
             assert.equal(cleanup.status,0,cleanup.stderr||cleanup.stdout);
           } else if(result[0].status==='rejected')throw result[0].reason;
@@ -546,6 +595,8 @@ async function closeOutcomeCases() {
       } finally {cp.spawnSync=rawSpawn;syncBuiltinESMExports();}
     }
     if(failCleanup)assert.equal(cleanupRefused,true);
+    guardCoverage[failCleanup?1:0]={id:'fixture-close-'+(failCleanup?'first-rejection':'shared-success'),status:'verified',reason:'actual configured guard case and terminal cleanup completed'};
+    write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});
   }
 }
 await closeOutcomeCases();
@@ -648,7 +699,7 @@ const adapter=(run=6)=>{
   return actual;
 };
 function initializeBaseline(){delete bound.config.baseline;bound.config.previousRevision=oldRevision;const initial=adapter().backup();const m=read(path.join(initial,'backup.json'));m.revision=null;m.retainedHistory=[{path:extra,sha256:sha(retainedBytes),mode:0o644}];m.sourceAbsentHistory=absent;m.snapshotId=snapshotIdentity(m);write(path.join(initial,'backup.json'),m);bound.config.baseline={kind:'mixed',sourceRevision:null,snapshotId:m.snapshotId,snapshotDirectory:initial,retainedHistory:m.retainedHistory,sourceAbsentHistory:absent};delete bound.config.previousRevision;return initial;}
-function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,observations});}
+function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});}
 const attempt=async callback=>{try{return {accepted:true,value:await callback()};}catch(error){return {accepted:false,error:error.message};}};
 try{
   // Keep these copies inside the original independent fixture root. Mutating a
@@ -947,8 +998,8 @@ try{
   if(bound?.running){const service=await bound.running;await service.close();}
   Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];
 }
-write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,isolation:'original productionAdapter/deploy and actual PB/file/SQLite operations; only finite host/service/command/external config bindings substituted; synthetic identities and anonymous records',observations});
-console.log(JSON.stringify({observations:observations.length,passed:observations.filter(x=>x.passed).length,failed:observations.filter(x=>!x.passed).length,root,production:false}));
+write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,isolation:'original productionAdapter/deploy and actual PB/file/SQLite operations; only finite host/service/command/external config bindings substituted; synthetic identities and anonymous records',lifecycleContext,guardCoverage,observations});
+console.log(JSON.stringify({lifecycleContext,guardCoverage,guardCasesVerified:guardCoverage.filter(x=>x.status==='verified').length,guardCasesUnverified:guardCoverage.filter(x=>x.status!=='verified').length,observations:observations.length,passed:observations.filter(x=>x.passed).length,failed:observations.filter(x=>!x.passed).length,root,production:false}));
 process.exitCode=observations.every(x=>x.passed)?0:1;
 
 });
