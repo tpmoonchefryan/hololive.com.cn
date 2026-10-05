@@ -51,6 +51,21 @@ export function decodeIdentitySupply(raw, expected, now = Math.floor(Date.now() 
 // records. Only the documented, unambiguous representation is admitted.
 const executionNames = ['ExecCondition', 'ExecStartPre', 'ExecStart', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost'];
 const serviceNames = [...executionNames, 'WorkingDirectory', 'User', 'Group', 'EnvironmentFiles', 'Requires', 'BindsTo', 'PartOf'];
+// systemd prints dependency unit sets in hash order, which a daemon-reload can
+// change. Membership stays exact; only the printed order is normalized.
+const dependencyNames = ['Requires', 'BindsTo', 'PartOf'];
+export function dependencyList(value) {
+  const units = value ? value.split(' ') : [];
+  check(units.every(Boolean) && new Set(units).size === units.length, 'Ambiguous unit dependency list');
+  return [...units].sort().join(' ');
+}
+export function dependencyLines(raw) {
+  return raw.split('\n').map(line => {
+    const at = line.indexOf('=');
+    check(at > 0 && dependencyNames.includes(line.slice(0, at)), 'Unknown unit dependency property');
+    return line.slice(0, at + 1) + dependencyList(line.slice(at + 1));
+  }).join('\n');
+}
 export function serviceFacts(raw) {
   const properties = {};
   for (const line of raw.split('\n')) {
@@ -61,7 +76,7 @@ export function serviceFacts(raw) {
   check(Object.keys(properties).length === serviceNames.length && serviceNames.every(name => Object.hasOwn(properties, name)), 'Unknown/missing service property');
   const configuration = {}, runtime = {};
   for (const name of serviceNames) {
-    if (!executionNames.includes(name)) { configuration[name] = properties[name]; continue; }
+    if (!executionNames.includes(name)) { configuration[name] = dependencyNames.includes(name) ? dependencyList(properties[name]) : properties[name]; continue; }
     configuration[name] = []; runtime[name] = [];
     let rest = properties[name];
     while (rest) {
@@ -675,16 +690,24 @@ def props(unit,names):
   for name in missing:
    typed=json.loads(subprocess.check_output(['/usr/bin/busctl','--system','--json=short','get-property','org.freedesktop.systemd1',object['data'][0],'org.freedesktop.systemd1.Service',name],text=True,timeout=10))
    require(set(typed)=={'type','data'} and typed['type']==('a(sb)' if name=='EnvironmentFiles' else 'a(sasbttttuii)') and typed['data']==[],'Missing property lacks typed empty proof'); rows.append([name,''])
- require(len(rows)==len(names) and set(row[0] for row in rows)==set(names),'Missing typed unit property'); return dict(rows)
+ require(len(rows)==len(names) and set(row[0] for row in rows)==set(names),'Missing typed unit property'); return {k:dependency_value(k,v) for k,v in rows}
 marker_names=['MainPID','ExecMainPID','ExecMainCode','ExecMainStatus','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','InvocationID','NRestarts','ActiveState','ControlGroup']
 execution_names=['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost']
 service_names=execution_names+['WorkingDirectory','User','Group','EnvironmentFiles','Requires','BindsTo','PartOf']
 sync_names=marker_names+service_names
+def dependency_value(name,value):
+ # systemd prints dependency unit sets in hash order, which a daemon-reload can change.
+ if name not in ['Requires','BindsTo','PartOf']: return value
+ units=value.split(' ') if value else []
+ require(all(units) and len(set(units))==len(units),'Ambiguous unit dependency list')
+ return ' '.join(sorted(units))
+def java_dependencies():
+ return {k:dependency_value(k,v) for k,v in (line.split('=',1) for line in config['velocityServiceBinding'].splitlines())}
 def facts(value):
  configuration={}; runtime={}
  for name in service_names:
   require(name in value,'Missing configured property')
-  if name not in execution_names: configuration[name]=value[name]; continue
+  if name not in execution_names: configuration[name]=dependency_value(name,value[name]); continue
   configuration[name]=[]; runtime[name]=[]; rest=value[name]
   while rest:
    m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0/0) \}(?: |$)',rest)
@@ -803,7 +826,7 @@ def unchanged():
 def java():
  value=props('velocity',marker_names); require(value['ActiveState']=='active','Java inactive')
  java_facts=configured('velocity'); require(runtime_matches(r['serviceEvidence']['velocity']['runtime'],java_facts['runtime']),'Java command runtime drift')
- require(props('velocity',['Requires','BindsTo','PartOf'])==dict(line.split('=',1) for line in config['velocityServiceBinding'].splitlines()),'Java dependency drift')
+ require(props('velocity',['Requires','BindsTo','PartOf'])==java_dependencies(),'Java dependency drift')
  running(dict(value,**props('velocity',service_names)))
  base='/proc/'+value['MainPID']; command=java_facts['configuration']['ExecStart'][0]
  actual=[read(base+'/stat').decode().rsplit(')',1)[1].split()[19],os.path.realpath(base+'/exe'),read(base+'/cmdline').split(b'\0')[:-1]]
@@ -1201,7 +1224,7 @@ try:
   result['files']=[[n,identity(real(config['velocityRoot']+'/'+n)),digest(read(config['velocityRoot']+'/'+n)),file_flags(config['velocityRoot']+'/'+n)] for n in config['protectedVelocityFiles']]
   require(all(any(f[0]==entry['path'] and f[2]==entry.get('sha256') and f[1][4]==entry.get('mode') for f in result['files']) for entry in r['velocityEvidence']['files']),'Java files drift since outer pre-stop baseline')
   java(); result['processes']=process_binding(group); result['originalProperties']=effective()
-  require(props('velocity',['Requires','BindsTo','PartOf'])==dict(line.split('=',1) for line in config['velocityServiceBinding'].splitlines()),'Java dependency drift')
+  require(props('velocity',['Requires','BindsTo','PartOf'])==java_dependencies(),'Java dependency drift')
   real('/run/systemd/system'); require(identity('/run/systemd/system')[2]==0 and identity('/run/systemd/system')[4]&0o022==0,'Unsafe runtime parent')
   for unit,file in leaves.items():
    directory=os.path.dirname(file); require(not os.path.lexists(file),'Existing runtime leaf')
@@ -1432,7 +1455,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       assertRealPath(path.join(config.webRoot, 'backend/pb_data'));
       check(sha(fs.readFileSync('/etc/machine-id')) === config.machineIdSha256 && os.userInfo().username === config.runnerUser, 'Wrong physical host or runner user');
       check(command(pb, ['--version']) === 'pocketbase version ' + config.pocketbaseVersion, 'Wrong PocketBase version');
-      check(command('systemctl', ['show', 'velocity', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf']) === config.velocityServiceBinding, 'Java reverse service dependency drift');
+      check(dependencyLines(command('systemctl', ['show', 'velocity', '-p', 'Requires', '-p', 'BindsTo', '-p', 'PartOf'])) === dependencyLines(config.velocityServiceBinding), 'Java reverse service dependency drift');
       for (const unit of config.websiteServices) {
         check(command('systemctl', ['is-active', unit]) === 'active', 'Required service not active: ' + unit);
         const facts = serviceFacts(showService(unit)), approved = serviceFacts(config.serviceBindings[unit]);
