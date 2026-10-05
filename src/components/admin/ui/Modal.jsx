@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useId, useRef } from "react";
+import { useLayoutEffect, useId, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 import { openDialog, isBackdropClick, trapDialogTab } from "./dialogLifecycle";
@@ -8,7 +8,7 @@ export default function Modal({ isOpen, onClose, title, children, size = "md", r
   const { t } = useTranslation("common");
   const dialogRef = useRef(null);
   const titleId = useId();
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isOpen) return openDialog(dialogRef.current, document.body, returnFocusRef);
   }, [isOpen, returnFocusRef]);
   if (!isOpen || typeof document === "undefined") return null;

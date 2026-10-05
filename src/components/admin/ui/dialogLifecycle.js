@@ -11,7 +11,7 @@ const validTarget = target => target?.isConnected && !target.disabled && !target
 
 export function openDialog(dialog, body, returnFocusRef) {
   const document = dialog.ownerDocument;
-  const trigger = document.activeElement;
+  const trigger = returnFocusRef?.current || document.activeElement;
   if (!activeDialogs.size) previousOverflow = body.style.overflow;
   activeDialogs.add(dialog);
   body.style.overflow = "hidden";
@@ -35,13 +35,18 @@ export function openDialog(dialog, body, returnFocusRef) {
   return () => {
     observer.disconnect();
     document.removeEventListener('focusin', repair);
-    dialog.close();
     activeDialogs.delete(dialog);
+    dialog.close();
     if (!activeDialogs.size) body.style.overflow = previousOverflow;
-    const remaining = topDialog();
-    const target = returnFocusRef?.current || trigger;
-    if (document.hasFocus() && validTarget(target) && (!remaining || remaining.contains(target))) target.focus();
-    else if (remaining && document.hasFocus()) (controlsIn(remaining)[0] || remaining).focus();
+    // Layout cleanup closes the native layer before removal. Resolve a replacement
+    // after React has committed the opener's new state (for example a preview).
+    queueMicrotask(() => {
+      if (!document.hasFocus()) return;
+      const remaining = topDialog();
+      const target = validTarget(trigger) ? trigger : returnFocusRef?.current;
+      if (validTarget(target) && (!remaining || remaining.contains(target))) target.focus({ preventScroll: true });
+      else if (remaining) (controlsIn(remaining)[0] || remaining).focus({ preventScroll: true });
+    });
   };
 }
 
@@ -55,8 +60,7 @@ export function isBackdropClick(event) {
 export function trapDialogTab(event) {
   if (event.key !== "Tab") return;
   const dialog = event.currentTarget;
-  const controls = [...dialog.querySelectorAll('button, a[href], input, select, textarea, iframe, [tabindex]')]
-    .filter((item) => !item.disabled && item.tabIndex >= 0 && item.getClientRects().length);
+  const controls = controlsIn(dialog);
   const first = controls[0];
   const last = controls.at(-1);
   const active = dialog.ownerDocument.activeElement;

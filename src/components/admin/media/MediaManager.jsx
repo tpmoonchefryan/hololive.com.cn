@@ -40,6 +40,8 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
   const [category, setCategory] = useState("all"); // all, images, videos, files
   const [selectedMedia, setSelectedMedia] = useState(null);
   const fileInputRef = useRef(null);
+  const detailTriggerRef = useRef(null);
+  const managerRef = useRef(null);
   const baseUrl = import.meta.env.VITE_POCKETBASE_URL?.replace(/\/$/, "") || "";
 
   const formatDateTime = (dateString) => {
@@ -94,6 +96,7 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
     try {
       await pb.collection("media").delete(id);
       await fetchMedia(); // 刷新列表
+      detailTriggerRef.current = managerRef.current;
       setSelectedMedia(null);
     } catch (error) {
       logger.error("删除失败:", error);
@@ -129,20 +132,21 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
   const getFileIcon = (fileName) => ({ image: ImageIcon, video: Video }[getFileType(fileName)] || File);
 
   // 处理文件选择
-  const handleFileClick = (item) => {
+  const handleFileClick = (item, trigger) => {
     if (onSelect) {
       // 选择模式：触发回调并关闭模态框
       const url = getFileUrl(item);
-      onSelect(selectRecord ? item.id : url);
+      onSelect(selectRecord ? item.id : url, item);
       if (closeModal) closeModal();
     } else {
       // 管理模式：显示详情
+      detailTriggerRef.current = trigger;
       setSelectedMedia(item);
     }
   };
 
   return (
-    <div className="space-y-4">
+    <div ref={managerRef} tabIndex={-1} className="space-y-4">
       {/* 顶部工具栏 */}
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         {/* 搜索框 */}
@@ -244,7 +248,7 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
               >
                 <ContentTextButton
                   className="absolute inset-0 w-full h-full focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
-                  onClick={() => handleFileClick(item)}
+                  onClick={(event) => handleFileClick(item, event.currentTarget)}
                   aria-label={`${t("admin.media.manager.details.title")}: ${fileName || t("admin.media.manager.details.unknown")}`}
                 >
                   {fileType === "image" ? (
@@ -294,6 +298,7 @@ export default function MediaManager({ onSelect, closeModal, selectRecord = fals
       <ContentPagination query={query} />
       {/* 文件详情 Modal（管理模式） */}
       <Modal
+        returnFocusRef={detailTriggerRef}
         isOpen={Boolean(selectedMedia && !onSelect)}
         onClose={() => setSelectedMedia(null)}
         title={t("admin.media.manager.details.title")}

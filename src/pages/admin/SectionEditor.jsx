@@ -314,19 +314,15 @@ export default function SectionEditor() {
         background_ref: formData.background_ref || null,
       };
 
-      if (isEditMode) {
-        const saved = await pb.collection("cms_sections").update(id, payload);
-        if (!draft.current(operation)) { logger.warn("Section write completed after editor lifetime", {id:saved.id}); return; }
-      } else {
-        const saved = await pb.collection("cms_sections").create(payload);
-        if (!draft.current(operation)) { logger.warn("Section write completed after editor lifetime", {id:saved.id}); return; }
+      const savedId = id || draft.recordId();
+      const collection = pb.collection("cms_sections");
+      const saved = await (savedId ? collection.update(savedId, payload) : collection.create(payload));
+      if (!draft.acceptSave(operation, saved.id, payload)) {
+        logger.warn("Section write completed after editor lifetime", {id:saved.id}); return;
       }
-
-      if (!draft.current(operation)) return;
-      draft.establishBaseline(payload);
       if (!draft.unchanged(operation)) return;
       notify(
-        isEditMode ? t("sectionEditor.toast.updated") : t("sectionEditor.toast.created"),
+        savedId ? t("sectionEditor.toast.updated") : t("sectionEditor.toast.created"),
         "success"
       );
       draft.schedule(operation, payload, () => navigate(`/${adminKey}/webadmin/home`), 600);

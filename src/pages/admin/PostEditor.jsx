@@ -219,31 +219,22 @@ export default function PostEditor() {
       };
 
       const savedDraft = {...saveData, slug:saveData.slug || ""};
-      if (isEditMode) {
-        const saved = await pb.collection("posts").update(id, saveData);
-        if (!draft.current(operation)) { logger.warn("Post write completed after editor lifetime", {id:saved.id}); return; }
-        draft.establishBaseline(savedDraft);
-        // 记录更新日志
-        const title = typeof formData.title === "object"
-          ? (formData.title.zh || formData.title.en || formData.title.ja || "Unknown Title")
-          : formData.title || "Unknown Title";
-        await logUpdate("Post Editor", `Updated post: ${title}`);
-      } else {
-        const saved = await pb.collection("posts").create(saveData);
-        if (!draft.current(operation)) { logger.warn("Post write completed after editor lifetime", {id:saved.id}); return; }
-        draft.establishBaseline(savedDraft);
-        // 记录创建日志
-        const title = typeof formData.title === "object"
-          ? (formData.title.zh || formData.title.en || formData.title.ja || "Unknown Title")
-          : formData.title || "Unknown Title";
-        await logCreate("Post Editor", `Created post: ${title}`);
+      const savedId = id || draft.recordId();
+      const collection = pb.collection("posts");
+      const saved = await (savedId ? collection.update(savedId, saveData) : collection.create(saveData));
+      if (!draft.acceptSave(operation, saved.id, savedDraft)) {
+        logger.warn("Post write completed after editor lifetime", {id:saved.id}); return;
       }
+      const title = typeof saveData.title === "object"
+        ? (saveData.title.zh || saveData.title.en || saveData.title.ja || "Unknown Title")
+        : saveData.title || "Unknown Title";
+      await (savedId ? logUpdate : logCreate)("Post Editor", `${savedId ? "Updated" : "Created"} post: ${title}`);
 
       if (!draft.current(operation)) return;
       if (!draft.unchanged(operation)) return;
       setFormData(savedDraft);
       notify(
-        isEditMode ? t("admin.postEditor.toast.updateSuccess") : t("admin.postEditor.toast.createSuccess"),
+        savedId ? t("admin.postEditor.toast.updateSuccess") : t("admin.postEditor.toast.createSuccess"),
         "success"
       );
       draft.schedule(operation, savedDraft, () => navigate(`/${adminKey}/webadmin/posts`), 900);
