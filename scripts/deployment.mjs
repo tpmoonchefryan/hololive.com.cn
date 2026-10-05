@@ -306,25 +306,35 @@ function controlWrite(file, value, validate = controlPath) {
 
 // Inventory all replacements before deleting the first artifact. Runtime
 // environment overlap is deliberately refused rather than silently migrated.
+// Removal needs write+search on the parent and, under a sticky parent, runner
+// ownership of the entry or the parent. A directory that cannot be emptied
+// cannot be removed, so every blocked entry is listed before any stop or write.
 function verifyInstallTargets(webRoot, configurationFiles = []) {
   assertRealPath(webRoot);
+  const runner = process.geteuid(), blocked = [];
+  const writable = directory => { try { fs.accessSync(directory, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; } };
+  const inspect = (entry, info, parent) => {
+    let removable = parent !== null && (!(parent.mode & 0o1000) || info.uid === runner || parent.uid === runner);
+    if (info.isDirectory() && !info.isSymbolicLink()) {
+      const names = fs.readdirSync(entry), container = names.length && writable(entry) ? info : null;
+      for (const name of names) {
+        check(name !== '.env' && !name.startsWith('.env.'), 'Runtime environment overlaps replaced artifact');
+        const child = path.join(entry, name);
+        if (!inspect(child, fs.lstatSync(child), container)) removable = false;
+      }
+    }
+    if (!removable) blocked.push(entry);
+    return removable;
+  };
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
     assertRealPath(path.dirname(dest));
     const stat = lstatOptional(dest);
     if (stat) assertRealPath(dest);
     for (const file of configurationFiles) check(file !== dest && !file.startsWith(dest + path.sep), 'Runtime configuration overlaps replaced artifact');
-    const inspect = directory => {
-      const info = fs.lstatSync(directory);
-      if (!info.isDirectory() || info.isSymbolicLink()) return;
-      for (const name of fs.readdirSync(directory)) {
-        check(name !== '.env' && !name.startsWith('.env.'), 'Runtime environment overlaps replaced artifact');
-        const child = path.join(directory, name), childInfo = fs.lstatSync(child);
-        if (childInfo.isDirectory() && !childInfo.isSymbolicLink()) inspect(child);
-      }
-    };
-    if (stat) inspect(dest);
+    if (stat) inspect(dest, stat, writable(path.dirname(dest)) ? fs.lstatSync(path.dirname(dest)) : null);
   }
+  check(!blocked.length, 'Artifact entries not removable by runner: ' + blocked.join(', '));
 }
 export function checkDatabases(directory) {
   // Metadata only, never records/tokens. Run on a stopped snapshot, read-only.
@@ -752,12 +762,20 @@ def runtime_matches(before,after):
  return True
 def stable_properties(before,after):
  return {k:v for k,v in before.items() if k not in execution_names}=={k:v for k,v in after.items() if k not in execution_names} and facts(before)['configuration']==facts(after)['configuration'] and runtime_matches(facts(before)['runtime'],facts(after)['runtime'])
-def process_identity(value):
+def cwd_identity(base):
+ value=os.stat(base+'/cwd'); return [value.st_dev,value.st_ino]
+def working_directory(base,directory,retained=None):
+ # Install replaces backend/scripts while unrestarted proxies keep running; only
+ # an explicit stop-time [st_dev,st_ino] binding admits the unlinked directory.
+ actual=os.path.realpath(base+'/cwd')
+ if retained is None: return actual==directory
+ return actual in [directory,directory+' (deleted)'] and cwd_identity(base)==retained
+def process_identity(value,retained_cwd=None):
  pid=value['MainPID']; require(pid.isdigit() and int(pid)>0 and value['ExecMainPID']==pid and int(value['ExecMainStartTimestampMonotonic'])>0,'Main process marker mismatch')
  require(re.fullmatch('[a-f0-9]{32}',value['InvocationID']) is not None and value['ExecMainCode']=='0' and value['ExecMainStatus']=='0','Running invocation/exit marker mismatch')
  base='/proc/'+pid; start=read(base+'/stat').decode().rsplit(')',1)[1].split()[19]; require(start.isdigit() and int(start)>0,'Missing process start')
  command=facts(value)['configuration']['ExecStart'][0]
- require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and os.path.realpath(base+'/cwd')==value['WorkingDirectory'],'Process executable/directory drift')
+ require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and working_directory(base,value['WorkingDirectory'],retained_cwd),'Process executable/directory drift')
  argv=read(base+'/cmdline').split(b'\0'); require(argv[-1]==b'' and argv[:-1]==[x.encode() for x in command['argv']],'Process argv drift')
  group=value['ControlGroup']; require(group.startswith('/') and group!='/' and '..' not in group.split('/') and '0::'+group in read(base+'/cgroup').decode().splitlines(),'Process service group drift')
  status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
@@ -765,13 +783,13 @@ def process_identity(value):
  require([int(x) for x in status['Uid'].split()]==[user.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[gid]*4,'Process user/group drift')
  require(read(base+'/stat').decode().rsplit(')',1)[1].split()[19]==start,'Process replaced during observation')
  return {'pid':pid,'processStart':start,'invocationId':value['InvocationID']}
-def running(value):
+def running(value,retained_cwd=None):
  actual=facts(value); record=actual['runtime']['ExecStart'][0]
  require(value['ActiveState']=='active','ExecStart running phase mismatch')
  known=record['pid']==value['MainPID'] and record['start_time']!='[n/a]' and record['stop_time']=='[n/a]' and record['code']=='(null)' and record['status'] in ['0','0/0']
  require(known or unknown_execution(record),'ExecStart running phase mismatch')
  # Missing command history remains missing; the live kernel identity is required in both cases.
- process_identity(value)
+ process_identity(value,retained_cwd)
  for name in execution_names:
   if name=='ExecStart': continue
   for configured_command,execution in zip(actual['configuration'][name],actual['runtime'][name]):
@@ -782,15 +800,17 @@ def service_phases(phase):
  current={}
  for unit in config['websiteServices']:
   if unit=='velocity-sync': continue
-  value=props(unit,marker_names+service_names); actual=configured(unit,value); running(value)
+  # Website units other than PocketBase restart only after the new sync starts.
+  retained=None if phase=='stop' or unit=='pocketbase' else result['servicePhases']['stop'][unit]['cwdIdentity']
+  value=props(unit,marker_names+service_names); actual=configured(unit,value); running(value,retained)
   pid=value['MainPID']; base='/proc/'+pid; command=actual['configuration']['ExecStart'][0]
-  require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and os.path.realpath(base+'/cwd')==value['WorkingDirectory'],'Website process executable/directory drift')
+  require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and working_directory(base,value['WorkingDirectory'],retained),'Website process executable/directory drift')
   argv=read(base+'/cmdline').split(b'\0'); require(argv[-1]==b'' and argv[:-1]==[x.encode() for x in command['argv']],'Website process argv drift')
   require('0::'+value['ControlGroup'] in read(base+'/cgroup').decode().splitlines(),'Website process group drift')
   status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
   user=pwd.getpwnam(value['User'] or 'root'); group=grp.getgrnam(value['Group']).gr_gid if value['Group'] else user.pw_gid
   require([int(x) for x in status['Uid'].split()]==[user.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[group]*4,'Website process user/group drift')
-  observed={'properties':value,'processStart':read(base+'/stat').decode().rsplit(')',1)[1].split()[19]}; current[unit]=observed
+  observed={'properties':value,'processStart':read(base+'/stat').decode().rsplit(')',1)[1].split()[19],'cwdIdentity':cwd_identity(base)}; current[unit]=observed
   if phase=='stop': require(runtime_matches(r['serviceEvidence'][unit]['runtime'],actual['runtime']),'Website runtime drift since preflight')
   elif unit=='pocketbase' and phase=='cleanup-sync':
    old=result['servicePhases']['stop'][unit]['properties']
@@ -880,10 +900,16 @@ def process_binding(group,code_hash=None):
  require(digest(read(config['webRoot']+'/backend/scripts/sync_velocity.js'))==(code_hash or config['finiteStop']['syncCodeSha256']),'Sync code drift')
  return bindings
 def frozen(group): return dict(x.split() for x in read(group+'/cgroup.events').decode().splitlines()).get('frozen')=='1'
-def wait_for(fn,message):
- end=time.monotonic()+10
+def wait_for(fn,message,limit=10):
+ end=time.monotonic()+limit
  while not fn():
   require(time.monotonic()<end,message); time.sleep(.02)
+def await_exec(value):
+ # systemd 255 runs ExecStart through systemd-executor, and systemctl start can
+ # return before its execve; wait a bounded time for the configured command.
+ pid=value['MainPID']; require(pid.isdigit() and int(pid)>0,'Main process marker mismatch')
+ base='/proc/'+pid; command=facts(value)['configuration']['ExecStart'][0]
+ wait_for(lambda:os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and read(base+'/cmdline').split(b'\0')==[x.encode() for x in command['argv']]+[b''],'New sync command start timed out',5)
 def own_leaves():
  for unit,owned in result['leaves'].items():
   require(identity(leaves[unit])==owned and read(leaves[unit]).decode()==contents[unit],'Foreign/replaced runtime leaf')
@@ -1258,7 +1284,7 @@ try:
   if r['operation']=='cleanup-sync':
    stopped(current_sync); require(stable_properties(result['stoppedSync'],current_sync),'Stopped cleanup phase drift')
   if r['operation']=='cleanup-java':
-   old_sync=result['sync']; running(current_sync)
+   old_sync=result['sync']; await_exec(current_sync); running(current_sync)
    require(runtime_matches({name:facts(old_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']},{name:facts(current_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']}),'Unexpected new-sync command execution')
    result['newSync']=current_sync; result['sync']=current_sync
    require(result['sync']['ExecMainStartTimestampMonotonic']!=old_sync['ExecMainStartTimestampMonotonic'] and result['sync']['NRestarts']==old_sync['NRestarts'],'New sync start/restart marker drift')

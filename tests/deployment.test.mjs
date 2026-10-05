@@ -336,6 +336,57 @@ test('actual production preflight/install refuse nested runtime environment with
   assert.equal(fs.readFileSync(path.join(f.webRoot, 'dist/old.js'), 'utf8'), 'old frontend');
   assert.equal(fs.existsSync(f.state), false);
 }));
+// Run 102: a root-owned backend/scripts/logs could not be emptied after the
+// services had stopped. Removability is now proved for every entry in preflight.
+test('runner-owned artifact trees pass install preflight and are replaced in full', async t => productionFixture(t, f => {
+  const logs = path.join(f.webRoot, 'backend/scripts/logs');
+  fs.mkdirSync(path.join(f.webRoot, 'dist')); fs.writeFileSync(path.join(f.webRoot, 'dist/old.js'), 'old frontend');
+  fs.mkdirSync(logs); fs.writeFileSync(path.join(logs, 'latest.log'), '');
+  f.adapter.verify();
+  installBundle(f.bundle, f.webRoot, revision);
+  assert.equal(fs.existsSync(logs), false); assert.equal(fs.existsSync(path.join(f.webRoot, 'dist/old.js')), false);
+  assert.equal(fs.readFileSync(path.join(f.webRoot, 'backend/scripts/sync_velocity.js'), 'utf8'), 'candidate protected daemon');
+}));
+test('artifact entries the runner cannot remove are all listed before any stop, command or deletion', { skip: process.geteuid() === 0 && 'root bypasses directory permissions' }, async t => productionFixture(t, f => {
+  const scripts = path.join(f.webRoot, 'backend/scripts'), logs = path.join(scripts, 'logs'), latest = path.join(logs, 'latest.log');
+  const dist = path.join(f.webRoot, 'dist'), assets = path.join(dist, 'assets'), asset = path.join(assets, 'app.js');
+  fs.mkdirSync(assets, { recursive: true }); fs.writeFileSync(path.join(dist, 'old.js'), 'old frontend'); fs.writeFileSync(asset, 'old asset');
+  fs.mkdirSync(logs); fs.writeFileSync(latest, '');
+  for (const directory of [logs, assets]) { fs.chmodSync(directory, 0o555); t.after(() => fs.chmodSync(directory, 0o755)); }
+  const names = ['dist', 'backend/pb_migrations', 'backend/scripts'], before = inventory(f.webRoot, names);
+  // One refusal lists every blocked entry; a directory that cannot be emptied is blocked too.
+  const refused = error => error.message === 'Artifact entries not removable by runner: ' + [asset, assets, dist, latest, logs, scripts].join(', ');
+  assert.throws(() => f.adapter.verify(), refused);
+  assert.equal(f.commands.length, 0);
+  assert.throws(() => f.adapter.install(), refused);
+  assert.throws(() => installBundle(f.bundle, f.webRoot, revision), refused);
+  assert.deepEqual(inventory(f.webRoot, names), before);
+  assert.equal(fs.readFileSync(path.join(dist, 'old.js'), 'utf8'), 'old frontend');
+  for (const file of [f.state, f.guard, path.join(f.config.stateRoot, 'deployment.lock')]) assert.equal(fs.existsSync(file), false);
+  assert.equal(f.commands.length, 0);
+}));
+test('sticky artifact parents admit removal only of runner-owned entries or under a runner-owned parent', async t => productionFixture(t, f => {
+  const scripts = path.join(f.webRoot, 'backend/scripts'), logs = path.join(scripts, 'logs'), latest = path.join(logs, 'latest.log');
+  fs.mkdirSync(logs); fs.writeFileSync(latest, '');
+  const runner = process.geteuid(), owners = new Map(), lstat = fs.lstatSync;
+  // Foreign ownership needs root to create; only lstat owner/sticky facts are substituted.
+  fs.lstatSync = (file, ...args) => {
+    const value = lstat(file, ...args);
+    return owners.has(file) ? new Proxy(value, { get: (v, k) => k === 'uid' ? owners.get(file) : k === 'mode' && file === logs ? v.mode | 0o1000 : Reflect.get(v, k) }) : value;
+  };
+  syncBuiltinESMExports();
+  try {
+    for (const [entry, parent, accepted] of [[runner, runner + 1, true], [runner + 1, runner, true], [runner + 1, runner + 1, false]]) {
+      owners.set(latest, entry); owners.set(logs, parent);
+      const commands = f.commands.length;
+      if (accepted) { f.createAdapter().verify(); continue; }
+      assert.throws(() => f.createAdapter().verify(), error => error.message === 'Artifact entries not removable by runner: ' + [latest, logs, scripts].join(', '));
+      assert.equal(f.commands.length, commands);
+    }
+    assert.throws(() => installBundle(f.bundle, f.webRoot, revision), /not removable by runner/);
+    assert.equal(fs.existsSync(latest), true);
+  } finally { fs.lstatSync = lstat; syncBuiltinESMExports(); }
+}));
 test('all replacement aliases including dangling later targets refuse before dist deletion', t => {
   for (const dangling of [false, true]) {
     const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live'); fs.mkdirSync(bundle); createBundle(bundle);
@@ -1334,7 +1385,7 @@ def read(p):
  if p not in files: raise FileNotFoundError(p)
  if p=='/proc/200/stat' and reads: return reads.pop(0)
  return files[p]
-ns.update(config={},read=read,os=types.SimpleNamespace(path=types.SimpleNamespace(realpath=lambda p:paths.get(p,p),isabs=lambda p:p.startswith('/'),exists=lambda p:p=='/fixture-group/cgroup.procs')),
+ns.update(config={},read=read,os=types.SimpleNamespace(stat=lambda p:types.SimpleNamespace(st_dev=64770,st_ino=919512),path=types.SimpleNamespace(realpath=lambda p:paths.get(p,p),isabs=lambda p:p.startswith('/'),exists=lambda p:p=='/fixture-group/cgroup.procs')),
  pwd=types.SimpleNamespace(getpwnam=lambda u:types.SimpleNamespace(pw_uid=1000,pw_gid=1000)),grp=types.SimpleNamespace(getgrnam=lambda g:types.SimpleNamespace(gr_gid=1000)),group_path=lambda g:'/fixture-group',members=lambda g:group)
 ns['configured']=lambda unit,v:ns['facts'](v)
 reset(); original=copy.deepcopy(value); assert ns['running'](value)['pid']=='200'; assert value==original
@@ -1501,6 +1552,120 @@ for unit,key,wrong in [('velocity-sync','ExecMainStatus','15'),('velocity-sync',
 print(json.dumps({'passed':True}))
 `;
   const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, nested, service: fixtureService('/fixture/backend/scripts') }), encoding: 'utf8', timeout: 10000 });
+  assert.equal(response.status, 0, response.stderr);
+  assert.equal(JSON.parse(response.stdout).passed, true);
+});
+
+// Install replaces backend/scripts while the proxies still run from it until
+// after the new sync starts; Linux then reports their cwd as "<dir> (deleted)".
+test('unrestarted website proxies keep their stop-time working directory inode while PocketBase, Java and sync stay strict', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  const script = String.raw`import ast,json,sys,types
+request=json.load(sys.stdin); tree=ast.parse(request['child'])
+names={'marker_names','execution_names','service_names','sync_names'}
+nodes=[n for n in tree.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef)) or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in n.targets)]
+ns={}; exec(compile(ast.Module(body=nodes,type_ignores=[]),'<actual finite child>','exec'),ns)
+def unit_value(text,unit,pid):
+ value=dict(line.split('=',1) for line in text.splitlines())
+ value['ExecStart']=value['ExecStart'].replace('start_time=[fixture-start]','start_time=[n/a]').replace('pid=200','pid=0').replace('status=0','status=0/0')
+ value.update(MainPID=pid,ExecMainPID=pid,ExecMainCode='0',ExecMainStatus='0',ExecMainStartTimestampMonotonic='1000000',ExecMainExitTimestampMonotonic='0',InvocationID='a'*32,NRestarts='0',ActiveState='active',ControlGroup='/'+unit+'.service')
+ return value
+units={'pocketbase':unit_value(request['pocketbase'],'pocketbase','200'),'map-proxy':unit_value(request['proxy'],'map-proxy','300')}
+files={}; paths={}; inodes={}
+def process(pid,unit,start,cwd,inode):
+ base='/proc/'+pid; command=ns['facts'](units[unit])['configuration']['ExecStart'][0]
+ files.update({base+'/stat':('1 (x) '+' '.join(['0']*19+[start])).encode(),base+'/cmdline':b''.join(x.encode()+b'\0' for x in command['argv']),base+'/cgroup':('0::/'+unit+'.service\n').encode(),base+'/status':b'Uid: 1000 1000 1000 1000\nGid: 1000 1000 1000 1000\n'})
+ paths.update({base+'/exe':command['path'],base+'/cwd':cwd}); inodes[base+'/cwd']=inode
+def read(p):
+ if p not in files: raise FileNotFoundError(p)
+ return files[p]
+ns.update(read=read,os=types.SimpleNamespace(stat=lambda p:types.SimpleNamespace(st_dev=64770,st_ino=inodes[p]),path=types.SimpleNamespace(realpath=lambda p:paths.get(p,p),isabs=lambda p:p.startswith('/'))),
+ pwd=types.SimpleNamespace(getpwnam=lambda u:types.SimpleNamespace(pw_uid=1000,pw_gid=1000)),grp=types.SimpleNamespace(getgrnam=lambda g:types.SimpleNamespace(gr_gid=1000)),
+ props=lambda unit,names:dict(units[unit]),configured=lambda unit,v:ns['facts'](v),result={},
+ config={'websiteServices':['pocketbase','velocity-sync','map-proxy']},r={'serviceEvidence':{unit:{'runtime':ns['facts'](value)['runtime']} for unit,value in units.items()}})
+def refused(phase,case):
+ try: ns['service_phases'](phase)
+ except RuntimeError: return
+ raise AssertionError('accepted '+case)
+scripts='/fixture/site/backend/scripts'
+process('200','pocketbase','100','/fixture/site/backend',1001); process('300','map-proxy','150',scripts+' (deleted)',919512)
+refused('stop','deleted working directory before install')
+process('300','map-proxy','150',scripts,919512); ns['service_phases']('stop')
+stop=ns['result']['servicePhases']['stop']
+assert stop['map-proxy']['cwdIdentity']==[64770,919512] and stop['map-proxy']['processStart']=='150' and stop['pocketbase']['cwdIdentity']==[64770,1001]
+# Install unlinks the proxy directory; PocketBase restarts from its retained directory.
+paths['/proc/300/cwd']=scripts+' (deleted)'
+units['pocketbase'].update(MainPID='201',ExecMainPID='201',ExecMainStartTimestampMonotonic='2000000',InvocationID='b'*32)
+process('201','pocketbase','200','/fixture/site/backend',1002)
+ns['service_phases']('cleanup-sync'); ns['service_phases']('cleanup-java')
+assert ns['result']['servicePhases']['cleanup-java']['map-proxy']['cwdIdentity']==[64770,919512]
+paths['/proc/300/cwd']=scripts; ns['service_phases']('cleanup-sync'); ns['service_phases']('cleanup-java')
+for cwd,inode,case in [(scripts+' (deleted)',919513,'different inode'),(scripts,919513,'replacement directory'),('/fixture/site/backend/other (deleted)',919512,'different path'),(scripts+'.old (deleted)',919512,'renamed path'),(scripts+' (deleted) (deleted)',919512,'suffixed path')]:
+ paths['/proc/300/cwd']=cwd; inodes['/proc/300/cwd']=inode
+ for phase in ['cleanup-sync','cleanup-java']: refused(phase,case+' in '+phase)
+paths['/proc/300/cwd']=scripts+' (deleted)'; inodes['/proc/300/cwd']=919512; ns['service_phases']('cleanup-java')
+# PocketBase restarted before cleanup: even its stop-time inode never admits a deleted path.
+paths['/proc/201/cwd']='/fixture/site/backend (deleted)'; inodes['/proc/201/cwd']=1001
+for phase in ['cleanup-sync','cleanup-java']: refused(phase,'deleted PocketBase directory in '+phase)
+paths['/proc/201/cwd']='/fixture/site/backend'; inodes['/proc/201/cwd']=1002
+# Without the explicit stop-time binding (Java, old and new sync) running() stays strict.
+try: ns['running'](units['map-proxy'])
+except RuntimeError: pass
+else: raise AssertionError('accepted deleted directory without a stop-time binding')
+assert ns['running'](units['map-proxy'],[64770,919512])['pid']=='0'
+try: ns['running'](units['map-proxy'],[64770,919513])
+except RuntimeError: pass
+else: raise AssertionError('accepted a different stop-time binding')
+print(json.dumps({'passed':True}))
+`;
+  const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, pocketbase: fixtureService('/fixture/site/backend', 'pocketbase'), proxy: fixtureService('/fixture/site/backend/scripts', 'map-proxy') }), encoding: 'utf8', timeout: 10000 });
+  assert.equal(response.status, 0, response.stderr);
+  assert.equal(JSON.parse(response.stdout).passed, true);
+});
+
+// systemd 255 starts ExecStart through systemd-executor, so `systemctl start`
+// can return while MainPID still runs the executor instead of node.
+test('new sync start waits at most five seconds for systemd-executor to exec the configured command', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  assert.match(child, /old_sync=result\['sync'\]; await_exec\(current_sync\); running\(current_sync\)/);
+  const script = String.raw`import ast,json,sys,types
+request=json.load(sys.stdin); tree=ast.parse(request['child'])
+names={'marker_names','execution_names','service_names','sync_names'}
+nodes=[n for n in tree.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef)) or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in n.targets)]
+ns={}; exec(compile(ast.Module(body=nodes,type_ignores=[]),'<actual finite child>','exec'),ns)
+value=dict(line.split('=',1) for line in request['service'].splitlines()); value['MainPID']='201'
+clock=[0.0]; sleeps=[]; switch={}
+def argv(*parts): return b''.join(x.encode()+b'\0' for x in parts)
+def realpath(p):
+ if p=='/proc/201/exe': return '/usr/bin/node' if clock[0]>=switch['exe'] else '/usr/lib/systemd/systemd-executor'
+ return p
+def read(p):
+ if p!='/proc/201/cmdline': raise FileNotFoundError(p)
+ return argv('/usr/bin/node','sync_velocity.js') if clock[0]>=switch['cmdline'] else argv('/usr/lib/systemd/systemd-executor','--deserialize','30')
+def sleep(seconds): sleeps.append(seconds); clock[0]+=seconds
+ns.update(read=read,os=types.SimpleNamespace(path=types.SimpleNamespace(realpath=realpath,isabs=lambda p:p.startswith('/'))),time=types.SimpleNamespace(monotonic=lambda:clock[0],sleep=sleep))
+def attempt(exe,cmdline,service=value):
+ clock[0]=0.0; sleeps.clear(); switch.update(exe=exe,cmdline=cmdline)
+ try: ns['await_exec'](service)
+ except RuntimeError: return False
+ return True
+assert attempt(0,0) and sleeps==[]
+assert attempt(.1,.1) and .1<=clock[0]<.2 and max(sleeps)<=.02
+assert attempt(0,.3) and .3<=clock[0]<.4
+never=float('inf')
+assert not attempt(never,never) and 5<=clock[0]<=5.05 and max(sleeps)<=.02
+assert not attempt(5.5,5.5) and clock[0]<5.5
+other=dict(value,ExecStart=value['ExecStart'].replace('argv[]=/usr/bin/node sync_velocity.js','argv[]=/usr/bin/node other.js'))
+assert not attempt(0,0,other) and clock[0]>=5
+for pid in ['0','','x1']:
+ try: ns['await_exec'](dict(value,MainPID=pid))
+ except RuntimeError: pass
+ else: raise AssertionError('accepted invalid MainPID '+repr(pid))
+print(json.dumps({'passed':True}))
+`;
+  const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, service: fixtureService('/fixture/site/backend/scripts') }), encoding: 'utf8', timeout: 10000 });
   assert.equal(response.status, 0, response.stderr);
   assert.equal(JSON.parse(response.stdout).passed, true);
 });
