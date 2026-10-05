@@ -70,6 +70,14 @@ export function useAdminDraftGuard(value, identity, enabled = true) {
     const owner = lifetime.current;
     return owner.mounted && owner.identity === operation.identity && owner.epoch === operation.epoch && owner.operations[operation.kind] === operation.sequence;
   }, []);
+  // Successful writes belong to the editor lifetime, even if typing continued.
+  const recordId = useCallback(() => lifetime.current.recordId, []);
+  const acceptSave = useCallback((operation, id, payload) => {
+    if (!current(operation)) return false;
+    lifetime.current.recordId = id;
+    establishBaseline(payload);
+    return true;
+  }, [current, establishBaseline]);
   const unchanged = useCallback(operation => current(operation) && latest.current === operation.snapshot, [current]);
   const schedule = useCallback((operation, payload, callback, delay) => {
     const saved = draftSnapshot(payload);
@@ -77,5 +85,5 @@ export function useAdminDraftGuard(value, identity, enabled = true) {
       if (current(operation) && latest.current === saved) callback();
     }, delay);
   }, [current]);
-  return { routeKey, dirty, establishBaseline, begin, current, unchanged, schedule };
+  return { routeKey, dirty, establishBaseline, begin, current, unchanged, schedule, recordId, acceptSave };
 }

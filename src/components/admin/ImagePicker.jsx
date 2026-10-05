@@ -29,6 +29,8 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
   const [preview, setPreview] = useState(null);
   const fileInputRef = useRef(null);
+  const pickerRef = useRef(null);
+  const returnFocusRef = useRef(null);
   const baseUrl = import.meta.env.VITE_POCKETBASE_URL?.replace(/\/$/, "") || "";
 
   const displayLabel = label || t("admin.imagePicker.defaultLabel");
@@ -99,7 +101,11 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
   };
 
   // Handle select from library
-  const handleSelectFromLibrary = (mediaId) => {
+  const handleSelectFromLibrary = (mediaId, record) => {
+    // Selection replaces the opener with the preview; its stable field is the
+    // deliberate return target, rather than an unrelated page control.
+    returnFocusRef.current = pickerRef.current;
+    if (record?.file) setPreview({ url: `${baseUrl}/api/files/media/${record.id}/${record.file}`, filename: record.file });
     if (onChange) {
       onChange(mediaId);
     }
@@ -114,7 +120,7 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
   };
 
   return (
-    <div>
+    <div ref={pickerRef} tabIndex={-1}>
       <ContentFieldLabel>
         {displayLabel}
       </ContentFieldLabel>
@@ -161,7 +167,7 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
             </ContentPrimaryButton>
             <ContentSecondaryButton
               type="button"
-              onClick={() => setShowMediaLibrary(true)}
+              onClick={(event) => { returnFocusRef.current = event.currentTarget; setShowMediaLibrary(true); }}
               disabled={uploading}
               className="inline-flex items-center gap-2"
             >
@@ -181,6 +187,7 @@ export default function ImagePicker({ value, onChange, previewUrl, label }) {
 
       {/* Media Library Modal */}
       <MediaLibraryModal
+        returnFocusRef={returnFocusRef}
         isOpen={showMediaLibrary}
         onClose={() => setShowMediaLibrary(false)}
         onSelect={handleSelectFromLibrary}
