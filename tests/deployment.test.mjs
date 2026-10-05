@@ -7,7 +7,7 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts, decodeIdentitySupply } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts, dependencyList, dependencyLines, decodeIdentitySupply } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
 const guardBindingNames = ['TCRN_SPAWN_GUARD','TCRN_TASK_OWNER','TCRN_SPAWN_REGISTRY'];
 function guardContext(environment) {
@@ -1406,6 +1406,52 @@ else: raise AssertionError('accepted late PB start drift')
 print(json.dumps({'passed':True,'rawMissingRecordPreserved':True,'kernelAndExitDriftRejected':True}))
 `;
   const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, service: fixtureService('/fixture/backend/scripts') }), encoding: 'utf8', timeout: 10000 });
+  assert.equal(response.status, 0, response.stderr);
+  assert.equal(JSON.parse(response.stdout).passed, true);
+});
+
+test('dependency unit order changed by daemon-reload is normalized while membership drift is rejected', () => {
+  const approved = '-.mount system.slice sysinit.target', reloaded = 'sysinit.target -.mount system.slice';
+  const unit = requires => fixtureService('/fixture/site/backend/scripts', 'mcsm-proxy').replace('Requires=', 'Requires=' + requires);
+  assert.equal(dependencyList(reloaded), dependencyList(approved));
+  assert.deepEqual(serviceFacts(unit(reloaded)).configuration, serviceFacts(unit(approved)).configuration);
+  for (const drift of ['-.mount system.slice', approved + ' network.target', '-.mount system.slice other.target']) assert.notDeepEqual(serviceFacts(unit(drift)).configuration, serviceFacts(unit(approved)).configuration);
+  for (const ambiguous of ['-.mount  system.slice', '-.mount -.mount', ' -.mount', '-.mount ']) assert.throws(() => dependencyList(ambiguous), /Ambiguous unit dependency list/);
+  assert.equal(dependencyLines('Requires=' + reloaded + '\nBindsTo=\nPartOf='), dependencyLines('Requires=' + approved + '\nBindsTo=\nPartOf='));
+  assert.notEqual(dependencyLines('Requires=-.mount system.slice\nBindsTo=\nPartOf='), dependencyLines('Requires=' + approved + '\nBindsTo=\nPartOf='));
+  assert.notEqual(dependencyLines('Requires=' + approved + '\nBindsTo=\nPartOf=velocity.target'), dependencyLines('Requires=' + approved + '\nBindsTo=\nPartOf='));
+  assert.throws(() => dependencyLines('Requires=' + approved + '\nWants=\nPartOf='), /Unknown unit dependency property/);
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  const script = String.raw`import ast,json,sys,types
+request=json.load(sys.stdin); tree=ast.parse(request['child'])
+names={'marker_names','execution_names','service_names','sync_names'}
+nodes=[n for n in tree.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef)) or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in n.targets)]
+ns={}; exec(compile(ast.Module(body=nodes,type_ignores=[]),'<actual finite child>','exec'),ns)
+approved,reloaded=request['approved'],request['reloaded']
+def with_requires(value): return '\n'.join('Requires='+value if line=='Requires=' else line for line in request['service'].splitlines())
+live={'velocity':'Requires='+reloaded+'\nBindsTo=\nPartOf=','mcsm-proxy':with_requires(reloaded)}
+ns['ctl']=lambda args: '\n'.join(line for line in live[args[1]].splitlines() if line.split('=',1)[0] in args[4::2])
+evidence=ns['facts'](dict(line.split('=',1) for line in with_requires(approved).splitlines()))
+ns.update(config={'websiteServices':['mcsm-proxy'],'serviceBindings':{'mcsm-proxy':with_requires(approved)},'velocityServiceBinding':'Requires='+approved+'\nBindsTo=\nPartOf='},r={'serviceEvidence':{'mcsm-proxy':{'configuration':evidence['configuration'],'environment':evidence['environment']}}},result={})
+assert ns['props']('velocity',['Requires','BindsTo','PartOf'])==ns['java_dependencies']()
+assert ns['props']('velocity',['Requires'])['Requires']=='-.mount sysinit.target system.slice'
+assert ns['configured']('mcsm-proxy')['configuration']['Requires']=='-.mount sysinit.target system.slice'
+before=ns['props']('mcsm-proxy',ns['service_names']); live['mcsm-proxy']=with_requires(approved); assert ns['stable_properties'](before,ns['props']('mcsm-proxy',ns['service_names']))
+for drift in ['-.mount system.slice',approved+' network.target']:
+ live['velocity']='Requires='+drift+'\nBindsTo=\nPartOf='; live['mcsm-proxy']=with_requires(drift)
+ assert ns['props']('velocity',['Requires','BindsTo','PartOf'])!=ns['java_dependencies']()
+ assert not ns['stable_properties'](before,ns['props']('mcsm-proxy',ns['service_names']))
+ try: ns['configured']('mcsm-proxy')
+ except RuntimeError: pass
+ else: raise AssertionError('accepted dependency membership drift '+drift)
+live['mcsm-proxy']=with_requires('-.mount -.mount')
+try: ns['props']('mcsm-proxy',ns['service_names'])
+except RuntimeError: pass
+else: raise AssertionError('accepted duplicate dependency unit')
+print(json.dumps({'passed':True}))
+`;
+  const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, approved, reloaded, service: fixtureService('/fixture/site/backend/scripts', 'mcsm-proxy') }), encoding: 'utf8', timeout: 10000 });
   assert.equal(response.status, 0, response.stderr);
   assert.equal(JSON.parse(response.stdout).passed, true);
 });
