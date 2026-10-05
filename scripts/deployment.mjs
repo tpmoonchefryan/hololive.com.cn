@@ -80,7 +80,7 @@ export function serviceFacts(raw) {
     configuration[name] = []; runtime[name] = [];
     let rest = properties[name];
     while (rest) {
-      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0\/0) \}(?: |$)/.exec(rest);
+      const match = /^\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+(?:\/[A-Z0-9+]+)?) \}(?: |$)/.exec(rest);
       check(match && path.isAbsolute(match[1]) && !/[\\"'\t\n]/.test(match[2]), 'Ambiguous service command');
       const argv = match[2].split(' ');
       check(argv.every(Boolean) && /^\[[^\[\]]+\]$/.test(match[4]) && /^\[[^\[\]]+\]$/.test(match[5]) && ['(null)', 'exited', 'killed', 'dumped'].includes(match[7]), 'Ambiguous service argv/runtime');
@@ -710,7 +710,7 @@ def facts(value):
   if name not in execution_names: configuration[name]=dependency_value(name,value[name]); continue
   configuration[name]=[]; runtime[name]=[]; rest=value[name]
   while rest:
-   m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+|0/0) \}(?: |$)',rest)
+   m=re.match(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=(yes|no) ; start_time=([^;{}]+) ; stop_time=([^;{}]+) ; pid=(\d+) ; code=([^;{}]+) ; status=(\d+(?:/[A-Z0-9+]+)?) \}(?: |$)',rest)
    require(m and os.path.isabs(m[1]) and not any(c in m[2] for c in ['\\','"',"'",'\t','\n']),'Ambiguous service command')
    argv=m[2].split(' '); require(all(argv) and re.fullmatch(r'\[[^\[\]]+\]',m[4]) and re.fullmatch(r'\[[^\[\]]+\]',m[5]) and m[7] in ['(null)','exited','killed','dumped'],'Ambiguous service argv/runtime')
    command={'path':m[1],'argv':argv,'ignore_errors':m[3]}; require(command not in configuration[name],'Duplicate service command'); configuration[name].append(command)
@@ -801,9 +801,10 @@ def service_phases(phase):
  result.setdefault('servicePhases',{})[phase]=current
 def stopped(value):
  actual=configured('velocity-sync',value); record=actual['runtime']['ExecStart'][0]; old=facts(result['sync'])['runtime']['ExecStart'][0]
- require(value['ActiveState']=='inactive' and value['MainPID']=='0' and value['ExecMainPID']==result['sync']['MainPID'] and value['ExecMainStartTimestampMonotonic']==result['sync']['ExecMainStartTimestampMonotonic'] and value['NRestarts']==result['sync']['NRestarts'],'Stopped sync marker drift')
+ killed=(value['ExecMainCode'],value['ExecMainStatus'])==('2','9')
+ require((value['ActiveState']=='inactive' or value['ActiveState']=='failed' and killed) and value['MainPID']=='0' and value['ExecMainPID']==result['sync']['MainPID'] and value['ExecMainStartTimestampMonotonic']==result['sync']['ExecMainStartTimestampMonotonic'] and value['NRestarts']==result['sync']['NRestarts'],'Stopped sync marker drift')
  require((value['ExecMainCode'],value['ExecMainStatus']) in [('2','9'),('1','0')] and int(value['ExecMainExitTimestampMonotonic'])>=int(value['ExecMainStartTimestampMonotonic']),'Stopped main exit proof missing')
- known=record['pid']==result['sync']['MainPID'] and (unknown_execution(old) or record['start_time']==old['start_time']) and record['stop_time']!='[n/a]' and (record['code'],record['status']) in [('killed','9'),('exited','0'),('exited','0/0')]
+ known=record['pid']==result['sync']['MainPID'] and (unknown_execution(old) or record['start_time']==old['start_time']) and record['stop_time']!='[n/a]' and (record['code'],record['status']) in [('killed','9'),('killed','9/KILL'),('exited','0'),('exited','0/0')]
  require(known or unknown_execution(record),'ExecStart stopped phase mismatch')
  require(runtime_matches({k:v for k,v in facts(result['sync'])['runtime'].items() if k!='ExecStart'},{k:v for k,v in actual['runtime'].items() if k!='ExecStart'}),'Stopped auxiliary runtime drift')
  require(result.get('killed') and result.get('stopped') and result.get('processes'),'Missing owned stop sequence')
@@ -991,7 +992,8 @@ def private_handler():
   value['absent']=absent; return value
  def check_stopped():
   require(props('pocketbase',['ActiveState','MainPID'])=={'ActiveState':'inactive','MainPID':'0'},'PocketBase not stopped')
-  require(props('velocity-sync',['ActiveState','MainPID'])=={'ActiveState':'inactive','MainPID':'0'},'Sync not stopped')
+  sync=props('velocity-sync',['ActiveState','MainPID','ExecMainCode','ExecMainStatus'])
+  require(sync['MainPID']=='0' and (sync['ActiveState']=='inactive' or sync['ActiveState']=='failed' and (sync['ExecMainCode'],sync['ExecMainStatus'])==('2','9')),'Sync not stopped')
  def current():
   require(identity(r['configFile'])==r['configIdentity'] and digest(private_read(r['configFile']))==r['configSha256'],'Private config replaced')
   require(digest(private_read(manifest))==r['candidateManifestSha256'],'Private candidate replaced')

@@ -1455,3 +1455,53 @@ print(json.dumps({'passed':True}))
   assert.equal(response.status, 0, response.stderr);
   assert.equal(JSON.parse(response.stdout).passed, true);
 });
+
+test('systemd 255 killed/failed stop records are parsed and bound to the owned SIGKILL', () => {
+  const unit = record => fixtureService('/fixture/site/backend/scripts').replace(/start_time=\[fixture-start\] ; stop_time=\[n\/a\] ; pid=200 ; code=\(null\) ; status=0/, record);
+  for (const [code, status] of [['killed', '9/KILL'], ['killed', '15/TERM'], ['dumped', '6/ABRT'], ['exited', '0'], ['exited', '1'], ['(null)', '0/0']]) {
+    const facts = serviceFacts(unit(`start_time=[fixture-start] ; stop_time=[fixture-stop] ; pid=200 ; code=${code} ; status=${status}`));
+    assert.deepEqual([facts.runtime.ExecStart[0].code, facts.runtime.ExecStart[0].status], [code, status]);
+  }
+  for (const status of ['9/kill', '/KILL', 'KILL', '9/', '9/KILL/X']) assert.throws(() => serviceFacts(unit(`start_time=[fixture-start] ; stop_time=[fixture-stop] ; pid=200 ; code=killed ; status=${status}`)), /Ambiguous service command/);
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  const nested = /\n( def check_stopped\(\):\n(?:  .*\n)+)/u.exec(child)?.[1]; assert.ok(nested);
+  const script = String.raw`import ast,json,sys,types,textwrap
+request=json.load(sys.stdin); tree=ast.parse(request['child'])
+names={'marker_names','execution_names','service_names','sync_names'}
+nodes=[n for n in tree.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef)) or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in n.targets)]
+ns={}; exec(compile(ast.Module(body=nodes,type_ignores=[]),'<actual finite child>','exec'),ns)
+running=dict(line.split('=',1) for line in request['service'].splitlines())
+running.update(MainPID='200',ExecMainPID='200',ExecMainCode='0',ExecMainStatus='0',ExecMainStartTimestampMonotonic='1000000',ExecMainExitTimestampMonotonic='0',InvocationID='a'*32,NRestarts='0',ActiveState='active',ControlGroup='/fixture.service')
+running['ExecStart']=running['ExecStart'].replace('start_time=[fixture-start]','start_time=[n/a]').replace('pid=200','pid=0').replace('status=0','status=0/0')
+def read(p): raise FileNotFoundError(p)
+ns.update(config={},read=read,group_path=lambda g:'/fixture-group',members=lambda g:[],os=types.SimpleNamespace(path=types.SimpleNamespace(exists=lambda p:False,isabs=lambda p:p.startswith('/'),realpath=lambda p:p)))
+ns['configured']=lambda unit,v:ns['facts'](v); ns['result']={'sync':running,'killed':True,'stopped':True,'processes':[[200,'100']]}
+killed=dict(running,ActiveState='failed',MainPID='0',ExecMainCode='2',ExecMainStatus='9',ExecMainExitTimestampMonotonic='2000000')
+killed['ExecStart']=running['ExecStart'].replace('start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0','start_time=[fixture-start] ; stop_time=[fixture-stop] ; pid=200 ; code=killed ; status=9/KILL')
+ns['stopped'](killed); ns['stopped'](dict(killed,ActiveState='inactive'))
+for key,wrong in [('ExecMainStatus','15'),('ExecMainCode','1'),('MainPID','201'),('ActiveState','active'),('ActiveState','deactivating')]:
+ try: ns['stopped'](dict(killed,**{key:wrong}))
+ except RuntimeError: pass
+ else: raise AssertionError('accepted stopped drift '+key)
+for record in ['code=killed ; status=15/TERM','code=exited ; status=1','code=killed ; status=9/TERM']:
+ bad=dict(killed,ExecStart=killed['ExecStart'].replace('code=killed ; status=9/KILL',record))
+ try: ns['stopped'](bad)
+ except RuntimeError: pass
+ else: raise AssertionError('accepted stopped record '+record)
+units={'pocketbase':{'ActiveState':'inactive','MainPID':'0'},'velocity-sync':{'ActiveState':'failed','MainPID':'0','ExecMainCode':'2','ExecMainStatus':'9'}}
+local={'require':ns['require'],'props':lambda unit,names:{k:units[unit][k] for k in names}}
+exec(textwrap.dedent(request['nested']),local); local['check_stopped']()
+for unit,key,wrong in [('velocity-sync','ExecMainStatus','15'),('velocity-sync','ExecMainCode','1'),('velocity-sync','MainPID','201'),('pocketbase','ActiveState','failed')]:
+ saved=units[unit][key]; units[unit][key]=wrong
+ try: local['check_stopped']()
+ except RuntimeError: pass
+ else: raise AssertionError('accepted unstopped '+unit+' '+key)
+ units[unit][key]=saved
+print(json.dumps({'passed':True}))
+`;
+  const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, nested, service: fixtureService('/fixture/backend/scripts') }), encoding: 'utf8', timeout: 10000 });
+  assert.equal(response.status, 0, response.stderr);
+  assert.equal(JSON.parse(response.stdout).passed, true);
+});
+
