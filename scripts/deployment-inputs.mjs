@@ -93,20 +93,30 @@ export async function supplyInputs(configFile, env = process.env) {
   fs.chmodSync(directory, 0o700);
   const inputs = {};
   for (const [version, digest] of Object.entries(pins)) {
-    const url = `https://github.com/pocketbase/pocketbase/releases/download/v${version}/pocketbase_${version}_linux_amd64.zip`;
-    // GitHub's official release redirect is explicit; no other origin is accepted.
-    let current = url, response;
-    for (let i = 0; i < 4; i++) {
-      const u = new URL(current);
-      require((u.origin === 'https://github.com' && current === url) || u.origin === 'https://release-assets.githubusercontent.com', 'Unreviewed archive origin');
-      response = await fetch(current, { redirect: 'manual', signal: AbortSignal.timeout(30000) });
-      if (![301, 302, 303, 307, 308].includes(response.status)) break;
-      current = new URL(response.headers.get('location'), current).href;
+    let bytes;
+    if (config.testArchiveDirectory) {
+      const root = config.testArchiveDirectory;
+      require(path.isAbsolute(root) && fs.realpathSync(root) === root && fs.lstatSync(root).isDirectory(), 'Invalid pinned archive directory');
+      const archive = path.join(root, version + '.zip');
+      const info = regular(archive);
+      require(info.size > 0 && info.size <= 134217728, 'Invalid pinned archive size');
+      bytes = fs.readFileSync(archive);
+    } else {
+      const url = `https://github.com/pocketbase/pocketbase/releases/download/v${version}/pocketbase_${version}_linux_amd64.zip`;
+      // GitHub's official release redirect is explicit; no other origin is accepted.
+      let current = url, response;
+      for (let i = 0; i < 4; i++) {
+        const u = new URL(current);
+        require((u.origin === 'https://github.com' && current === url) || u.origin === 'https://release-assets.githubusercontent.com', 'Unreviewed archive origin');
+        response = await fetch(current, { redirect: 'manual', signal: AbortSignal.timeout(30000) });
+        if (![301, 302, 303, 307, 308].includes(response.status)) break;
+        current = new URL(response.headers.get('location'), current).href;
+      }
+      require(response?.ok && Number(response.headers.get('content-length')) <= 134217728, 'Archive download failed');
+      const chunks = []; let size = 0;
+      for await (const chunk of response.body) { size += chunk.length; require(size <= 134217728, 'Archive too large'); chunks.push(chunk); }
+      bytes = Buffer.concat(chunks);
     }
-    require(response?.ok && Number(response.headers.get('content-length')) <= 134217728, 'Archive download failed');
-    const chunks = []; let size = 0;
-    for await (const chunk of response.body) { size += chunk.length; require(size <= 134217728, 'Archive too large'); chunks.push(chunk); }
-    const bytes = Buffer.concat(chunks);
     require(digest === pins[version], 'Pin drift'); validateArchive(bytes, version);
     const archive = path.join(directory, version + '.zip'), binary = path.join(directory, 'pocketbase-' + version);
     fs.writeFileSync(archive, bytes, { mode: 0o600, flag: 'wx' });
