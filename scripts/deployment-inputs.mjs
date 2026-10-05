@@ -121,7 +121,7 @@ export async function supplyInputs(configFile, env = process.env) {
     const archive = path.join(directory, version + '.zip'), binary = path.join(directory, 'pocketbase-' + version);
     fs.writeFileSync(archive, bytes, { mode: 0o600, flag: 'wx' });
     execFileSync('/usr/bin/python3', ['-I', '-c', zipExtractor, archive, binary], { stdio: ['ignore', 'pipe', 'pipe'] });
-    require(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim() === 'pocketbase version ' + version, 'Wrong binary version');
+    require(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim() === path.basename(binary) + ' version ' + version, 'Wrong binary version');
     inputs[version === '0.26.5' ? 'PB_TEST_BINARY_026' : 'PB_TEST_BINARY_034'] = binary;
   }
   const source = path.join(config.webRoot, 'backend/pb_migrations', retained.name); regular(source);
