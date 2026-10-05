@@ -15,7 +15,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: self-hosted
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       DEPLOY_REVISION: ${{ github.sha }}
       # External inventoried, approved root-owned config. No guessed host paths.
