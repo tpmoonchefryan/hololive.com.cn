@@ -1314,3 +1314,98 @@ test('unsupported credentials and unit layouts refuse both derived units before 
     const f=deriveSyntheticUnits(t,unit(pair),mcsm);assert.equal(f.result.ok,false);assert.deepEqual(f.result.writes,[]);assert.equal(fs.existsSync(path.join(f.backup,'safe-recovery')),false);
   }
 });
+
+test('runtime identity proof preserves missing history and rejects live/stopped identity drift', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const child = /const finiteRootSource = String.raw`([\s\S]*?)`;/u.exec(source)?.[1]; assert.ok(child);
+  const script = String.raw`import ast,json,sys,types,copy
+request=json.load(sys.stdin); tree=ast.parse(request['child'])
+names={'marker_names','execution_names','service_names','sync_names'}
+nodes=[n for n in tree.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef)) or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in names for t in n.targets)]
+ns={}; exec(compile(ast.Module(body=nodes,type_ignores=[]),'<actual finite child>','exec'),ns)
+value=dict(line.split('=',1) for line in request['service'].splitlines())
+value.update(MainPID='200',ExecMainPID='200',ExecMainCode='0',ExecMainStatus='0',ExecMainStartTimestampMonotonic='1000000',ExecMainExitTimestampMonotonic='0',InvocationID='a'*32,NRestarts='0',ActiveState='active',ControlGroup='/fixture.service')
+def stat(start): return ('200 (node) '+' '.join(['0']*19+[start])).encode()
+files={}; paths={}; group=[]; reads=[]
+def reset():
+ files.clear(); files.update({'/proc/200/stat':stat('100'),'/proc/200/cmdline':b'/usr/bin/node\0sync_velocity.js\0','/proc/200/cgroup':b'0::/fixture.service\n','/proc/200/status':b'Uid: 1000 1000 1000 1000\nGid: 1000 1000 1000 1000\n'})
+ paths.clear(); paths.update({'/proc/200/exe':'/usr/bin/node','/proc/200/cwd':'/fixture/backend/scripts'}); group.clear(); reads.clear()
+def read(p):
+ if p not in files: raise FileNotFoundError(p)
+ if p=='/proc/200/stat' and reads: return reads.pop(0)
+ return files[p]
+ns.update(config={},read=read,os=types.SimpleNamespace(path=types.SimpleNamespace(realpath=lambda p:paths.get(p,p),isabs=lambda p:p.startswith('/'),exists=lambda p:p=='/fixture-group/cgroup.procs')),
+ pwd=types.SimpleNamespace(getpwnam=lambda u:types.SimpleNamespace(pw_uid=1000,pw_gid=1000)),grp=types.SimpleNamespace(getgrnam=lambda g:types.SimpleNamespace(gr_gid=1000)),group_path=lambda g:'/fixture-group',members=lambda g:group)
+ns['configured']=lambda unit,v:ns['facts'](v)
+reset(); original=copy.deepcopy(value); assert ns['running'](value)['pid']=='200'; assert value==original
+missing=copy.deepcopy(value); missing['ExecStart']=missing['ExecStart'].replace('start_time=[fixture-start]','start_time=[n/a]').replace('pid=200','pid=0').replace('status=0','status=0/0')
+assert ns['running'](missing)['pid']=='0'; assert ns['facts'](missing)['runtime']['ExecStart'][0]['start_time']=='[n/a]'
+assert ns['stable_properties'](value,missing); assert not ns['stable_properties'](missing,value)
+for key,wrong in [('MainPID','0'),('ExecMainPID','201'),('ExecMainStartTimestampMonotonic','0'),('InvocationID','bad'),('ExecMainCode','1'),('ActiveState','inactive')]:
+ reset(); bad=dict(missing); bad[key]=wrong
+ try: ns['running'](bad)
+ except (RuntimeError,ValueError): pass
+ else: raise AssertionError('accepted marker drift '+key)
+for key,wrong in [('/proc/200/cmdline',b'/usr/bin/node\0sync_velocity.js\0--other\0'),('/proc/200/cgroup',b'0::/other.service\n'),('/proc/200/status',b'Uid: 0 0 0 0\nGid: 1000 1000 1000 1000\n')]:
+ reset(); files[key]=wrong
+ try: ns['running'](missing)
+ except RuntimeError: pass
+ else: raise AssertionError('accepted process drift '+key)
+for key in ['/proc/200/exe','/proc/200/cwd']:
+ reset(); paths[key]='/other'
+ try: ns['running'](missing)
+ except RuntimeError: pass
+ else: raise AssertionError('accepted path drift')
+reset(); reads.extend([stat('100'),stat('101')])
+try: ns['running'](missing)
+except RuntimeError: pass
+else: raise AssertionError('accepted replaced process')
+reset(); partial=dict(missing); partial['ExecStart']=partial['ExecStart'].replace('pid=0','pid=200')
+try: ns['running'](partial)
+except RuntimeError: pass
+else: raise AssertionError('accepted partial command record')
+stopped=dict(missing); stopped.update(ActiveState='inactive',MainPID='0',ExecMainCode='2',ExecMainStatus='9',ExecMainExitTimestampMonotonic='2000000')
+state={'sync':missing,'killed':True,'stopped':True,'processes':[[200,'100']]}; ns['result']=state
+reset(); del files['/proc/200/stat']; ns['stopped'](stopped)
+for key,wrong in [('ExecMainPID','201'),('ExecMainCode','0'),('ExecMainStatus','15'),('ExecMainExitTimestampMonotonic','999999'),('NRestarts','1')]:
+ bad=dict(stopped); bad[key]=wrong
+ try: ns['stopped'](bad)
+ except RuntimeError: pass
+ else: raise AssertionError('accepted stopped marker drift '+key)
+files['/proc/200/stat']=stat('100')
+try: ns['stopped'](stopped)
+except RuntimeError: pass
+else: raise AssertionError('accepted surviving owned process')
+files['/proc/200/stat']=stat('101'); ns['stopped'](stopped)
+group.append(300)
+try: ns['stopped'](stopped)
+except RuntimeError: pass
+else: raise AssertionError('accepted surviving group')
+group.clear(); state['killed']=False
+try: ns['stopped'](stopped)
+except RuntimeError: pass
+else: raise AssertionError('accepted unowned stop')
+reset(); ns['config']={'websiteServices':['pocketbase']}; ns['result']={}; ns['r']={'serviceEvidence':{'pocketbase':{'runtime':ns['facts'](missing)['runtime']}}}
+current=dict(missing); ns['props']=lambda unit,names:dict(current)
+ns['service_phases']('stop')
+current.update(MainPID='201',ExecMainPID='201',ExecMainStartTimestampMonotonic='2000000',InvocationID='b'*32)
+for key,data in list(files.items()): files[key.replace('/200/','/201/')]=data
+for key,data in list(paths.items()): paths[key.replace('/200/','/201/')]=data
+try: ns['service_phases']('cleanup-sync')
+except RuntimeError: pass
+else: raise AssertionError('accepted unchanged kernel start for new PB')
+files['/proc/201/stat']=stat('200'); current['InvocationID']='a'*32
+try: ns['service_phases']('cleanup-sync')
+except RuntimeError: pass
+else: raise AssertionError('accepted old invocation for new PB')
+current['InvocationID']='b'*32; ns['service_phases']('cleanup-sync'); ns['service_phases']('cleanup-java')
+current['ExecMainStartTimestampMonotonic']='3000000'
+try: ns['service_phases']('cleanup-java')
+except RuntimeError: pass
+else: raise AssertionError('accepted late PB start drift')
+print(json.dumps({'passed':True,'rawMissingRecordPreserved':True,'kernelAndExitDriftRejected':True}))
+`;
+  const response = cp.spawnSync('python3', ['-I', '-c', script], { input: JSON.stringify({ child, service: fixtureService('/fixture/backend/scripts') }), encoding: 'utf8', timeout: 10000 });
+  assert.equal(response.status, 0, response.stderr);
+  assert.equal(JSON.parse(response.stdout).passed, true);
+});

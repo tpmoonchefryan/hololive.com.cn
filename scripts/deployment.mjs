@@ -676,7 +676,7 @@ def props(unit,names):
    typed=json.loads(subprocess.check_output(['/usr/bin/busctl','--system','--json=short','get-property','org.freedesktop.systemd1',object['data'][0],'org.freedesktop.systemd1.Service',name],text=True,timeout=10))
    require(set(typed)=={'type','data'} and typed['type']==('a(sb)' if name=='EnvironmentFiles' else 'a(sasbttttuii)') and typed['data']==[],'Missing property lacks typed empty proof'); rows.append([name,''])
  require(len(rows)==len(names) and set(row[0] for row in rows)==set(names),'Missing typed unit property'); return dict(rows)
-marker_names=['MainPID','ExecMainStartTimestampMonotonic','NRestarts','ActiveState','ControlGroup']
+marker_names=['MainPID','ExecMainPID','ExecMainCode','ExecMainStatus','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','InvocationID','NRestarts','ActiveState','ControlGroup']
 execution_names=['ExecCondition','ExecStartPre','ExecStart','ExecStartPost','ExecReload','ExecStop','ExecStopPost']
 service_names=execution_names+['WorkingDirectory','User','Group','EnvironmentFiles','Requires','BindsTo','PartOf']
 sync_names=marker_names+service_names
@@ -717,15 +717,43 @@ def configured(unit,value=None):
   require(actual['configuration']==approved_configuration,'Root-approved service configuration drift')
  require(actual['configuration']==expected['configuration'] and actual['environment']==expected['environment'],'Configured service/environment drift: '+unit)
  return actual
+def unknown_execution(record):
+ return record['start_time']=='[n/a]' and record['stop_time']=='[n/a]' and record['pid']=='0' and record['code']=='(null)' and record['status'] in ['0','0/0']
+def runtime_matches(before,after):
+ if set(before)!=set(after): return False
+ for name in before:
+  if len(before[name])!=len(after[name]): return False
+  for old,new in zip(before[name],after[name]):
+   same=all(old[k]==new[k] for k in old if k!='status') and (old['status']==new['status'] or old['status'] in ['0','0/0'] and new['status'] in ['0','0/0'])
+   if not same and not unknown_execution(new): return False
+ return True
+def stable_properties(before,after):
+ return {k:v for k,v in before.items() if k not in execution_names}=={k:v for k,v in after.items() if k not in execution_names} and facts(before)['configuration']==facts(after)['configuration'] and runtime_matches(facts(before)['runtime'],facts(after)['runtime'])
+def process_identity(value):
+ pid=value['MainPID']; require(pid.isdigit() and int(pid)>0 and value['ExecMainPID']==pid and int(value['ExecMainStartTimestampMonotonic'])>0,'Main process marker mismatch')
+ require(re.fullmatch('[a-f0-9]{32}',value['InvocationID']) is not None and value['ExecMainCode']=='0' and value['ExecMainStatus']=='0','Running invocation/exit marker mismatch')
+ base='/proc/'+pid; start=read(base+'/stat').decode().rsplit(')',1)[1].split()[19]; require(start.isdigit() and int(start)>0,'Missing process start')
+ command=facts(value)['configuration']['ExecStart'][0]
+ require(os.path.realpath(base+'/exe')==os.path.realpath(command['path']) and os.path.realpath(base+'/cwd')==value['WorkingDirectory'],'Process executable/directory drift')
+ argv=read(base+'/cmdline').split(b'\0'); require(argv[-1]==b'' and argv[:-1]==[x.encode() for x in command['argv']],'Process argv drift')
+ group=value['ControlGroup']; require(group.startswith('/') and group!='/' and '..' not in group.split('/') and '0::'+group in read(base+'/cgroup').decode().splitlines(),'Process service group drift')
+ status=dict(line.split(':',1) for line in read(base+'/status').decode().splitlines() if ':' in line)
+ user=pwd.getpwnam(value['User'] or 'root'); gid=grp.getgrnam(value['Group']).gr_gid if value['Group'] else user.pw_gid
+ require([int(x) for x in status['Uid'].split()]==[user.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[gid]*4,'Process user/group drift')
+ require(read(base+'/stat').decode().rsplit(')',1)[1].split()[19]==start,'Process replaced during observation')
+ return {'pid':pid,'processStart':start,'invocationId':value['InvocationID']}
 def running(value):
  actual=facts(value); record=actual['runtime']['ExecStart'][0]
- require(value['ActiveState']=='active' and int(value['MainPID'])>0 and record['pid']==value['MainPID'] and record['start_time']!='[n/a]' and record['stop_time']=='[n/a]' and record['code']=='(null)' and record['status']=='0','ExecStart running phase mismatch')
+ require(value['ActiveState']=='active','ExecStart running phase mismatch')
+ known=record['pid']==value['MainPID'] and record['start_time']!='[n/a]' and record['stop_time']=='[n/a]' and record['code']=='(null)' and record['status'] in ['0','0/0']
+ require(known or unknown_execution(record),'ExecStart running phase mismatch')
+ # Missing command history remains missing; the live kernel identity is required in both cases.
+ process_identity(value)
  for name in execution_names:
   if name=='ExecStart': continue
   for configured_command,execution in zip(actual['configuration'][name],actual['runtime'][name]):
-   dormant=execution=={'start_time':'[n/a]','stop_time':'[n/a]','pid':'0','code':'(null)','status':'0'}
-   completed=int(execution['pid'])>0 and execution['start_time']!='[n/a]' and execution['stop_time']!='[n/a]' and execution['code']=='exited' and (execution['status']=='0' or configured_command['ignore_errors']=='yes')
-   require(dormant or completed,'Auxiliary command runtime phase mismatch')
+   completed=int(execution['pid'])>0 and execution['start_time']!='[n/a]' and execution['stop_time']!='[n/a]' and execution['code']=='exited' and (execution['status'] in ['0','0/0'] or configured_command['ignore_errors']=='yes')
+   require(unknown_execution(execution) or completed,'Auxiliary command runtime phase mismatch')
  return record
 def service_phases(phase):
  current={}
@@ -740,19 +768,27 @@ def service_phases(phase):
   user=pwd.getpwnam(value['User'] or 'root'); group=grp.getgrnam(value['Group']).gr_gid if value['Group'] else user.pw_gid
   require([int(x) for x in status['Uid'].split()]==[user.pw_uid]*4 and [int(x) for x in status['Gid'].split()]==[group]*4,'Website process user/group drift')
   observed={'properties':value,'processStart':read(base+'/stat').decode().rsplit(')',1)[1].split()[19]}; current[unit]=observed
-  if phase=='stop': require(actual['runtime']==r['serviceEvidence'][unit]['runtime'],'Website runtime drift since preflight')
+  if phase=='stop': require(runtime_matches(r['serviceEvidence'][unit]['runtime'],actual['runtime']),'Website runtime drift since preflight')
   elif unit=='pocketbase' and phase=='cleanup-sync':
    old=result['servicePhases']['stop'][unit]['properties']
-   require(value['ExecMainStartTimestampMonotonic']!=old['ExecMainStartTimestampMonotonic'] and actual['runtime']['ExecStart'][0]['start_time']!=facts(old)['runtime']['ExecStart'][0]['start_time'] and value['NRestarts']==old['NRestarts'],'PocketBase target startup phase drift')
+   require(value['ExecMainStartTimestampMonotonic']!=old['ExecMainStartTimestampMonotonic'] and value['InvocationID']!=old['InvocationID'] and observed['processStart']!=result['servicePhases']['stop'][unit]['processStart'] and value['NRestarts']==old['NRestarts'],'PocketBase target startup phase drift')
   else:
    previous='cleanup-sync' if phase=='cleanup-java' else 'stop'
-   require(observed==result['servicePhases'][previous][unit],'Website runtime/start/group drift')
+   before=result['servicePhases'][previous][unit]; require(observed['processStart']==before['processStart'] and stable_properties(before['properties'],value),'Website runtime/start/group drift')
  result.setdefault('servicePhases',{})[phase]=current
 def stopped(value):
  actual=configured('velocity-sync',value); record=actual['runtime']['ExecStart'][0]; old=facts(result['sync'])['runtime']['ExecStart'][0]
- require(value['ActiveState']=='inactive' and value['MainPID']=='0' and value['ExecMainStartTimestampMonotonic']==result['sync']['ExecMainStartTimestampMonotonic'] and value['NRestarts']==result['sync']['NRestarts'],'Stopped sync marker drift')
- require(record['pid']==old['pid'] and record['start_time']==old['start_time'] and record['stop_time']!='[n/a]' and (record['code'],record['status']) in [('killed','9'),('exited','0')],'ExecStart stopped phase mismatch')
- require(all(actual['runtime'][name]==facts(result['sync'])['runtime'][name] for name in execution_names if name!='ExecStart'),'Stopped auxiliary runtime drift')
+ require(value['ActiveState']=='inactive' and value['MainPID']=='0' and value['ExecMainPID']==result['sync']['MainPID'] and value['ExecMainStartTimestampMonotonic']==result['sync']['ExecMainStartTimestampMonotonic'] and value['NRestarts']==result['sync']['NRestarts'],'Stopped sync marker drift')
+ require((value['ExecMainCode'],value['ExecMainStatus']) in [('2','9'),('1','0')] and int(value['ExecMainExitTimestampMonotonic'])>=int(value['ExecMainStartTimestampMonotonic']),'Stopped main exit proof missing')
+ known=record['pid']==result['sync']['MainPID'] and (unknown_execution(old) or record['start_time']==old['start_time']) and record['stop_time']!='[n/a]' and (record['code'],record['status']) in [('killed','9'),('exited','0'),('exited','0/0')]
+ require(known or unknown_execution(record),'ExecStart stopped phase mismatch')
+ require(runtime_matches({k:v for k,v in facts(result['sync'])['runtime'].items() if k!='ExecStart'},{k:v for k,v in actual['runtime'].items() if k!='ExecStart'}),'Stopped auxiliary runtime drift')
+ require(result.get('killed') and result.get('stopped') and result.get('processes'),'Missing owned stop sequence')
+ for pid,start in result['processes']:
+  file='/proc/'+str(pid)+'/stat'
+  try: current=read(file).decode().rsplit(')',1)[1].split()[19]
+  except FileNotFoundError: continue
+  require(current!=start,'Stopped process remains alive')
  old_group=group_path(result['sync']['ControlGroup']); require(not os.path.exists(old_group+'/cgroup.procs') or not members(old_group),'Old sync group not empty')
  return actual
 
@@ -766,7 +802,7 @@ def unchanged():
  require(digest(read(candidate_manifest))==r['candidateManifestSha256'],'Candidate drift')
 def java():
  value=props('velocity',marker_names); require(value['ActiveState']=='active','Java inactive')
- java_facts=configured('velocity'); require(java_facts['runtime']==r['serviceEvidence']['velocity']['runtime'],'Java command runtime drift')
+ java_facts=configured('velocity'); require(runtime_matches(r['serviceEvidence']['velocity']['runtime'],java_facts['runtime']),'Java command runtime drift')
  require(props('velocity',['Requires','BindsTo','PartOf'])==dict(line.split('=',1) for line in config['velocityServiceBinding'].splitlines()),'Java dependency drift')
  running(dict(value,**props('velocity',service_names)))
  base='/proc/'+value['MainPID']; command=java_facts['configuration']['ExecStart'][0]
@@ -796,7 +832,7 @@ def members(group):
  return sorted(set(values))
 def process_binding(group,code_hash=None):
  value=props('velocity-sync',sync_names)
- require(value==result['sync'],'Sync unit/start/group drift'); configured('velocity-sync',value); running(value)
+ require(stable_properties(result['sync'],value),'Sync unit/start/group drift'); configured('velocity-sync',value); running(value)
  ids=members(group); require(ids==[int(value['MainPID'])],'Unexpected sync member/descendant')
  bindings=[]
  for pid in ids:
@@ -1120,7 +1156,7 @@ def private_handler():
  for unit,before in original.items():
   after=props(unit,service_names); target=dict(before)
   if unit in unit_values: target['EnvironmentFiles']='/etc/default/'+unit+' (ignore_errors=yes)'
-  require(after==target,'Unexpected delivered service property drift')
+  require(stable_properties(target,after),'Unexpected delivered service property drift')
  post=observed(list(dict.fromkeys(whitelist+envs))); require(post=={k:wanted[k] for k in ['configuration','ownership']},'Live private delivery postreadback drift')
  save_seal({'binding':binding,'post':post,'serviceBindings':{u:props(u,service_names) for u in config['websiteServices']}}); return report(dict(wanted,serviceBindings={u:props(u,service_names) for u in config['websiteServices']}))
 if r.get('operation') in ['restore-configuration-ownership','private-configuration','service-credential-material']:
@@ -1156,7 +1192,7 @@ try:
   require(result['sync']['ActiveState']=='active' and result['sync']['WorkingDirectory']==config['webRoot']+'/backend/scripts','Unexpected sync unit')
   require(all(not value for value in props('velocity-sync',['ExecStop','ExecStopPost']).values()),'Unapproved sync stop command')
   configured('velocity-sync',result['sync']); running(result['sync'])
-  require(facts(result['sync'])['runtime']==r['serviceEvidence']['velocity-sync']['runtime'],'Sync runtime drift since preflight')
+  require(runtime_matches(r['serviceEvidence']['velocity-sync']['runtime'],facts(result['sync'])['runtime']),'Sync runtime drift since preflight')
   require(result['java']['ControlGroup']!=result['sync']['ControlGroup'],'Shared Java/sync group')
   group=group_path(result['sync']['ControlGroup']); jgroup=group_path(result['java']['ControlGroup'])
   require(not(group.startswith(jgroup+'/') or jgroup.startswith(group+'/')),'Nested Java/sync group')
@@ -1195,16 +1231,16 @@ try:
   require(read(script)==candidate and b'.velocity-maintenance' in candidate,'Guard-aware installed candidate mismatch')
   current_sync=props('velocity-sync',sync_names); configured('velocity-sync',current_sync)
   if r['operation']=='cleanup-sync':
-   stopped(current_sync); require(current_sync==result['stoppedSync'],'Stopped cleanup phase drift')
+   stopped(current_sync); require(stable_properties(result['stoppedSync'],current_sync),'Stopped cleanup phase drift')
   if r['operation']=='cleanup-java':
    old_sync=result['sync']; running(current_sync)
-   require(all(facts(current_sync)['runtime'][name]==facts(old_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']),'Unexpected new-sync command execution')
+   require(runtime_matches({name:facts(old_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']},{name:facts(current_sync)['runtime'][name] for name in ['ExecReload','ExecStop','ExecStopPost']}),'Unexpected new-sync command execution')
    result['newSync']=current_sync; result['sync']=current_sync
    require(result['sync']['ExecMainStartTimestampMonotonic']!=old_sync['ExecMainStartTimestampMonotonic'] and result['sync']['NRestarts']==old_sync['NRestarts'],'New sync start/restart marker drift')
-   require(facts(result['sync'])['runtime']['ExecStart'][0]['start_time']!=facts(old_sync)['runtime']['ExecStart'][0]['start_time'],'New sync command start drift')
+   require(result['sync']['InvocationID']!=old_sync['InvocationID'],'New sync invocation drift')
    new_group=group_path(result['sync']['ControlGroup']); java_group=group_path(result['java']['ControlGroup'])
    require(new_group!=java_group and not(new_group.startswith(java_group+'/') or java_group.startswith(new_group+'/')),'New sync shares Java group')
-   process_binding(new_group,digest(candidate))
+   require(process_binding(new_group,digest(candidate))!=result['processes'],'New sync kernel start drift')
   remove('velocity-sync' if r['operation']=='cleanup-sync' else 'velocity')
  observations()
  print(json.dumps({'ok':True,'rootEUID':os.geteuid(),'runnerUID':runner.pw_uid,'runnerGID':runner.pw_gid,'state':result}))
