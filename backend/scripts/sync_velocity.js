@@ -67,8 +67,17 @@ async function main() {
         // logInfo(`[Realtime] Settings update detected (${e.action})`);
 
         if (e.action === 'update') {
-            const oldSettings = currentSettings || {};
             const newSettings = e.record;
+
+            // Settings never loaded (guarded start or failed initial read): the previous
+            // restart_trigger is unknown, so run a normal sync that restarts only on a change.
+            if (!currentSettings) {
+                logInfo(`[Realtime] Config change detected before settings were loaded. Syncing without forced restart...`);
+                await queueSync({ reason: "settings update", restartIfChanged: true, forceRestart: false });
+                return;
+            }
+
+            const oldSettings = currentSettings;
 
             // Fields that affect configuration or require action
             const configFields = [
@@ -151,6 +160,7 @@ async function queueSync({ reason = "manual", restartIfChanged = false, forceRes
         },
         snapshot: runtimeFiles.snapshot,
         restore: runtimeFiles.restore,
+        discard: runtimeFiles.discard,
         applyConfig: runtimeFiles.applyConfig,
         applyJar: async settings => {
             const changed = await syncJarIfNeeded(settings);
@@ -165,7 +175,11 @@ async function queueSync({ reason = "manual", restartIfChanged = false, forceRes
         restart: restartService,
         report: updateSyncMeta,
     }, { restartIfChanged, forceRestart }));
-    try { return await syncQueue; }
+    try {
+        const result = await syncQueue;
+        if (result?.snapshotRetained) logError(`[Sync] Synced (${reason}), but .bak snapshots were retained:`, result.snapshotRetained);
+        return result;
+    }
     catch (error) { logError(`[Sync] Failed (${reason}):`, error.message); return { status: "failed", stage: error.stage, error: error.message }; }
 }
 
