@@ -505,6 +505,116 @@ c.commit()`,path.join(live,'backend/pb_data/data.db'),JSON.stringify([path.basen
   } finally {if (pb.service.child.exitCode === null && pb.service.child.signalCode === null) await pb.close();}
 });
 
+// TCRN-HOLOLIVE-CN-INC-005 C1: on a second deploy the raw snapshot already holds the
+// placeholder triple at 0. Only the pinned candidate data migration may turn it into
+// 256/-1/3000; every other change is still refused before any recovery is written.
+const placeholderMigration = '1791254033_data_velocity_replace_placeholder_advanced_zeros.js';
+const placeholderTriple = ['compression_threshold', 'compression_level', 'login_ratelimit'];
+function sqliteWrite(file, source) {
+  const result = cp.spawnSync('python3', ['-c', 'import sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\n' + source + '\nc.commit()\nc.close()', file], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+// Reads a private copy, so a sealed or derived directory never gains -wal/-shm files.
+function velocityRows(directory) {
+  const result = cp.spawnSync('python3', ['-c', `import sqlite3,sys,json,tempfile,shutil,pathlib
+with tempfile.TemporaryDirectory(prefix='hololive-inc005-read-') as temporary:
+ target=pathlib.Path(temporary)/'data.db';shutil.copy2(sys.argv[1],target)
+ wal=pathlib.Path(sys.argv[1]+'-wal')
+ if wal.exists():shutil.copy2(wal,str(target)+'-wal')
+ c=sqlite3.connect(str(target));c.row_factory=sqlite3.Row
+ print(json.dumps([dict(r) for r in c.execute('select * from velocity_settings order by id')]));c.close()`, path.join(directory, 'backend/pb_data/data.db')], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
+}
+const derivedRefusal = table => new RegExp('AssertionError: Derived record/content mismatch: ' + table + '$', 'm');
+for (const [version, binary] of binaries) test(`second deploy rehearsal admits only the pinned placeholder triple 0/0/0 -> 256/-1/3000 ${version}`, async t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live');
+  fs.mkdirSync(bundle); fs.mkdirSync(live); createBundle(bundle);
+  fs.rmSync(path.join(bundle, 'backend/pb_migrations'), { recursive: true }); fs.cpSync(path.join(projectRoot, 'backend/pb_migrations'), path.join(bundle, 'backend/pb_migrations'), { recursive: true });
+  fs.rmSync(path.join(bundle, 'backend/pb_hooks'), { recursive: true }); fs.cpSync(path.join(projectRoot, 'backend/pb_hooks'), path.join(bundle, 'backend/pb_hooks'), { recursive: true });
+  const release = directory => fs.writeFileSync(path.join(directory, 'release.json'), JSON.stringify({ revision, paths: artifactPaths, files: inventory(directory) }));
+  release(bundle);
+  assert.equal(createHash('sha256').update(fs.readFileSync(path.join(bundle, 'backend/pb_migrations', placeholderMigration))).digest('hex'), '4e8c523cd174cbd80a3acf80af643d8493944ccdfef985a5b4470112ad2dad1c');
+  // The previous release applied every migration before the candidate's data migration.
+  const previous = fs.readdirSync(path.join(projectRoot, 'backend/pb_migrations')).filter(name => name.endsWith('.js') && name < placeholderMigration).sort();
+  const pb = await pocketbase(binary, previous);
+  const identities = [];
+  try {
+    for (const role of ['admin', 'service']) {
+      const response = await pb.request('/api/collections/users/records', { token: pb.token, method: 'POST', body: { email: role + '-second@example.invalid', password: 'Disposable-Second-2026!', passwordConfirm: 'Disposable-Second-2026!', verified: true, is_admin: true, service_account: role === 'service' } });
+      assert.equal(response.status, 200, JSON.stringify(response)); identities.push({ id: response.data.id, role });
+    }
+    const listing = await pb.request('/api/collections/velocity_settings/records', { token: pb.token });
+    assert.equal(listing.status, 200); assert.equal(listing.data.items.length, 1);
+    const configured = await pb.request('/api/collections/velocity_settings/records/' + listing.data.items[0].id, { token: pb.token, method: 'PATCH', body: { player_info_forwarding_mode: 'legacy', ping_passthrough: 'ALL', connection_timeout: 4321 } });
+    assert.equal(configured.status, 200, JSON.stringify(configured));
+    // The same three field names in another table: the admission is bound to velocity_settings.
+    const shadow = await pb.request('/api/collections', { token: pb.token, method: 'POST', body: { name: 'velocity_settings_shadow', type: 'base', fields: placeholderTriple.map(name => ({ name, type: 'number' })) } });
+    assert.equal(shadow.status, 200, JSON.stringify(shadow));
+    const shadowRecord = await pb.request('/api/collections/velocity_settings_shadow/records', { token: pb.token, method: 'POST', body: { compression_threshold: 0, compression_level: 0, login_ratelimit: 0 } });
+    assert.equal(shadowRecord.status, 200, JSON.stringify(shadowRecord));
+    await pb.service.close();
+    fs.cpSync(bundle, live, { recursive: true, verbatimSymlinks: true }); fs.rmSync(path.join(live, 'backend/pb_migrations', placeholderMigration));
+    fs.mkdirSync(path.join(live, 'backend/pb_data')); fs.cpSync(path.join(pb.directory, 'data'), path.join(live, 'backend/pb_data'), { recursive: true }); fs.copyFileSync(binary, path.join(live, 'backend/pocketbase'));
+  } finally { await pb.close(); }
+  const raw = velocityRows(live);
+  assert.equal(raw.length, 1); assert.deepEqual(placeholderTriple.map(name => raw[0][name]), [0, 0, 0], 'the raw snapshot already holds the placeholder triple');
+  assert.deepEqual([raw[0].player_info_forwarding_mode, raw[0].ping_passthrough, raw[0].connection_timeout], ['legacy', 'ALL', 4321]);
+  const sealed = name => { const directory = path.join(root, name); fs.mkdirSync(directory); sealSnapshot(directory, live, oldRevision); return directory; };
+  const backup = sealed('backup');
+  // Isolated forward migration of the raw data with the candidate bundle, as the rehearsal does.
+  const migrated = path.join(root, 'migrated'); fs.mkdirSync(path.join(migrated, 'backend'), { recursive: true });
+  fs.cpSync(path.join(live, 'backend/pb_data'), path.join(migrated, 'backend/pb_data'), { recursive: true });
+  const forward = cp.spawnSync(binary, ['migrate', 'up', '--dir', path.join(migrated, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')], { encoding: 'utf8' });
+  assert.equal(forward.status, 0, forward.stdout + forward.stderr); assert.doesNotMatch(forward.stdout + forward.stderr, /Failed|Error:/);
+  const derived = velocityRows(migrated);
+  assert.deepEqual(placeholderTriple.map(name => derived[0][name]), [256, -1, 3000]);
+  for (const key of Object.keys(raw[0])) if (![...placeholderTriple, 'updated'].includes(key)) assert.deepEqual(derived[0][key], raw[0][key], key);
+  // Negatives with the pinned candidate: each is the existing refusal and writes no safe recovery.
+  for (const [name, source, table] of [
+    ['target-value', "c.execute('update velocity_settings set login_ratelimit=2999')", 'velocity_settings'],
+    ['other-field', "c.execute('update velocity_settings set login_ratelimit=0,read_timeout=3000')", 'velocity_settings'],
+    ['other-table', "c.execute('update velocity_settings_shadow set compression_threshold=256,compression_level=-1,login_ratelimit=3000')", 'velocity_settings_shadow'],
+    ['same-row-column', "c.execute(\"update velocity_settings set motd='changed by the candidate'\")", 'velocity_settings'],
+  ]) {
+    const variant = path.join(root, 'derived-' + name); fs.cpSync(migrated, variant, { recursive: true }); sqliteWrite(path.join(variant, 'backend/pb_data/data.db'), source);
+    assert.throws(() => createSafeRecovery(backup, variant, bundle, revision, identities), derivedRefusal(table), name);
+    assert.equal(fs.existsSync(path.join(backup, 'safe-recovery')), false, name + ' wrote no safe recovery');
+  }
+  // The same derived data with a candidate whose migration bytes differ or are missing.
+  for (const [name, change] of [['digest', file => fs.appendFileSync(file, '\n// altered bytes, same effect\n')], ['missing', file => fs.rmSync(file)]]) {
+    const candidate = path.join(root, 'bundle-' + name); fs.cpSync(bundle, candidate, { recursive: true, verbatimSymlinks: true });
+    change(path.join(candidate, 'backend/pb_migrations', placeholderMigration)); release(candidate);
+    const separate = sealed('backup-' + name);
+    assert.throws(() => createSafeRecovery(separate, migrated, candidate, revision, identities), derivedRefusal('velocity_settings'), name);
+    assert.equal(fs.existsSync(path.join(separate, 'safe-recovery')), false, name + ' wrote no safe recovery');
+  }
+  // Positive: the pinned transition derives a safe recovery and verifies again on restore.
+  const safe = createSafeRecovery(backup, migrated, bundle, revision, identities);
+  const restored = path.join(root, 'safe-restored'), proof = restoreSafeRecovery(safe, restored, revision);
+  assert.equal(proof.oldDaemonStarted, false); assert.deepEqual(velocityRows(restored), derived);
+  // The restore side applies the same gate to the sealed candidate files of the safe recovery.
+  for (const [name, change] of [
+    ['target-value', application => sqliteWrite(path.join(application, 'backend/pb_data/data.db'), "c.execute('update velocity_settings set login_ratelimit=2999')")],
+    ['digest', application => fs.appendFileSync(path.join(application, 'backend/pb_migrations', placeholderMigration), '\n// altered bytes, same effect\n')],
+    ['missing', application => fs.rmSync(path.join(application, 'backend/pb_migrations', placeholderMigration))],
+  ]) {
+    const copy = path.join(root, 'forged-' + name);
+    fs.cpSync(backup, copy, { recursive: true, verbatimSymlinks: true, filter: source => source !== path.join(backup, 'candidate-contract-rehearsal') });
+    const forged = path.join(copy, 'safe-recovery'); change(path.join(forged, 'application'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(forged, 'backup.json')));
+    manifest.application = inventory(path.join(forged, 'application'), manifest.present);
+    manifest.candidateFiles = manifest.application.filter(item => !item.path.startsWith('backend/pb_data') && item.path !== 'backend/pocketbase');
+    manifest.snapshotId = snapshotIdentity(manifest);
+    manifest.recoveryId = createHash('sha256').update(JSON.stringify({ snapshotId: manifest.snapshotId, sourceSnapshotId: manifest.sourceSnapshotId, identities: manifest.identities, candidateFiles: manifest.candidateFiles })).digest('hex');
+    fs.writeFileSync(path.join(forged, 'backup.json'), JSON.stringify(manifest));
+    const expectationFile = path.join(copy, 'expected-recovery-contract.json'), expectation = JSON.parse(fs.readFileSync(expectationFile));
+    expectation.candidateFiles = manifest.candidateFiles; fs.writeFileSync(expectationFile, JSON.stringify(expectation));
+    const destination = path.join(root, 'forged-restored-' + name);
+    assert.throws(() => restoreSafeRecovery(forged, destination, revision), derivedRefusal('velocity_settings'), name);
+    assert.equal(fs.existsSync(destination), false, name + ' restored nothing');
+  }
+});
+
 test('productionAdapter mixed preflight/backup/rehearsal/install uses actual files and PB commands', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async t => productionFixture(t, async f => {
   const pb=await pocketbase(binaries[0][1]);
   let commandOverride=cp.execFileSync;

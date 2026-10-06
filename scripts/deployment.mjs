@@ -534,7 +534,16 @@ for item in json.loads(sys.argv[2]):
 print('verified')`;
   check(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db'), JSON.stringify(identities)]) === 'verified', 'Recovery security failed');
 }
-function verifyDerivedData(rawDirectory, migratedDirectory, identities) {
+// TCRN-HOLOLIVE-CN-INC-005 C1: the one derived-data change a rehearsal admits.
+// The candidate's data migration replaces the placeholder (0, 0, 0) that
+// 1789999999 left in velocity_settings' advanced triple with (256, -1, 3000).
+// It is admitted only while the candidate carries exactly these migration bytes;
+// every other column of that row, every other row and every other table is
+// still compared unchanged.
+const placeholderMigration = 'backend/pb_migrations/1791254033_data_velocity_replace_placeholder_advanced_zeros.js';
+const placeholderMigrationDigest = '4e8c523cd174cbd80a3acf80af643d8493944ccdfef985a5b4470112ad2dad1c';
+function verifyDerivedData(rawDirectory, migratedDirectory, identities, candidateFiles) {
+  const placeholder = Array.isArray(candidateFiles) && candidateFiles.some(item => item?.path === placeholderMigration && item.sha256 === placeholderMigrationDigest && item.link === undefined && !item.directory);
   const script = `import sqlite3,sys,json
 import tempfile,shutil,pathlib,contextlib,atexit
 stack=contextlib.ExitStack();atexit.register(stack.close)
@@ -547,6 +556,8 @@ def observed(file):
 old=observed(sys.argv[1])
 new=observed(sys.argv[2])
 approved={item['id']:item['role'] for item in json.loads(sys.argv[3])}
+placeholder=sys.argv[4]=='placeholder'
+triple=('compression_threshold','compression_level','login_ratelimit')
 for (table,) in old.execute("select name from sqlite_master where type='table' and name not in ('_migrations','_collections','_params') and name not like 'sqlite_%'"):
  quote=lambda x:'"'+x.replace('"','""')+'"'
  before=[r[1] for r in old.execute('pragma table_info('+quote(table)+')')]
@@ -569,9 +580,16 @@ for (table,) in old.execute("select name from sqlite_master where type='table' a
   for key,role in approved.items():
    row=new.execute('select is_admin,service_account from users where id=?',(key,)).fetchone()
    assert row and bool(row[0]) and bool(row[1])==(role=='service'),'Recovery identity role mismatch'
+ if placeholder and table=='velocity_settings' and 'id' in fields and all(f in fields for f in triple):
+  # Only a row whose original triple is exactly (0,0,0) and whose derived triple is exactly
+  # (256,-1,3000) gets its original triple back; all of its other columns stay compared below.
+  index=fields.index('id');slots=[fields.index(f) for f in triple]
+  exact=lambda row,values:all(type(row[s]) in (int,float) and row[s]==v for s,v in zip(slots,values))
+  zeros={row[index]:row for row in original if exact(row,(0,0,0))}
+  derived=[tuple(zeros[row[index]][i] if i in slots else value for i,value in enumerate(row)) if row[index] in zeros and exact(row,(256,-1,3000)) else row for row in derived]
  assert normalize(original)==normalize(derived),'Derived record/content mismatch: '+table
 print('verified')`;
-  check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? [])]) === 'verified', 'Derived source mismatch');
+  check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? []), placeholder ? 'placeholder' : 'none']) === 'verified', 'Derived source mismatch');
   const names = ['backend/pb_data/storage'];
   const raw = names.filter(name => fs.existsSync(path.join(rawDirectory, name)));
   check(JSON.stringify(inventory(rawDirectory, raw)) === JSON.stringify(inventory(migratedDirectory, raw)), 'Derived media mismatch');
@@ -625,7 +643,7 @@ export function createSafeRecovery(backup, migrated, bundle, revision, identitie
     check(!fs.existsSync(path.join(backup, 'safe-recovery')), 'Missing original identities permission binding');
     fs.writeFileSync(expectationFile, JSON.stringify(expectation, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   }
-  verifyDerivedData(path.join(backup, 'application'), migrated, expectation.identities);
+  verifyDerivedData(path.join(backup, 'application'), migrated, expectation.identities, expectation.candidateFiles);
   verifyRecoverySecurity(migrated, expectation.identities);
   verifyRecoveryContract(migrated, expectedContract, raw.contract);
   const safe = path.join(backup, 'safe-recovery');
@@ -656,7 +674,7 @@ export function restoreSafeRecovery(safe, destination, revision, privateIO) {
   const expectation = json(path.join(path.dirname(safe), 'expected-recovery-contract.json'));
   check(source.snapshotId === manifest.sourceSnapshotId && expectation.sourceSnapshotId === source.snapshotId && expectation.revision === revision && JSON.stringify(expectation.candidateFiles) === JSON.stringify(manifest.candidateFiles) && JSON.stringify(expectation.expectedContract) === JSON.stringify(manifest.expectedContract), 'Recovery expected contract binding mismatch');
   check(Array.isArray(expectation.identities) && JSON.stringify(expectation.identities) === JSON.stringify(manifest.identities), 'Recovery original identities permission binding mismatch');
-  verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), expectation.identities);
+  verifyDerivedData(path.join(path.dirname(safe), 'application'), path.join(safe, 'application'), expectation.identities, manifest.candidateFiles);
   verifyRecoveryContract(path.join(safe, 'application'), expectation.expectedContract, source.contract);
   verifyRecoverySecurity(path.join(safe, 'application'), expectation.identities);
   const result = restoreBackup(safe, destination, privateIO);
