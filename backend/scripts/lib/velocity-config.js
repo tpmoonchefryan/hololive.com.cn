@@ -109,7 +109,7 @@ export function prepareVelocityConfig(settings, servers, forcedHosts = []) {
     const targets = Array.isArray(host.server) ? host.server : [host.server];
     if (!host.hostname || !targets.length || targets.some(id => !servers.some(server => server.id === id))) throw new Error("Invalid forced host target");
   }
-  for (const [field, min, max] of [["bind_port", 1, 65535], ["query_port", 1, 65535], ["max_players", 0, 2147483647], ["compression_level", -1, 9], ["compression_threshold", -1, 2147483647], ["login_ratelimit", 0, 2147483647], ["connection_timeout", 1, 2147483647], ["read_timeout", 1, 2147483647], ["command_rate_limit", 0, 2147483647], ["kick_after_rate_limited_commands", 0, 2147483647], ["tab_complete_rate_limit", 0, 2147483647], ["kick_after_rate_limited_tab_completes", 0, 2147483647]]) {
+  for (const [field, min, max] of [["bind_port", 1, 65535], ["query_port", 1, 65535], ["max_players", 0, 2147483647], ["compression_level", -1, 9], ["compression_threshold", -1, 2147483647], ["login_ratelimit", 0, 2147483647], ["connection_timeout", 0, 2147483647], ["read_timeout", 0, 2147483647], ["command_rate_limit", 0, 2147483647], ["kick_after_rate_limited_commands", 0, 2147483647], ["tab_complete_rate_limit", 0, 2147483647], ["kick_after_rate_limited_tab_completes", 0, 2147483647]]) {
     if (settings[field] != null && settings[field] !== "" && (!Number.isInteger(Number(settings[field])) || Number(settings[field]) < min || Number(settings[field]) > max)) throw new Error(`Invalid ${field}`);
   }
   if (!["none", "legacy", "bungeeguard", "modern"].includes(settings.player_info_forwarding_mode || "modern")) throw new Error("Invalid forwarding mode");

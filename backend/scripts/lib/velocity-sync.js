@@ -7,7 +7,7 @@ export async function runVelocitySync(adapter, { restartIfChanged = false, force
   // The persistent deployment guard survives daemon startup and realtime events.
   if (await adapter.isProtected?.()) return { status: "protected", restarted: false };
   let stage = "read";
-  let snapshot;
+  let snapshot, result;
   try {
     const { settings, servers, forcedHosts } = await adapter.read();
     stage = "generate";
@@ -25,9 +25,8 @@ export async function runVelocitySync(adapter, { restartIfChanged = false, force
     const restarted = forceRestart || (restartIfChanged && (configChanged || jarChanged || secretChanged));
     if (restarted) await adapter.restart();
     stage = "metadata";
-    const result = { status: configChanged || jarChanged || secretChanged ? "applied" : "unchanged", configChanged, jarChanged, secretChanged, restarted, appliedHash: hash };
+    result = { status: configChanged || jarChanged || secretChanged ? "applied" : "unchanged", configChanged, jarChanged, secretChanged, restarted, appliedHash: hash };
     await adapter.report("ok", "", hash);
-    return result;
   } catch (cause) {
     const error = new Error(`Velocity ${stage}: ${cause.message}`, { cause });
     error.stage = stage;
@@ -39,6 +38,11 @@ export async function runVelocitySync(adapter, { restartIfChanged = false, force
     catch (reportError) { error.message += `; error metadata failed: ${reportError.message}`; }
     throw error;
   }
+  // Only a fully successful sync discards the .bak snapshot; every failure above keeps it.
+  // A cleanup failure is returned with the result and never rolls back the applied files.
+  try { await adapter.discard?.(snapshot); }
+  catch (cleanupError) { result.snapshotRetained = cleanupError.message; }
+  return result;
 }
 
 /** Production and tests share the same file snapshot, atomic swap and recovery. */
@@ -75,6 +79,14 @@ export function createVelocityFiles({ fs, directory, join, ownership = async () 
         } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new Error('Unable to restore all Velocity files; .bak snapshots retained', { cause: errors[0] });
+    },
+    discard: async () => {
+      const errors = [];
+      for (const name of names) {
+        try { await fs.rm(`${join(directory, name)}.bak`, { force: true }); }
+        catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new Error('Unable to remove all Velocity .bak snapshots', { cause: errors[0] });
     },
     applyConfig: async content => {
       const target = join(directory, 'velocity.toml');
