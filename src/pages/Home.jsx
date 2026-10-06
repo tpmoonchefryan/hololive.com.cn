@@ -145,7 +145,10 @@ export default function Home() {
   const { t } = useTranslation("home");
   const { sections, loading, error, retry } = useCmsSections();
   if (loading || error || sections.length === 0) {
+    // Fixed dark backdrop, like the hero background: the transparent white-text navbar stays
+    // readable when an announcement pushes this screen down.
     return <main className="min-h-screen flex items-center justify-center bg-slate-950 px-6 pt-24 text-white">
+      <div aria-hidden="true" className="fixed inset-0 -z-10 bg-slate-950" />
       <div className="text-center" role={error ? "alert" : "status"} aria-live="polite">
         <p className="text-xl font-semibold">{t(loading ? "loading" : error ? "error" : "empty")}</p>
         {error && <button type="button" onClick={retry} className="mt-5 rounded-lg bg-blue-700 px-5 py-3 font-semibold text-white hover:bg-blue-800">{t("retry")}</button>}

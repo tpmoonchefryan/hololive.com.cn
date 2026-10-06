@@ -119,3 +119,94 @@ test('shell labels resolve in all locales with the existing namespace separator'
   }
   assert.equal(i18n.options.nsSeparator, '.');
 });
+
+test('public navbar restores the pre-release glass styles and keeps the accessible controls', () => {
+  const source = read('src/components/layout/Navbar.jsx');
+  const navClass = source.match(/<nav className=\{`([^`]*)`\}>/)?.[1] || '';
+  assert.match(navClass, /isStandardPage\s*\?\s*"bg-white\/80 backdrop-blur-md shadow-sm"\s*:\s*"bg-transparent"/);
+  assert.match(navClass, /transition-\[background-color,box-shadow\] duration-300/);
+  assert.match(navClass, /\bh-14 md:h-16\b/);
+  assert.doesNotMatch(navClass, /bg-white\/95|\bpy-2\b|md:py-3/);
+  for (const route of ['/docs/', '/403', '/404', '/500', '/503', '/418']) assert.ok(source.includes(`location.pathname.startsWith("${route}")`), route);
+  assert.ok(source.includes('location.pathname === "/docs" ||'));
+  assert.match(source, /isStandardPage\s*\?\s*"text-slate-900"\s*:\s*"text-white drop-shadow-md"/);
+  assert.match(source, /className=\{isStandardPage \? "" : "drop-shadow-md"\}/);
+  assert.match(source, /<motion\.div key=\{l\.to\} whileHover=\{\{ scale: 1\.12 \}\} whileTap=\{\{ scale: 0\.96 \}\}>/);
+  assert.match(source, /"text-white drop-shadow-md hover:text-\[var\(--color-brand-blue\)\]\/95"/);
+  assert.match(source, /"transition-colors text-sm font-bold px-2 py-1 rounded-md "/);
+  assert.match(source, /"bg-\[#8ed1fc\] text-white"/);
+  assert.match(source, /"text-white hover:bg-\[#8ed1fc\]\/80"/);
+  assert.match(source, /<div className="flex gap-2 ml-5 select-none">/);
+  const menu = source.match(/<motion\.div id="public-mobile-menu"[^>]*?className=\{`([^`]*)`\}>/)?.[1] || '';
+  assert.match(menu, /backdrop-blur-lg shadow-lg border-b z-50/);
+  assert.match(menu, /isStandardPage \? "bg-white\/95" : "bg-\[var\(--color-brand-blue\)\]\/95"/);
+  assert.match(source, /<AnimatePresence>\s*\{showMenu && \(\s*<motion\.div id="public-mobile-menu" initial=\{\{y:-40,opacity:0\}\} animate=\{\{y:0,opacity:1\}\} exit=\{\{y:-40,opacity:0\}\}/);
+  // The 06f198f single opaque style is gone: no constant white bar, slate hover or solid white menu.
+  assert.doesNotMatch(source, /hover:bg-slate-100/);
+  assert.doesNotMatch(source, /(^|[\s"'`])bg-white(?=[\s"'`])/m);
+  assert.equal((source.match(/bg-white\/95/g) || []).length, 1, 'only the standard-page mobile menu uses bg-white/95');
+  // STORY-008 accessibility is kept.
+  assert.match(source, /aria-expanded=\{showMenu\}/);
+  assert.match(source, /aria-controls="public-mobile-menu"/);
+  assert.equal((source.match(/aria-current=\{location\.pathname===l\.to \? "page" : undefined\}/g) || []).length, 2);
+  assert.match(source, /className="md:hidden p-2 rounded focus-visible:outline-2 focus-visible:outline-blue-600"/);
+  assert.match(source, /aria-label=\{t\(showMenu \? "navbar\.closeMenu" : "navbar\.openMenu"\)\}/);
+  assert.equal((source.match(/aria-label=\{t\(`languageNames\.\$\{l\.code\}`\)\}/g) || []).length, 2);
+  assert.doesNotMatch(source, /\{ ns: /);
+});
+
+test('home loading, empty and error screens keep a fixed dark backdrop behind the transparent navbar', () => {
+  const source = read('src/pages/Home.jsx');
+  const start = source.indexOf('if (loading || error || sections.length === 0)');
+  const screen = source.slice(start, source.indexOf('return <HomeContent', start));
+  assert.ok(start > 0 && screen.length > 0);
+  assert.match(screen, /<main className="min-h-screen flex items-center justify-center bg-slate-950 [^"]*">\s*(?:\/\/[^\n]*\n\s*)*<div aria-hidden="true" className="fixed inset-0 -z-10 bg-slate-950" \/>/);
+  assert.match(read('src/components/announcement/GlobalBanner.jsx'), /sticky top-\[56px\] md:top-\[64px\] mt-\[56px\] md:mt-\[64px\]/);
+});
+
+test('a failed chunk preload reloads once, then lets the error surface within 10 s', async () => {
+  const { reloadOnceOnPreloadError } = await import('../src/lib/chunkReload.js');
+  const store = new Map();
+  let reloads = 0;
+  const win = Object.assign(new EventTarget(), {
+    sessionStorage: { getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)) },
+    location: { reload: () => { reloads += 1; } },
+  });
+  let clock;
+  win.addEventListener('vite:preloadError', (event) => reloadOnceOnPreloadError(event, win, clock));
+  const fire = (now) => { clock = now; const event = new Event('vite:preloadError', { cancelable: true }); win.dispatchEvent(event); return event.defaultPrevented; };
+  assert.equal(fire(1_000_000), true);
+  assert.equal(reloads, 1);
+  assert.equal(fire(1_000_000 + 9_999), false, 'second failure within 10 s surfaces');
+  assert.equal(reloads, 1);
+  assert.equal(fire(1_000_000 + 10_000), true, 'a later release may reload again');
+  assert.equal(reloads, 2);
+  // Default clock: two immediate failures reload once.
+  store.clear();
+  const first = new Event('vite:preloadError', { cancelable: true }); reloadOnceOnPreloadError(first, win);
+  const second = new Event('vite:preloadError', { cancelable: true }); reloadOnceOnPreloadError(second, win);
+  assert.deepEqual([first.defaultPrevented, second.defaultPrevented, reloads], [true, false, 3]);
+});
+
+test('unavailable sessionStorage never reloads or swallows the preload error', async () => {
+  const { reloadOnceOnPreloadError } = await import('../src/lib/chunkReload.js');
+  const reload = () => assert.fail('reloaded without a usable loop guard');
+  const denied = () => { throw Object.assign(new Error('The document is sandboxed'), { name: 'SecurityError' }); };
+  for (const win of [
+    { get sessionStorage() { return denied(); }, location: { reload } },
+    { sessionStorage: { getItem: denied, setItem() {} }, location: { reload } },
+    { sessionStorage: { getItem: () => null, setItem: denied }, location: { reload } },
+    { sessionStorage: null, location: { reload } },
+  ]) {
+    const event = new Event('vite:preloadError', { cancelable: true });
+    assert.equal(reloadOnceOnPreloadError(event, win, 1_000_000), false);
+    assert.equal(event.defaultPrevented, false);
+  }
+});
+
+test('the entry registers the preload guard before the first render', () => {
+  const main = read('src/main.jsx');
+  assert.match(main, /import \{ reloadOnceOnPreloadError \} from "\.\/lib\/chunkReload";/);
+  const register = main.indexOf('window.addEventListener("vite:preloadError", reloadOnceOnPreloadError);');
+  assert.ok(register > 0 && register < main.indexOf('createRoot(document.getElementById("root"))'));
+});

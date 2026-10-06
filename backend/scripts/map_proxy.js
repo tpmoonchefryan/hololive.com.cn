@@ -110,13 +110,19 @@ const getAllowedOrigins = async () => {
   return origins;
 };
 
+// Never Cookie or Authorization: the map receives no site credentials.
+const FORWARDED_REQUEST_HEADERS = [
+  "accept",
+  "accept-language",
+  "cache-control",
+  "user-agent",
+];
+// The sandboxed map frame has an opaque origin, so its requests are cross-origin. A preflight may
+// list the forwarded headers and jQuery's X-Requested-With, which is accepted and not forwarded.
+const PREFLIGHT_ALLOWED_HEADERS = [...FORWARDED_REQUEST_HEADERS, "x-requested-with"].join(", ");
+
 const filterForwardHeaders = (headers) => {
-  const allowed = new Set([
-    "accept",
-    "accept-language",
-    "cache-control",
-    "user-agent",
-  ]);
+  const allowed = new Set(FORWARDED_REQUEST_HEADERS);
 
   const forwarded = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -168,6 +174,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
+        "Access-Control-Allow-Headers": PREFLIGHT_ALLOWED_HEADERS,
       });
       res.end();
       return;

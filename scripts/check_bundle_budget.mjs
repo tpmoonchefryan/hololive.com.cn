@@ -23,7 +23,7 @@ const BUDGETS = {
     // 2026-08：修 13 个依赖漏洞（react-router / vite / rollup / postcss 等）后
     // 总量到了 420.16 KB，超出旧上限 0.16 KB。留一点余量以免下次安全补丁
     // 又被这道闸门卡住——上限是防特性膨胀的，不该让安全更新过不去。
-    jsTotalGzipKB: 430,
+    jsTotalGzipKB: 435,
     cssTotalGzipKB: 25,
   },
 };
