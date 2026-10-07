@@ -13,7 +13,104 @@ const units = ['pocketbase', 'velocity-sync', 'map-proxy', 'mcsm-proxy', 'pb-adm
 const sha = value => createHash('sha256').update(value).digest('hex');
 const refuse = message => { throw new Error(message); };
 const check = (condition, message) => { if (!condition) refuse(message); };
-const command = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+// INC-006 CC-2: every host call is bounded, so a hang becomes an error that reaches the failure
+// record instead of a wait for the 60-minute job kill (which skips deploy()'s catch/finally).
+// Limits are per call class and far above every duration in the run logs: the whole run-103
+// deploy step took about 2 min; in run 105 backup took 13 s, rehearse 45 s, baseline 5 s,
+// install 12 s, migrate under 1 s, and every PocketBase stop finished within 1 s.
+export const hostCommandTimeouts = Object.freeze({
+  // systemctl show/is-active, busctl, ss, pocketbase --version: sub-second in every log.
+  query: 60000,
+  // sudo systemctl stop/start/restart: a stop may take TimeoutStopSec (90 s for PocketBase) and a
+  // restart may add the default 90 s start timeout; 300 s covers both together.
+  serviceControl: 300000,
+  // python3 SQLite reads and copies of pb_data (49.9 MB live): the whole run-105 rehearsal,
+  // several of these plus an isolated migrate, took 45 s.
+  database: 600000,
+  // pocketbase migrate up: under 1 s on production in run 105, inside the 45 s rehearsal on the copy.
+  migrate: 600000,
+});
+const describeCommand = (file, args) => [path.basename(file), ...(path.basename(file).startsWith('python') ? args.slice(0, 1) : args.slice(0, 4))].join(' ');
+const command = (file, args, timeout = hostCommandTimeouts.query) => {
+  try { return execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, killSignal: 'SIGKILL' }).trim(); }
+  catch (error) {
+    // SIGKILL always ends the wait; the plain message names the call and its class limit.
+    if (error?.code === 'ETIMEDOUT') throw new Error(`Host command timed out after ${timeout / 1000} s: ${describeCommand(file, args)}`, { cause: error });
+    throw error;
+  }
+};
+const sleepSync = ms => { if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+const monotonic = () => performance.now();
+const systemClock = Object.freeze({ now: monotonic, sleepSync, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) });
+
+// INC-006 CC-1: bounded reader of origin refs/heads/main. One helper serves the workflow
+// pre-check (`current-main`), the pre-stop and the post-migrate check. Position and meaning are
+// unchanged: only one well-formed answer equal to the revision passes; a different SHA refuses
+// at once, also after earlier transport failures (Owner OD-4).
+export const currentMainPolicy = Object.freeze({
+  maxAttempts: 6,
+  // More than 30 times the normal 0.9 s answer. git has no connect timeout of its own: a stalled
+  // connect waits for the kernel (about 127-134 s on this host), a stalled TLS read 90 s or more.
+  attemptTimeoutMs: 30000,
+  backoffMs: Object.freeze([5000, 10000, 20000, 30000, 30000]),
+  // Owner OD-2: at most 300 s of extra downtime after migrate. No attempt starts that could not
+  // finish before this deadline (measured from the first attempt's start).
+  deadlineMs: 300000,
+});
+// LC_ALL=C keeps git's messages English and classifiable (the runner sets LANG); the low-speed
+// pair makes curl abandon a transfer that stalls below 1000 B/s for 10 s.
+const gitEnvironment = Object.freeze({ GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_HTTP_LOW_SPEED_LIMIT: '1000', GIT_HTTP_LOW_SPEED_TIME: '10' });
+// Checked before the transport wording: these lines also contain "unable to access".
+const originRefusal = /Authentication failed|could not read (?:Username|Password)|terminal prompts disabled|Repository not found|The requested URL returned error: (?:401|403|404)|not a git repository|does not appear to be a git repository/;
+const originTransport = /unable to access|Could not resolve host|Failed to connect|Couldn't connect|Connection (?:timed out|reset|refused)|Operation timed out|GnuTLS|gnutls_handshake|SSL|TLS|certificate verif|early EOF|RPC failed|Empty reply from server|Recv failure|Send failure|transfer closed|HTTP\/2|The requested URL returned error: (?:5\d\d|429)/i;
+const firstLine = text => (String(text ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '').replace(/\/\/[^/@\s]+@/g, '//***@').slice(0, 200);
+function lsRemoteMain({ timeout, cwd }) {
+  try {
+    const stdout = execFileSync('git', ['ls-remote', '--exit-code', 'origin', 'refs/heads/main'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, killSignal: 'SIGKILL', maxBuffer: 65536, env: { ...process.env, ...gitEnvironment } });
+    return { status: 0, signal: null, code: null, stdout: String(stdout), stderr: '' };
+  } catch (error) {
+    return { status: error?.status ?? null, signal: error?.signal ?? null, code: error?.code ?? null, stdout: String(error?.stdout ?? ''), stderr: String(error?.stderr ?? '') };
+  }
+}
+function classifyMainAnswer(result, revision) {
+  if (result.code === 'ETIMEDOUT') return { outcome: 'retry', kind: 'timeout' };
+  if (result.code) return { outcome: 'refuse', kind: 'spawn-error', reason: 'Origin main check could not run: ' + result.code };
+  if (result.status === 0) {
+    const lines = result.stdout.split('\n');
+    if (lines.at(-1) === '') lines.pop();
+    const match = lines.length === 1 ? /^([0-9a-f]{40})\trefs\/heads\/main$/.exec(lines[0]) : null;
+    if (!match) return { outcome: 'refuse', kind: 'malformed', reason: 'Malformed origin main answer' };
+    return match[1] === revision ? { outcome: 'pass', kind: 'equal', answer: match[1] } : { outcome: 'refuse', kind: 'different', answer: match[1], reason: 'Stale main revision' };
+  }
+  if (result.status === 2) return { outcome: 'refuse', kind: 'missing-ref', reason: 'Main ref missing on origin' };
+  if (result.status === 128) {
+    if (originRefusal.test(result.stderr)) return { outcome: 'refuse', kind: 'origin-refused', reason: 'Origin refused the main check (authentication or not found)' };
+    // Owner OD-3: an unknown exit-128 wording is retried within the same budget; it can never
+    // pass, because only a well-formed equal answer passes.
+    return { outcome: 'retry', kind: originTransport.test(result.stderr) ? 'transport' : 'unknown-128' };
+  }
+  // Any other status, or a signal that is not our own timeout, is not a listed retry case.
+  return { outcome: 'refuse', kind: 'unclassified', reason: 'Unclassified origin main check result' };
+}
+export function readCurrentMain(revision, { run = lsRemoteMain, sleep = sleepSync, now = monotonic, policy = currentMainPolicy, cwd } = {}) {
+  check(/^[a-f0-9]{40}$/.test(revision ?? ''), 'Exact main revision required');
+  const attempts = [], start = now();
+  const refuseWith = reason => { const error = new Error(reason); error.currentMain = { revision, attempts }; throw error; };
+  for (let attempt = 1; ; attempt++) {
+    if (attempt > 1) {
+      const wait = policy.backoffMs[Math.min(attempt - 2, policy.backoffMs.length - 1)];
+      if (attempt > policy.maxAttempts || now() - start + wait + policy.attemptTimeoutMs > policy.deadlineMs) {
+        const last = attempts.at(-1);
+        refuseWith(`Latest main unavailable after ${attempts.length} transport failures (last: ${last.timedOut ? 'no answer within ' + policy.attemptTimeoutMs / 1000 + ' s' : last.stderrFirstLine || 'exit ' + last.status})`);
+      }
+      sleep(wait);
+    }
+    const began = now(), result = run({ timeout: policy.attemptTimeoutMs, cwd }), verdict = classifyMainAnswer(result, revision);
+    attempts.push({ attempt, atMs: Math.round(began - start), ms: Math.round(now() - began), status: result.status, signal: result.signal, timedOut: result.code === 'ETIMEDOUT', kind: verdict.kind, outcome: verdict.outcome, ...(verdict.answer ? { answer: verdict.answer } : {}), stderrFirstLine: firstLine(result.stderr) });
+    if (verdict.outcome === 'pass') return { revision, attempts };
+    if (verdict.outcome === 'refuse') refuseWith(verdict.reason);
+  }
+}
 const safeRelative = name => typeof name === 'string' && !path.isAbsolute(name) && !name.split('/').some(p => p === '..' || p === '' || p === '.') && !name.includes('\\');
 const json = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const writeJSON = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
@@ -241,33 +338,95 @@ check(config.serviceBindings && config.websiteServices.every(unit => typeof conf
  */
 export async function deploy(adapter, config, revision, runNumber) {
   const plan = validatePlan(config, revision, runNumber);
-  await adapter.verify();
-  await adapter.lock();
-  let stopped = false, backup;
+  // INC-006 CC-6 (PFP-1): phase bookkeeping only. The adapter calls, their order and their
+  // arguments are unchanged.
+  const progress = { phase: 'verify', completed: [] };
+  const step = async (phase, action) => { progress.phase = phase; const value = await action(); progress.completed.push(phase); return value; };
+  await step('verify', () => adapter.verify());
+  await step('lock', () => adapter.lock());
+  let stopped = false, started = false, backup, outcome = null, failed = null, hasFailed = false;
+  const secondaryErrors = [], describe = error => error?.message ?? String(error);
   try {
-    await adapter.assertCurrent(); // latest main + persistent monotonic run ordering under lock
-    const before = await adapter.velocity();
-    await adapter.stop('velocity-sync'); // old daemon must exit BEFORE guard/migrations
+    await step('assertCurrent:pre-stop', () => adapter.assertCurrent()); // latest main + persistent monotonic run ordering under lock
+    const before = await step('velocity', () => adapter.velocity());
+    await step('stop:velocity-sync', () => adapter.stop('velocity-sync')); // old daemon must exit BEFORE guard/migrations
     stopped = true;
-    await adapter.guard();
-    await adapter.stop('pocketbase');
-    backup = await adapter.backup(); // stopped PB => DB/WAL/media/application match
-    await adapter.rehearse(backup); // private isolated copy, never the live directory
-    await adapter.baseline(backup);
-    await adapter.install();
-    await adapter.migrate();
-    await adapter.assertCurrent();
-    await adapter.start('pocketbase');
-    await adapter.health();
-    for (const unit of config.websiteServices.filter(unit => unit !== 'pocketbase')) await adapter.start(unit);
-    await adapter.assertVelocity(before);
-    await adapter.record({ ...plan, backup, status: 'deployed', velocityProtected: true });
-    return { status: 'deployed', revision, backup };
+    await step('guard', () => adapter.guard());
+    await step('stop:pocketbase', () => adapter.stop('pocketbase'));
+    backup = await step('backup', () => adapter.backup()); // stopped PB => DB/WAL/media/application match
+    await step('rehearse', () => adapter.rehearse(backup)); // private isolated copy, never the live directory
+    await step('baseline', () => adapter.baseline(backup));
+    await step('install', () => adapter.install());
+    await step('migrate', () => adapter.migrate());
+    await step('assertCurrent:post-migrate', () => adapter.assertCurrent());
+    await step('start:pocketbase', () => adapter.start('pocketbase'));
+    await step('health', () => adapter.health());
+    for (const unit of config.websiteServices.filter(unit => unit !== 'pocketbase')) await step('start:' + unit, () => adapter.start(unit));
+    started = true;
+    await step('assertVelocity', () => adapter.assertVelocity(before));
+    await step('record', () => adapter.record({ ...plan, backup, status: 'deployed', velocityProtected: true }));
+    outcome = { status: 'deployed', revision, backup };
   } catch (error) {
-    const maintenance = adapter.maintenance?.();
-    if (stopped || maintenance?.changed || maintenance?.uncertain) await adapter.failure({ status: 'failed', revision, backup: backup ?? null, servicesMayBeStopped: stopped || maintenance?.stopped === true || maintenance?.killed === true || maintenance?.uncertain === true, maintenance: maintenance ?? null, reason: error.message });
-    throw error;
-  } finally { await adapter.unlock(); }
+    hasFailed = true; failed = error;
+    // Nothing on the failure path may replace the reason the run failed; its own errors are
+    // reported after that reason.
+    try {
+      const maintenance = adapter.maintenance?.();
+      if (stopped || maintenance?.changed || maintenance?.uncertain) {
+        // Once every website unit was started again, nothing this run stopped is still stopped.
+        const servicesMayBeStopped = !started && (stopped || maintenance?.stopped === true || maintenance?.killed === true || maintenance?.uncertain === true);
+        await adapter.failure({ status: 'failed', revision, backup: backup ?? null, servicesMayBeStopped, maintenance: maintenance ?? null, reason: describe(error), phase: progress.phase, completedPhases: [...progress.completed], recovery: recoveryPlan({ ...progress, config, maintenance, runNumber }) });
+      }
+    } catch (secondary) { secondaryErrors.push({ step: 'failure', message: describe(secondary) }); }
+  }
+  // The lock is released after success and after every failure past the lock, as before.
+  try { await adapter.unlock(); }
+  catch (secondary) {
+    if (!hasFailed) throw secondary; // after success an unlock failure still fails the run
+    secondaryErrors.push({ step: 'unlock', message: describe(secondary) });
+  }
+  if (hasFailed) {
+    if (secondaryErrors.length && failed && typeof failed === 'object') failed.secondaryErrors = [...(failed.secondaryErrors ?? []), ...secondaryErrors];
+    throw failed;
+  }
+  return outcome;
+}
+
+// INC-006 CC-6 (PFP-1): an ordered, text-only recovery plan derived from the phase reached.
+// It never acts; the steps are the manual procedure used after run 105.
+const runtimeLeaf = unit => `/run/systemd/system/${unit}.service.d/99-hololive-release-guard.conf`;
+export function recoveryPlan({ phase, completed, config, maintenance, runNumber }) {
+  const done = name => completed.includes(name), reached = name => done(name) || phase === name;
+  if (!reached('stop:velocity-sync')) return ['1. Nothing was stopped or written by this run; no recovery is needed.'];
+  const proxies = config.websiteServices.filter(unit => !['pocketbase', 'velocity-sync'].includes(unit));
+  const allStarted = done('start:pocketbase') && config.websiteServices.filter(unit => unit !== 'pocketbase').every(unit => done('start:' + unit));
+  const known = Boolean(maintenance && !maintenance.uncertain && maintenance.leaves && typeof maintenance.leaves === 'object');
+  const owned = unit => !known || Object.hasOwn(maintenance.leaves, unit);
+  const steps = [];
+  if (allStarted) steps.push('Every website service was started again by this run; no restore is needed. Verify the services, the Velocity listeners and the site.');
+  else {
+    if (reached('stop:pocketbase') && !done('start:pocketbase')) {
+      if (phase === 'stop:pocketbase') steps.push('The PocketBase stop did not complete: check `systemctl status pocketbase` and make sure PocketBase is stopped before the steps below.');
+      else if (phase === 'start:pocketbase') steps.push('The PocketBase start did not complete: check `systemctl status pocketbase`; if PocketBase is active, stop it before a restore.');
+      steps.push(reached('install')
+        ? `PocketBase is stopped and ${reached('migrate') ? 'install and migrate changed the live application tree and backend/pb_data' : 'install changed the live application tree'}. While PocketBase stays stopped, restore the application and backend/pb_data from this run's own backup (the "backup" field of this record) with the emergency restore tool; never use another run's backup.`
+        : 'PocketBase is stopped; install did not run, so the live application tree and backend/pb_data are unchanged and need no restore.');
+      steps.push(`Start PocketBase (sudo systemctl start pocketbase) and check that ${config.pocketbaseHealthUrl} answers code 200.`);
+    } else if (done('start:pocketbase')) steps.push('PocketBase was started on the installed and migrated candidate. A restore now needs PocketBase stopped again and an Owner decision; otherwise continue below.');
+    if (!done('start:velocity-sync')) {
+      if (!known) steps.push(`The finite stop state is uncertain: inspect both runtime leaves (${runtimeLeaf('velocity-sync')} and ${runtimeLeaf('velocity')}) and the velocity-sync control group before continuing.`);
+      else if (maintenance.frozen && !maintenance.killed) steps.push('The old sync is still frozen (cgroup.freeze): stop velocity-sync so its control group is empty and thawed before removing its leaf.');
+      if (owned('velocity-sync')) steps.push(`As root remove the velocity-sync runtime leaf ${runtimeLeaf('velocity-sync')} and run systemctl daemon-reload.`);
+      steps.push('Start velocity-sync (sudo systemctl start velocity-sync); it starts under the persistent guard backend/.velocity-maintenance.');
+    }
+    if (owned('velocity')) steps.push(`As root remove the velocity (Java) runtime leaf ${runtimeLeaf('velocity')} and run systemctl daemon-reload; never stop or restart velocity.`);
+    const pending = proxies.filter(unit => !done('start:' + unit));
+    if (pending.length) steps.push(reached('install')
+      ? `${pending.join(', ')} ${pending.length === 1 ? 'was' : 'were'} not restarted by this run: check that each runs from the live backend/scripts (readlink /proc/<MainPID>/cwd must not end in " (deleted)") and restart any that does not, one at a time.`
+      : `${pending.join(', ')} ${pending.length === 1 ? 'was' : 'were'} not touched by this run; check that each is still active.`);
+  }
+  steps.push(`After the services are verified, archive ${path.join(config.stateRoot, 'deployment.json')} (for example as deployment.failed-run-${runNumber}.json); until then this record blocks the next run. Confirm that ${path.join(config.stateRoot, 'deployment.lock')} is absent.`);
+  return steps.map((text, index) => `${index + 1}. ${text}`);
 }
 
 function assertRealPath(file) {
@@ -292,16 +451,36 @@ function controlRead(file, validate = controlPath) {
     return JSON.parse(fs.readFileSync(fd, 'utf8'));
   } finally { fs.closeSync(fd); }
 }
+// INC-006 CC-6: a control file is never truncated in place. The new bytes go to a fresh private
+// sibling, are flushed, and replace the endpoint by rename, so a failed or interrupted write
+// (ENOSPC, EIO, a kill) leaves the previous record or no file, never a truncated one. An existing
+// endpoint is opened and bound first; its identity and the parent binding are checked again
+// immediately before the rename, and the renamed inode is read back.
 function controlWrite(file, value, validate = controlPath) {
   const before = validate(file);
-  const fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
+  const bound = before ? fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW) : undefined;
   try {
-    const opened = fs.fstatSync(fd), current = validate(file);
-    check(current && opened.isFile() && opened.nlink === 1 && opened.dev === current.dev && opened.ino === current.ino && (!before || opened.ino === before.ino), 'Maintenance endpoint changed during write');
-    fs.fchmodSync(fd, 0o600);
-    fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, value);
-  } finally { fs.closeSync(fd); }
+    if (before) {
+      const opened = fs.fstatSync(bound), current = validate(file);
+      check(current && opened.isFile() && opened.nlink === 1 && opened.dev === current.dev && opened.ino === current.ino && opened.ino === before.ino, 'Maintenance endpoint changed during write');
+    }
+    const partial = path.join(path.dirname(file), '.' + path.basename(file) + '.' + randomBytes(8).toString('hex') + '.partial');
+    const fd = fs.openSync(partial, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+    let replaced = false;
+    try {
+      fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, value);
+      fs.fsyncSync(fd);
+      const written = fs.fstatSync(fd), current = validate(file);
+      check(before ? current && current.dev === before.dev && current.ino === before.ino : !current, 'Maintenance endpoint changed during write');
+      fs.renameSync(partial, file); replaced = true;
+      const after = validate(file);
+      check(after && after.isFile() && after.nlink === 1 && after.dev === written.dev && after.ino === written.ino, 'Maintenance endpoint changed during write');
+    } finally {
+      fs.closeSync(fd);
+      if (!replaced) fs.rmSync(partial, { force: true });
+    }
+  } finally { if (bound !== undefined) fs.closeSync(bound); }
 }
 
 // Inventory all replacements before deleting the first artifact. Runtime
@@ -309,32 +488,95 @@ function controlWrite(file, value, validate = controlPath) {
 // Removal needs write+search on the parent and, under a sticky parent, runner
 // ownership of the entry or the parent. A directory that cannot be emptied
 // cannot be removed, so every blocked entry is listed before any stop or write.
+const writableDirectory = directory => { try { fs.accessSync(directory, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; } };
+// `live` admits entries that a running PocketBase removes between readdir and lstat.
+const readdirOptional = directory => { try { return fs.readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
+function collectUnremovable(entry, info, parent, blocked, options = {}) {
+  const runner = process.geteuid();
+  let removable = parent !== null && (!(parent.mode & 0o1000) || info.uid === runner || parent.uid === runner);
+  if (info.isDirectory() && !info.isSymbolicLink()) {
+    const names = options.live ? readdirOptional(entry) : fs.readdirSync(entry), container = names.length && writableDirectory(entry) ? info : null;
+    for (const name of names) {
+      if (options.refuseEnvironment) check(name !== '.env' && !name.startsWith('.env.'), 'Runtime environment overlaps replaced artifact');
+      const child = path.join(entry, name), childInfo = options.live ? lstatOptional(child) : fs.lstatSync(child);
+      if (childInfo && !collectUnremovable(child, childInfo, container, blocked, options)) removable = false;
+    }
+  }
+  if (!removable) blocked.push(entry);
+  return removable;
+}
 function verifyInstallTargets(webRoot, configurationFiles = []) {
   assertRealPath(webRoot);
-  const runner = process.geteuid(), blocked = [];
-  const writable = directory => { try { fs.accessSync(directory, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; } };
-  const inspect = (entry, info, parent) => {
-    let removable = parent !== null && (!(parent.mode & 0o1000) || info.uid === runner || parent.uid === runner);
-    if (info.isDirectory() && !info.isSymbolicLink()) {
-      const names = fs.readdirSync(entry), container = names.length && writable(entry) ? info : null;
-      for (const name of names) {
-        check(name !== '.env' && !name.startsWith('.env.'), 'Runtime environment overlaps replaced artifact');
-        const child = path.join(entry, name);
-        if (!inspect(child, fs.lstatSync(child), container)) removable = false;
-      }
-    }
-    if (!removable) blocked.push(entry);
-    return removable;
-  };
+  const blocked = [];
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
     assertRealPath(path.dirname(dest));
     const stat = lstatOptional(dest);
     if (stat) assertRealPath(dest);
     for (const file of configurationFiles) check(file !== dest && !file.startsWith(dest + path.sep), 'Runtime configuration overlaps replaced artifact');
-    if (stat) inspect(dest, stat, writable(path.dirname(dest)) ? fs.lstatSync(path.dirname(dest)) : null);
+    if (stat) collectUnremovable(dest, stat, writableDirectory(path.dirname(dest)) ? fs.lstatSync(path.dirname(dest)) : null, blocked, { refuseEnvironment: true });
   }
   check(!blocked.length, 'Artifact entries not removable by runner: ' + blocked.join(', '));
+}
+
+// INC-006 CC-11: PocketBase runs as root, so what it creates itself (uploads under storage, its own
+// backups) can be root-owned and inside root-owned directories. The runner's migrate and the
+// emergency restore could not remove such entries after the stop; refuse before the lock instead.
+const blockedSample = 10;
+export function assertPbDataRemovable(webRoot) {
+  const directory = path.join(webRoot, 'backend/pb_data'), stat = lstatOptional(directory);
+  if (!stat?.isDirectory()) return; // absence and aliases are refused by the existing checks
+  const blocked = [], container = writableDirectory(directory) ? stat : null;
+  for (const name of readdirOptional(directory)) {
+    const child = path.join(directory, name), info = lstatOptional(child);
+    if (info) collectUnremovable(child, info, container, blocked, { live: true });
+  }
+  blocked.sort(); // a stable sample, independent of the filesystem's directory order
+  check(!blocked.length, `backend/pb_data entries not removable by runner (${blocked.length}): ${blocked.slice(0, blockedSample).join(', ')}${blocked.length > blockedSample ? ', ...' : ''}`);
+}
+
+// INC-006 CC-3: refuse before the lock what would otherwise fail only after PocketBase stopped.
+// The root child refuses a raw application closure above this many entries (prepare-current-run,
+// `len(raw_manifest['application'])<=20000` in finiteRootSource); the same count is checked here.
+export const rawClosureCap = 20000;
+export const capacityPolicy = Object.freeze({
+  // AUDIT PS-BACKUP-1: one attempt used about 2.6 GB of the shared filesystem (a 0.85-1.12 GB
+  // backup holding four application copies plus 0.7-1.75 GB of test fixtures).
+  measuredAttemptBytes: 2.6e9,
+  // A run writes four copies of the live closure into its backup: application, rehearsal,
+  // safe-recovery and safe-recovery-rehearsal (run 105: 4 x 209.8 MB, 847 MB in total).
+  copiesPerAttempt: 4,
+  // Room for this attempt and one more full attempt before anyone has to prune.
+  safetyFactor: 2,
+});
+const closureNames = [...artifactPaths, 'backend/pb_data', 'backend/pocketbase'];
+function closureUsage(root, names) {
+  let entries = 0, bytes = 0;
+  const walk = file => {
+    const stat = lstatOptional(file); // the live PocketBase may remove its own temporary files meanwhile
+    if (!stat) return;
+    entries++;
+    if (stat.isDirectory()) for (const name of readdirOptional(file)) walk(path.join(file, name));
+    else if (stat.isFile()) bytes += stat.size;
+  };
+  for (const name of names) walk(path.join(root, name));
+  return { entries, bytes };
+}
+export function assertCapacity(config, bundle, { statfs = fs.statfsSync, cap = rawClosureCap } = {}) {
+  const live = closureUsage(config.webRoot, closureNames);
+  check(live.entries <= cap, `Live application closure has ${live.entries} entries; the root child refuses more than ${cap} after the stop`);
+  // The next run captures the candidate together with the same data and binary.
+  const delivered = closureUsage(bundle, artifactPaths), kept = closureUsage(config.webRoot, ['backend/pb_data', 'backend/pocketbase']);
+  const candidate = delivered.entries + kept.entries + (config.baseline?.retainedHistory?.length ?? 0);
+  check(candidate <= cap, `Candidate application closure would have ${candidate} entries; the next run's root child refuses more than ${cap}`);
+  const bytes = capacityPolicy.safetyFactor * Math.max(capacityPolicy.measuredAttemptBytes, capacityPolicy.copiesPerAttempt * live.bytes + delivered.bytes);
+  const inodes = capacityPolicy.safetyFactor * (capacityPolicy.copiesPerAttempt * live.entries + delivered.entries);
+  for (const root of [config.webRoot, config.backupRoot]) {
+    const usage = statfs(root), freeBytes = usage.bavail * usage.bsize;
+    // A filesystem without a fixed inode table reports no inode totals; only bytes apply there.
+    check(freeBytes >= bytes && (usage.files === 0 || usage.ffree >= inodes), `Insufficient free space on the filesystem of ${root}: ${freeBytes} bytes and ${usage.ffree} inodes free; ${bytes} bytes and ${inodes} inodes required before the lock`);
+  }
+  return { liveEntries: live.entries, candidateEntries: candidate, requiredBytes: bytes, requiredInodes: inodes };
 }
 export function checkDatabases(directory) {
   // Metadata only, never records/tokens. Run on a stopped snapshot, read-only.
@@ -358,7 +600,7 @@ with tempfile.TemporaryDirectory(prefix='hololive-snapshot-read-') as temporary:
   c.close()
 assert 'data.db' in out,'Missing data database'
 print(json.dumps(out))`;
-  return JSON.parse(command('python3', ['-c', script, path.resolve(directory)]));
+  return JSON.parse(command('python3', ['-c', script, path.resolve(directory)], hostCommandTimeouts.database));
 }
 // This is a bounded online metadata read, not a backup or data contract. SQLite
 // uses its ordinary read transaction so committed WAL rows remain visible.
@@ -374,7 +616,7 @@ rows=list(c.execute('select * from _migrations'))
 print(json.dumps(rows))
 c.rollback()
 c.close()`;
-  return JSON.parse(command('python3', ['-c', script, path.resolve(directory)]));
+  return JSON.parse(command('python3', ['-c', script, path.resolve(directory)], hostCommandTimeouts.database));
 }
 function verifyMixedHistory(bundle, application, baseline, rows) {
   check(baseline.retainedHistory.length === 1 && baseline.retainedHistory[0].path === retainedFile && baseline.retainedHistory[0].sha256 === retainedDigest && JSON.stringify(baseline.sourceAbsentHistory) === JSON.stringify(sourceAbsent), 'Unknown mixed history descriptor');
@@ -414,6 +656,23 @@ for (const record of inventory(webRoot, ['backend/pb_migrations'])) {
   }
 }
 
+// INC-006 CC-7: the website proxies run with backend/scripts as their working directory until
+// they restart after the new sync. Emptying and refilling the existing directory keeps its
+// inode, so a run that stops between install and the restarts leaves no process on an unlinked
+// directory. Entry modes, links and timestamps are copied as before, the directory takes the
+// bundle's mode, and stale entries go. verifyInstallTargets has proved every entry removable;
+// a directory the runner does not own is replaced as before, because only its owner can set its mode.
+const inPlaceArtifacts = ['backend/scripts'];
+function refillInPlace(bundle, webRoot, name) {
+  if (!inPlaceArtifacts.includes(name)) return false;
+  const dest = path.join(webRoot, name), existing = lstatOptional(dest), source = fs.lstatSync(path.join(bundle, name));
+  if (!existing?.isDirectory() || !source.isDirectory() || (existing.uid !== process.geteuid() && process.geteuid() !== 0)) return false;
+  for (const entry of fs.readdirSync(dest)) fs.rmSync(path.join(dest, entry), { recursive: true, force: true });
+  copyPaths(bundle, webRoot, fs.readdirSync(path.join(bundle, name)).sort().map(entry => name + '/' + entry));
+  fs.chmodSync(dest, source.mode & 0o777);
+  fs.utimesSync(dest, source.atime, source.mtime);
+  return true;
+}
 export function installBundle(bundle, webRoot, revision, baseline, backup, privateIO) {
   const manifest = verifyBundle(bundle, revision);
   assertRealPath(webRoot);
@@ -427,6 +686,7 @@ export function installBundle(bundle, webRoot, revision, baseline, backup, priva
   for (const name of artifactPaths) {
     const dest = path.join(webRoot, name);
     if (fs.existsSync(dest)) assertRealPath(dest);
+    if (refillInPlace(bundle, webRoot, name)) continue;
     fs.rmSync(dest, { recursive: true, force: true });
     copyPaths(bundle, webRoot, [name]);
   }
@@ -532,7 +792,7 @@ for item in json.loads(sys.argv[2]):
  r=c.execute('select is_admin,service_account,verified from users where id=?',(item['id'],)).fetchone()
  assert r and bool(r[0]) and ((bool(r[2]) and not bool(r[1])) if item['role']=='admin' else bool(r[1])),'Recovery identity role mismatch'
 print('verified')`;
-  check(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db'), JSON.stringify(identities)]) === 'verified', 'Recovery security failed');
+  check(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db'), JSON.stringify(identities)], hostCommandTimeouts.database) === 'verified', 'Recovery security failed');
 }
 // TCRN-HOLOLIVE-CN-INC-005 C1: the one derived-data change a rehearsal admits.
 // The candidate's data migration replaces the placeholder (0, 0, 0) that
@@ -589,7 +849,7 @@ for (table,) in old.execute("select name from sqlite_master where type='table' a
   derived=[tuple(zeros[row[index]][i] if i in slots else value for i,value in enumerate(row)) if row[index] in zeros and exact(row,(256,-1,3000)) else row for row in derived]
  assert normalize(original)==normalize(derived),'Derived record/content mismatch: '+table
 print('verified')`;
-  check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? []), placeholder ? 'placeholder' : 'none']) === 'verified', 'Derived source mismatch');
+  check(command('python3', ['-c', script, path.join(rawDirectory, 'backend/pb_data/data.db'), path.join(migratedDirectory, 'backend/pb_data/data.db'), JSON.stringify(identities ?? []), placeholder ? 'placeholder' : 'none'], hostCommandTimeouts.database) === 'verified', 'Derived source mismatch');
   const names = ['backend/pb_data/storage'];
   const raw = names.filter(name => fs.existsSync(path.join(rawDirectory, name)));
   check(JSON.stringify(inventory(rawDirectory, raw)) === JSON.stringify(inventory(migratedDirectory, raw)), 'Derived media mismatch');
@@ -616,7 +876,7 @@ for row in c.execute('select * from _collections order by name'):
  collections.append(item)
 schema=list(c.execute("select type,name,tbl_name,sql from sqlite_master where name not like 'sqlite_%' order by type,name"))
 print(json.dumps({'collections':collections,'schema':schema,'migrations':sorted(r[0] for r in c.execute('select file from _migrations'))},sort_keys=True))`;
-  return JSON.parse(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db')]));
+  return JSON.parse(command('python3', ['-c', script, path.join(directory, 'backend/pb_data/data.db')], hostCommandTimeouts.database));
 }
 function verifyRecoveryContract(directory, expected, rawContract) {
   check(JSON.stringify(recoveryContract(directory)) === JSON.stringify(expected), 'Recovery candidate contract mismatch');
@@ -629,7 +889,7 @@ export function createSafeRecovery(backup, migrated, bundle, revision, identitie
   if (!expectedDirectory) {
     expectedDirectory = path.join(backup, 'candidate-contract-rehearsal');
     if (!fs.existsSync(expectedDirectory)) restoreBackup(backup, expectedDirectory);
-    const output = command(path.join(expectedDirectory, 'backend/pocketbase'), ['migrate', 'up', '--dir', path.join(expectedDirectory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')]);
+    const output = command(path.join(expectedDirectory, 'backend/pocketbase'), ['migrate', 'up', '--dir', path.join(expectedDirectory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')], hostCommandTimeouts.migrate);
     check(!/Failed|Error:/i.test(output), 'Isolated migration failed');
   }
   check(expectedDirectory === path.join(backup, 'rehearsal') || expectedDirectory === path.join(backup, 'candidate-contract-rehearsal'), 'Unbound recovery expectation');
@@ -1321,7 +1581,12 @@ except Exception as e:
  print(json.dumps({'ok':False,'rootEUID':os.geteuid(),'state':result,'reason':str(e)}))
 `;
 
-export function productionAdapter(bundle, config, revision, runNumber, configFile) {
+// INC-006 CC-5: loopback requests to the started PocketBase. Three attempts of at most 3 s each,
+// 3 s apart: this host's PocketBase rate-limit rule '*:auth' (disabled today) admits 2 requests
+// per 3 s, and the deploy makes up to 4 auth/refresh requests.
+export const loopbackPolicy = Object.freeze({ attempts: 3, timeoutMs: 3000, retryDelayMs: 3000 });
+// `clock` is injectable for tests only; production uses the monotonic clock and real sleeps.
+export function productionAdapter(bundle, config, revision, runNumber, configFile, { clock = systemClock } = {}) {
   const state = path.join(config.stateRoot, 'deployment.json');
   const lock = path.join(config.stateRoot, 'deployment.lock');
   const guard = path.join(config.webRoot, 'backend/.velocity-maintenance');
@@ -1396,7 +1661,7 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
   };
   const systemctl = (action, unit) => {
     check(config.websiteServices.includes(unit) && units.includes(unit), 'Service outside whitelist');
-    command('sudo', ['-n', 'systemctl', action, unit]);
+    command('sudo', ['-n', 'systemctl', action, unit], hostCommandTimeouts.serviceControl);
   };
   const velocity = () => {
     const value = {
@@ -1408,10 +1673,30 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
     return value;
   };
   const assertRunState = value => check(!value || (value.status === 'deployed' && runNumber > value.runNumber), 'Older/repeated run or unresolved failed deployment');
+  // INC-006 CC-1: both checks keep their position in deploy() and their meaning; the bounded
+  // reader records every attempt, and the deployed or failed record carries that history.
+  const currentMainChecks = [];
   const assertCurrent = () => {
-    check(command('git', ['ls-remote', 'origin', 'refs/heads/main']).split(/\s/)[0] === revision, 'Stale main revision');
+    const entry = { check: currentMainChecks.length + 1, startedAt: new Date().toISOString() };
+    currentMainChecks.push(entry);
+    try { Object.assign(entry, { result: 'equal', attempts: readCurrentMain(revision, { sleep: clock.sleepSync, now: clock.now }).attempts }); }
+    catch (error) { Object.assign(entry, { result: 'refused', reason: error.message, attempts: error.currentMain?.attempts ?? [] }); throw error; }
     oldState = controlRead(state, boundControl);
     assertRunState(oldState);
+  };
+  // INC-006 CC-5: loopback requests after the start retry boundedly on network errors, 5xx and
+  // 429 only; any other answer is final and keeps its existing refusal.
+  const loopbackFetch = async (url, init = {}) => {
+    for (let attempt = 1; ; attempt++) {
+      let response;
+      try { response = await fetch(url, { ...init, signal: AbortSignal.timeout(loopbackPolicy.timeoutMs) }); }
+      catch (error) { if (attempt >= loopbackPolicy.attempts) throw error; await clock.sleep(loopbackPolicy.retryDelayMs); continue; }
+      if (attempt < loopbackPolicy.attempts && (response.status >= 500 || response.status === 429)) {
+        try { await response.arrayBuffer(); } catch { /* the retried answer is discarded */ }
+        await clock.sleep(loopbackPolicy.retryDelayMs); continue;
+      }
+      return response;
+    }
   };
   const authenticateTarget = async () => {
     const identities = config.recoveryIdentities;
@@ -1422,14 +1707,14 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
         let token = humanTargetToken, record;
         if (item.role === 'service') {
           const email = index === 1 ? 'velocity-sync@services.hololive.com.cn' : 'mcsm-proxy@services.hololive.com.cn';
-          const auth = await fetch(base + '/api/collections/users/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: email, password: credentialMaterial[item.id] }), signal: AbortSignal.timeout(3000) });
+          const auth = await loopbackFetch(base + '/api/collections/users/auth-with-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identity: email, password: credentialMaterial[item.id] }) });
           const data = await auth.json(); check(auth.ok && typeof data.token === 'string', 'Target service authentication failed');
-          const refresh = await fetch(base + '/api/collections/users/auth-refresh', { method: 'POST', headers: { Authorization: data.token }, signal: AbortSignal.timeout(3000) });
+          const refresh = await loopbackFetch(base + '/api/collections/users/auth-refresh', { method: 'POST', headers: { Authorization: data.token } });
           const refreshed = await refresh.json(); check(refresh.ok && refreshed.record?.id === item.id && typeof refreshed.token === 'string', 'Target service refresh failed'); token = refreshed.token;
         }
-        const self = await fetch(base + '/api/collections/users/records/' + item.id, { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); record = await self.json();
+        const self = await loopbackFetch(base + '/api/collections/users/records/' + item.id, { headers: { Authorization: token } }); record = await self.json();
         check(self.ok && record.id === item.id && record.collectionName === 'users' && record.is_admin === true && record.service_account === (item.role === 'service') && (item.role === 'service' || (record.verified === true && record.collectionId === suppliedProof.collectionId)), 'Target users self proof failed');
-        for (const collection of ['velocity_settings', 'mcsm_config']) { const response = await fetch(base + '/api/collections/' + collection + '/records', { headers: { Authorization: token }, signal: AbortSignal.timeout(3000) }); check(response.ok && Array.isArray((await response.json()).items), 'Target protected identity read failed'); }
+        for (const collection of ['velocity_settings', 'mcsm_config']) { const response = await loopbackFetch(base + '/api/collections/' + collection + '/records', { headers: { Authorization: token } }); check(response.ok && Array.isArray((await response.json()).items), 'Target protected identity read failed'); }
       }
       return;
     }
@@ -1441,17 +1726,17 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       const token = typeof binding.tokenEnv === 'string' && process.env[binding.tokenEnv];
       const password = typeof binding.passwordEnv === 'string' && process.env[binding.passwordEnv];
       check(Boolean(token) !== Boolean(password) && (token || typeof binding.identity === 'string'), 'Missing target credential binding');
-      const response = await fetch(base + '/api/collections/users/' + (token ? 'auth-refresh' : 'auth-with-password'), { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: token } : {}) }, ...(token ? {} : { body: JSON.stringify({ identity: binding.identity, password }) }), signal: AbortSignal.timeout(3000) });
+      const response = await loopbackFetch(base + '/api/collections/users/' + (token ? 'auth-refresh' : 'auth-with-password'), { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: token } : {}) }, ...(token ? {} : { body: JSON.stringify({ identity: binding.identity, password }) }) });
       const data = await response.json();
       check(response.ok && data.record?.id === item.id && data.record.is_admin === true && data.record.service_account === (item.role === 'service') && (item.role === 'service' || data.record.verified === true), 'Target authentication failed');
-      const read = await fetch(base + '/api/collections/velocity_settings/records', { headers: { Authorization: data.token }, signal: AbortSignal.timeout(3000) });
+      const read = await loopbackFetch(base + '/api/collections/velocity_settings/records', { headers: { Authorization: data.token } });
       check(read.ok && Array.isArray((await read.json()).items), 'Target protected read failed');
     }
     for (const unit of config.websiteServices.filter(unit => /velocity-sync|mcsm/.test(unit))) check(config.targetAuthentication.some(item => item.role === 'service' && item.services?.includes(unit)), 'Missing dependent service authentication binding');
   };
   const migrateCopy = directory => {
     const args = ['--dir', path.join(directory, 'backend/pb_data'), '--migrationsDir', path.join(bundle, 'backend/pb_migrations'), '--hooksDir', path.join(bundle, 'backend/pb_hooks')];
-    const output = command(pb, ['migrate', 'up', ...args]);
+    const output = command(pb, ['migrate', 'up', ...args], hostCommandTimeouts.migrate);
     check(!/Failed|Error:/i.test(output), 'Candidate migration failed before identity supply');
     if (privateBridge) {
       check(credentialMaterial && backupPath, 'Missing stopped current-run identity material');
@@ -1474,6 +1759,9 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       }
       verifyBundle(bundle, revision);
       verifyImmutableMigrations(bundle, config.webRoot, config.baseline);
+      // INC-006 CC-3/CC-11: before the lock and before any host command.
+      assertCapacity(config, bundle);
+      assertPbDataRemovable(config.webRoot);
       if (config.baseline?.kind === 'mixed') {
         if (firstCapture) {
           onlineLedger = readMigrationLedger(path.join(config.webRoot, 'backend/pb_data'));
@@ -1594,12 +1882,13 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       } else systemctl(unit === 'pocketbase' ? 'start' : 'restart', unit);
     },
     health: async () => {
-      for (let i = 0; i < 30; i++) {
-        try { const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) }); const data = await response.json(); if (response.ok && data.code === 200) break; } catch { /* retry bounded startup */ }
-        await new Promise(resolve => setTimeout(resolve, 500));
+      // INC-006 CC-5: the bounded loop's own success decides; no unguarded request follows it.
+      let healthy = false;
+      for (let i = 0; i < 30 && !healthy; i++) {
+        try { const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) }); const data = await response.json(); healthy = response.ok && data?.code === 200; } catch { /* retry bounded startup */ }
+        if (!healthy) await clock.sleep(500);
       }
-      const response = await fetch(config.pocketbaseHealthUrl, { signal: AbortSignal.timeout(1000) });
-      check(response.ok && (await response.json()).code === 200, 'PocketBase startup health failed');
+      check(healthy, 'PocketBase startup health failed');
       await authenticateTarget(); authenticated = true;
     },
     assertVelocity: before => {
@@ -1614,9 +1903,9 @@ export function productionAdapter(bundle, config, revision, runNumber, configFil
       boundControl(state);
       const backupManifest = backupPath ? assertCaptured(backupPath) : null;
       humanTargetToken = undefined; credentialMaterial = undefined;
-      writeControl(state, JSON.stringify({ ...value, baseline: backupManifest?.snapshotId ?? null, candidateManifest: verifyBundle(bundle, revision), retainedHistory: config.baseline?.retainedHistory ?? [], runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, completedAt: new Date().toISOString() }) + '\n');
+      writeControl(state, JSON.stringify({ ...value, baseline: backupManifest?.snapshotId ?? null, candidateManifest: verifyBundle(bundle, revision), retainedHistory: config.baseline?.retainedHistory ?? [], runId: process.env.GITHUB_RUN_ID, runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`, trigger: process.env.GITHUB_EVENT_NAME, currentMainChecks, completedAt: new Date().toISOString() }) + '\n');
     },
-    failure: value => { humanTargetToken = undefined; credentialMaterial = undefined; writeControl(state, JSON.stringify({ ...value, backup: backupPath ?? value.backup, runNumber, failedAt: new Date().toISOString() }) + '\n'); },
+    failure: value => { humanTargetToken = undefined; credentialMaterial = undefined; writeControl(state, JSON.stringify({ ...value, backup: backupPath ?? value.backup, runNumber, currentMainChecks, failedAt: new Date().toISOString() }) + '\n'); },
   };
 }
 
@@ -1668,9 +1957,22 @@ export function restoreBackup(backup, destination, privateIO) {
   return { restored: manifest.present, revision: manifest.revision };
 }
 
+// The original reason comes first; secondary failures (failure record, unlock) and the origin
+// attempt history follow it and never replace it.
+export function failureReport(error) {
+  const lines = [String(error?.message ?? error)];
+  for (const item of error?.secondaryErrors ?? []) lines.push(`Secondary failure in ${item.step} (the reason above is the original one): ${item.message}`);
+  if (error?.currentMain?.attempts?.length) lines.push('Origin main attempts: ' + JSON.stringify(error.currentMain.attempts));
+  return lines.join('\n') + '\n';
+}
+
 async function main() {
   const [action, directory, argument, run] = process.argv.slice(2);
-  if (action === 'bundle') {
+  if (action === 'current-main') {
+    // Workflow pre-check before npm ci: this module imports Node builtins only.
+    const result = readCurrentMain(directory);
+    process.stdout.write(JSON.stringify({ currentMain: 'equal', revision: result.revision, attempts: result.attempts }) + '\n');
+  } else if (action === 'bundle') {
     check(/^[a-f0-9]{40}$/.test(argument), 'Exact bundle revision required');
     writeJSON(path.join(directory, 'release.json'), { revision: argument, paths: artifactPaths, files: inventory(directory) });
     verifyBundle(directory, argument);
@@ -1682,6 +1984,6 @@ async function main() {
     else await deploy(productionAdapter(directory, config, revision, Number(run), argument), config, revision, Number(run));
   } else if (action === 'restore-isolated') {
     process.stdout.write(JSON.stringify(restoreBackup(directory, argument)) + '\n');
-  } else refuse('Usage: deployment.mjs bundle DIR SHA | plan/apply BUNDLE CONFIG RUN_NUMBER (DEPLOY_REVISION) | restore-isolated BACKUP NEW_DIRECTORY');
+  } else refuse('Usage: deployment.mjs current-main SHA | bundle DIR SHA | plan/apply BUNDLE CONFIG RUN_NUMBER (DEPLOY_REVISION) | restore-isolated BACKUP NEW_DIRECTORY');
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { process.stderr.write(failureReport(error)); process.exitCode = 1; });

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,8 +7,40 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { pocketbase, binaries, unusedPort, startOwned, waitFor, root as projectRoot } from './helpers/pocketbase.mjs';
-import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts, dependencyList, dependencyLines, decodeIdentitySupply } from '../scripts/deployment.mjs';
+import { artifactPaths, inventory, verifyBundle, validatePlan, deploy, installBundle, snapshotApplication, restoreBackup, verifyImmutableMigrations, productionAdapter, snapshotIdentity, verifySnapshot, createSafeRecovery, restoreSafeRecovery, checkDatabases, readMigrationLedger, serviceFacts, dependencyList, dependencyLines, decodeIdentitySupply, readCurrentMain, currentMainPolicy, hostCommandTimeouts, recoveryPlan, failureReport, assertCapacity, rawClosureCap, capacityPolicy, assertPbDataRemovable, loopbackPolicy } from '../scripts/deployment.mjs';
 const revision = 'a'.repeat(40), oldRevision = 'b'.repeat(40);
+// INC-006 CC-4: every fixture of this file lives in one sandbox per run, under RUNNER_TEMP when
+// the runner sets it (the runner empties it after each job), else under the default temporary
+// directory. Child processes (python3 temporary copies, PocketBase) inherit it through TMPDIR.
+// Each fixture is removed after its test and the sandbox after the file;
+// HOLOLIVE_RETAIN_TEST_FIXTURES=1 keeps them for local debugging.
+function fixtureBase(environment) {
+  const runnerTemp = environment.RUNNER_TEMP;
+  if (runnerTemp === undefined || runnerTemp === '') return os.tmpdir();
+  assert.ok(path.isAbsolute(runnerTemp) && fs.statSync(runnerTemp).isDirectory(), 'Invalid RUNNER_TEMP for test fixtures');
+  return fs.realpathSync(runnerTemp);
+}
+// A test may leave read-only directories behind: reopen them (never following links) and retry.
+function removeFixture(root) {
+  try { fs.rmSync(root, { recursive: true, force: true }); return; }
+  catch (error) { if (!['EACCES', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error; }
+  const reopen = directory => {
+    if (!fs.lstatSync(directory).isDirectory()) return;
+    fs.chmodSync(directory, 0o700);
+    for (const name of fs.readdirSync(directory)) reopen(path.join(directory, name));
+  };
+  reopen(root);
+  fs.rmSync(root, { recursive: true, force: true });
+}
+const retainFixtures = process.env.HOLOLIVE_RETAIN_TEST_FIXTURES === '1';
+const outerTmpdir = process.env.TMPDIR;
+const sandbox = fs.realpathSync(fs.mkdtempSync(path.join(fixtureBase(process.env), 'hololive-deployment-run-')));
+process.env.TMPDIR = sandbox;
+const fixtureRoots = [];
+after(() => {
+  if (outerTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = outerTmpdir;
+  if (!retainFixtures) removeFixture(sandbox);
+});
 const guardBindingNames = ['TCRN_SPAWN_GUARD','TCRN_TASK_OWNER','TCRN_SPAWN_REGISTRY'];
 function guardContext(environment) {
   const present=guardBindingNames.filter(name=>environment[name]!==undefined);
@@ -124,8 +156,10 @@ for (const stage of ['verify', 'lock', 'assertCurrent', 'velocity', 'stop-veloci
 });
 function temp(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hololive-deployment-')));
-  // Leave isolated evidence until the approved task cleanup boundary.
+  // INC-006 CC-4: removed after the test (inside the per-run sandbox), unless retained on request.
   t.diagnostic('isolated fixture: ' + root);
+  fixtureRoots.push(root);
+  if (!retainFixtures) t.after(() => removeFixture(root));
   return root;
 }
 function createBundle(root) {
@@ -255,6 +289,7 @@ function finiteHostResponse(request, host) {
   } catch (error) { state.reason = error.message; return reply(false, error.message); }
 }
 
+const ampleFilesystem = (change = {}) => ({ type: 0, bsize: 4096, blocks: 2 ** 40, bfree: 2 ** 40, bavail: 2 ** 40, files: 2 ** 32, ffree: 2 ** 32, ...change });
 async function productionFixture(t, callback) {
   const root = temp(t), bundle = path.join(root, 'bundle'), webRoot = path.join(root, 'site');
   fs.mkdirSync(bundle); createBundle(bundle);
@@ -268,7 +303,9 @@ async function productionFixture(t, callback) {
   bound.finiteStop = { syncCodeSha256: createHash('sha256').update(fs.readFileSync(path.join(webRoot, 'backend/scripts/sync_velocity.js'))).digest('hex') };
   const configMap = new Map(bound.configurationFiles.map((file, index) => { const local = path.join(root, 'config-' + index); fs.writeFileSync(local, 'fixture config', { mode: 0o600 }); return [file, local]; }));
   const configFile = path.join(root, 'config.json'); fs.writeFileSync(configFile, JSON.stringify(bound), { mode: 0o600 });
-  const commands = [], originalRead = fs.readFileSync, originalStat = fs.statSync, originalLstat = fs.lstatSync, originalRealpath = fs.realpathSync, originalExec = cp.execFileSync;
+  const commands = [], originalRead = fs.readFileSync, originalStat = fs.statSync, originalLstat = fs.lstatSync, originalRealpath = fs.realpathSync, originalExec = cp.execFileSync, originalStatfs = fs.statfsSync;
+  // INC-006 CC-3: host free space is a simulated fact here, so no case depends on this machine's disk.
+  fs.statfsSync = () => ampleFilesystem();
   const environment = Object.fromEntries(['GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_EVENT_NAME'].map(key => [key, process.env[key]]));
   fs.readFileSync = (file, ...args) => file === '/etc/machine-id' ? Buffer.from('fixture machine') : originalRead(configMap.get(file) ?? file, ...args);
   fs.statSync = (file, ...args) => { const value = originalStat(configMap.get(file) ?? file, ...args); return file === configFile ? new Proxy(value, { get: (value, key) => key === 'uid' ? 0 : Reflect.get(value, key) }) : value; };
@@ -289,7 +326,7 @@ async function productionFixture(t, callback) {
   Object.assign(process.env, { GITHUB_REPOSITORY: bound.repository, GITHUB_RUN_ID: '123', GITHUB_EVENT_NAME: 'workflow_dispatch' }); syncBuiltinESMExports();
   try { await callback({ root, bundle, webRoot, host, configFile, configMap, config: bound, protectedFile, commands, createAdapter: () => productionAdapter(bundle, bound, revision, 2, configFile), get adapter() { return this.boundAdapter ??= this.createAdapter(); }, executeLocal: originalExec, state: path.join(bound.stateRoot, 'deployment.json'), guard: path.join(webRoot, 'backend/.velocity-maintenance') }); }
   finally {
-    fs.readFileSync = originalRead; fs.statSync = originalStat; fs.lstatSync = originalLstat; fs.realpathSync = originalRealpath; cp.execFileSync = originalExec; syncBuiltinESMExports();
+    fs.readFileSync = originalRead; fs.statSync = originalStat; fs.lstatSync = originalLstat; fs.realpathSync = originalRealpath; fs.statfsSync = originalStatfs; cp.execFileSync = originalExec; syncBuiltinESMExports();
     for (const [key, value] of Object.entries(environment)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 }
@@ -352,7 +389,8 @@ test('artifact entries the runner cannot remove are all listed before any stop, 
   const dist = path.join(f.webRoot, 'dist'), assets = path.join(dist, 'assets'), asset = path.join(assets, 'app.js');
   fs.mkdirSync(assets, { recursive: true }); fs.writeFileSync(path.join(dist, 'old.js'), 'old frontend'); fs.writeFileSync(asset, 'old asset');
   fs.mkdirSync(logs); fs.writeFileSync(latest, '');
-  for (const directory of [logs, assets]) { fs.chmodSync(directory, 0o555); t.after(() => fs.chmodSync(directory, 0o755)); }
+  // The fixture root may already be removed when this hook runs (INC-006 CC-4 removes read-only trees itself).
+  for (const directory of [logs, assets]) { fs.chmodSync(directory, 0o555); t.after(() => { try { fs.chmodSync(directory, 0o755); } catch (error) { if (error.code !== 'ENOENT') throw error; } }); }
   const names = ['dist', 'backend/pb_migrations', 'backend/scripts'], before = inventory(f.webRoot, names);
   // One refusal lists every blocked entry; a directory that cannot be emptied is blocked too.
   const refused = error => error.message === 'Artifact entries not removable by runner: ' + [asset, assets, dist, latest, logs, scripts].join(', ');
@@ -502,7 +540,7 @@ c.commit()`,path.join(live,'backend/pb_data/data.db'),JSON.stringify([path.basen
     fs.writeFileSync(path.join(live,extra),'modified');assert.throws(()=>verifyImmutableMigrations(bundle,live,baseline),/Unknown or modified/);
     fs.writeFileSync(path.join(live,extra),bytes);fs.writeFileSync(path.join(live,'backend/pb_migrations/new-unknown.js'),'unknown');assert.throws(()=>verifyImmutableMigrations(bundle,live,baseline),/Unknown or modified/);
     const altered=JSON.parse(fs.readFileSync(path.join(mixedBackup,'backup.json')));altered.retainedHistory[0].sha256='0'.repeat(64);altered.snapshotId=snapshotIdentity(altered);fs.writeFileSync(path.join(mixedBackup,'backup.json'),JSON.stringify(altered));assert.throws(()=>verifySnapshot(mixedBackup,{...baseline,snapshotId:altered.snapshotId,retainedHistory:altered.retainedHistory}),/Unknown retained/);
-  } finally {if (pb.service.child.exitCode === null && pb.service.child.signalCode === null) await pb.close();}
+  } finally { await pb.close(); } // INC-006 CC-4: close() is idempotent and also removes the PB fixture directory
 });
 
 // TCRN-HOLOLIVE-CN-INC-005 C1: on a second deploy the raw snapshot already holds the
@@ -651,14 +689,16 @@ c.commit()`,path.join(f.webRoot,'backend/pb_data/data.db'),JSON.stringify([path.
     raw.contract['data.db'].migrations.push(['unknown-applied.js',1]);raw.snapshotId=snapshotIdentity(raw);fs.writeFileSync(path.join(initial,'backup.json'),JSON.stringify(raw));f.config.baseline.snapshotId=raw.snapshotId;assert.throws(()=>productionAdapter(f.bundle,f.config,revision,state.runNumber+1,f.configFile).verify(),/contract drift|Target changed/);
   } finally {
     cp.execFileSync=commandOverride;syncBuiltinESMExports();
-    if(pb.service.child.exitCode===null&&pb.service.child.signalCode===null)await pb.close();
+    await pb.close(); // INC-006 CC-4: idempotent; also removes the PB fixture directory
   }
 }));
 
 // Retained independent acceptance fixtures now exercise the fixed production
 // entry, both PB versions, and the actual users authentication/API boundary.
-test('safe recovery and deployment validate actual contracts, unlisted roles and target authentication on both PB versions', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async () => {
+test('safe recovery and deployment validate actual contracts, unlisted roles and target authentication on both PB versions', {skip: !process.env.PB_RETAINED_HISTORY_FILE}, async t => {
 const evidence = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hololive-adapter-'))), project = projectRoot;
+// INC-006 CC-4: the probes stay readable until the test ends, then leave with the run sandbox rules.
+if (!retainFixtures) t.after(() => removeFixture(evidence));
 const candidate = revision;
 const extra = 'backend/pb_migrations/1765100008_add_velocity_advanced.js';
 const absent = ['1770817921_updated_users.js', '1770818121_updated_users.js', '1770818775_updated_users.js'];
@@ -1780,3 +1820,542 @@ print(json.dumps({'passed':True}))
   assert.equal(JSON.parse(response.stdout).passed, true);
 });
 
+
+// ---------------------------------------------------------------------------------------------
+// TCRN-HOLOLIVE-CN-INC-006 package A. Run 105 stopped after migrate because the post-migrate
+// `git ls-remote` met one GnuTLS reset, with no timeout and no retry, and PocketBase stayed down.
+
+// A scripted origin and a fake clock: attempts and backoff take no real time.
+const equalMain = { status: 0, stdout: revision + '\trefs/heads/main\n' };
+const otherMain = { status: 0, stdout: oldRevision + '\trefs/heads/main\n' };
+const gnutlsReset = { status: 128, stderr: "fatal: unable to access 'https://github.com/fixture/site/': GnuTLS recv error (-110): The TLS connection was non-properly terminated.\n" };
+const ownTimeout = { code: 'ETIMEDOUT', signal: 'SIGKILL', ms: currentMainPolicy.attemptTimeoutMs };
+function scriptedOrigin(answers) {
+  const origin = { time: 0, sleeps: [], calls: [] };
+  origin.now = () => origin.time;
+  origin.sleep = ms => { origin.sleeps.push(ms); origin.time += ms; };
+  origin.run = options => {
+    origin.calls.push(options);
+    const answer = answers[Math.min(origin.calls.length - 1, answers.length - 1)];
+    origin.time += answer.ms ?? 0;
+    return { status: null, signal: null, code: null, stdout: '', stderr: '', ...answer };
+  };
+  origin.read = (policy = currentMainPolicy) => readCurrentMain(revision, { run: origin.run, sleep: origin.sleep, now: origin.now, policy });
+  return origin;
+}
+function fakeClock() {
+  const clock = { time: 0, sleeps: [] };
+  clock.now = () => clock.time;
+  clock.sleepSync = ms => { clock.sleeps.push(ms); clock.time += ms; };
+  clock.sleep = async ms => { clock.sleeps.push(ms); clock.time += ms; };
+  return clock;
+}
+test('INC-006 T-R1 current main: one GnuTLS reset, then the equal answer passes after one 5 s backoff', () => {
+  const origin = scriptedOrigin([gnutlsReset, equalMain]), result = origin.read();
+  assert.equal(origin.calls.length, 2); assert.deepEqual(origin.sleeps, [5000]);
+  assert.deepEqual(result.attempts.map(item => [item.attempt, item.kind, item.outcome, item.status, item.timedOut]), [[1, 'transport', 'retry', 128, false], [2, 'equal', 'pass', 0, false]]);
+  assert.match(result.attempts[0].stderrFirstLine, /^fatal: unable to access .*GnuTLS recv error \(-110\)/);
+  assert.ok(origin.calls.every(options => options.timeout === 30000));
+});
+test('INC-006 T-R2 current main: a different SHA refuses at once with the unchanged meaning', () => {
+  const origin = scriptedOrigin([otherMain, equalMain]);
+  assert.throws(() => origin.read(), error => error.message === 'Stale main revision' && error.currentMain.attempts.length === 1 && error.currentMain.attempts[0].answer === oldRevision);
+  assert.equal(origin.calls.length, 1); assert.deepEqual(origin.sleeps, []);
+});
+test('INC-006 T-R3 current main: a different SHA after a transport failure refuses at that attempt', () => {
+  const origin = scriptedOrigin([gnutlsReset, otherMain, equalMain]);
+  assert.throws(() => origin.read(), { message: 'Stale main revision' });
+  assert.equal(origin.calls.length, 2); assert.deepEqual(origin.sleeps, [5000]);
+});
+test('INC-006 T-R4 current main: persistent transport failures refuse within the 300 s deadline', () => {
+  const instant = scriptedOrigin([gnutlsReset]);
+  assert.throws(() => instant.read(), error => /^Latest main unavailable after 6 transport failures \(last: fatal: unable to access/.test(error.message) && error.currentMain.attempts.length === 6);
+  assert.equal(instant.calls.length, 6); assert.deepEqual(instant.sleeps, [5000, 10000, 20000, 30000, 30000]);
+  // Every attempt reaches our own 30 s limit: the sixth ends at 275 s, inside the deadline.
+  const stalled = scriptedOrigin([ownTimeout]);
+  assert.throws(() => stalled.read(), /Latest main unavailable after 6 transport failures \(last: no answer within 30 s\)/);
+  assert.equal(stalled.time, 275000); assert.ok(stalled.time <= currentMainPolicy.deadlineMs);
+  // A shorter deadline: no attempt starts that could not finish before it.
+  const bounded = scriptedOrigin([ownTimeout]);
+  assert.throws(() => bounded.read({ ...currentMainPolicy, deadlineMs: 100000 }), error => /after 2 transport failures/.test(error.message) && error.currentMain.attempts.every(item => item.atMs + 30000 <= 100000));
+  assert.equal(bounded.calls.length, 2); assert.equal(bounded.time, 65000);
+});
+test('INC-006 T-R5 current main: authentication and not-found answers refuse after one attempt', () => {
+  for (const stderr of [
+    "fatal: Authentication failed for 'https://github.com/fixture/site/'",
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    "remote: Repository not found.\nfatal: repository 'https://github.com/fixture/site/' not found",
+    "fatal: unable to access 'https://github.com/fixture/site/': The requested URL returned error: 401",
+    "fatal: unable to access 'https://github.com/fixture/site/': The requested URL returned error: 403",
+    "fatal: unable to access 'https://github.com/fixture/site/': The requested URL returned error: 404",
+    "fatal: 'origin' does not appear to be a git repository",
+    'fatal: not a git repository (or any of the parent directories): .git',
+  ]) {
+    const origin = scriptedOrigin([{ status: 128, stderr: stderr + '\n' }, equalMain]);
+    assert.throws(() => origin.read(), { message: 'Origin refused the main check (authentication or not found)' }, stderr);
+    assert.equal(origin.calls.length, 1, stderr); assert.deepEqual(origin.sleeps, [], stderr);
+  }
+});
+test('INC-006 T-R6 current main: a missing refs/heads/main (exit 2) refuses after one attempt', () => {
+  const origin = scriptedOrigin([{ status: 2 }, equalMain]);
+  assert.throws(() => origin.read(), { message: 'Main ref missing on origin' });
+  assert.equal(origin.calls.length, 1);
+});
+test('INC-006 T-R7 current main: malformed answers refuse after one attempt', () => {
+  for (const stdout of ['', '\n', equalMain.stdout + equalMain.stdout, equalMain.stdout + oldRevision + '\trefs/heads/maint\n', 'g'.repeat(40) + '\trefs/heads/main\n', revision.toUpperCase() + '\trefs/heads/main\n', revision.slice(1) + '\trefs/heads/main\n', 'a'.repeat(64) + '\trefs/heads/main\n', revision + ' refs/heads/main\n', revision + '\trefs/heads/mainline\n', revision + '\trefs/heads/main\r\n', ' ' + equalMain.stdout, revision]) {
+    const origin = scriptedOrigin([{ status: 0, stdout }, equalMain]);
+    assert.throws(() => origin.read(), { message: 'Malformed origin main answer' }, JSON.stringify(stdout));
+    assert.equal(origin.calls.length, 1, JSON.stringify(stdout));
+  }
+});
+test('INC-006 T-R8 current main: our own attempt timeout is retried', () => {
+  const origin = scriptedOrigin([ownTimeout, equalMain]), result = origin.read();
+  assert.deepEqual(result.attempts.map(item => [item.kind, item.timedOut, item.signal, item.status]), [['timeout', true, 'SIGKILL', null], ['equal', false, null, 0]]);
+  assert.deepEqual(origin.sleeps, [5000]);
+});
+test('INC-006 current main: unknown exit-128 wording is retried (OD-3); spawn errors, other statuses and foreign signals refuse at once', () => {
+  const unknown = scriptedOrigin([{ status: 128, stderr: 'fatal: an unforeseen remote helper failure\n' }, equalMain]);
+  assert.deepEqual(unknown.read().attempts.map(item => item.kind), ['unknown-128', 'equal']);
+  for (const [answer, message] of [[{ code: 'ENOENT' }, 'Origin main check could not run: ENOENT'], [{ code: 'EACCES' }, 'Origin main check could not run: EACCES'], [{ code: 'ENOBUFS' }, 'Origin main check could not run: ENOBUFS'], [{ status: 1 }, 'Unclassified origin main check result'], [{ status: 129 }, 'Unclassified origin main check result'], [{ status: null, signal: 'SIGSEGV' }, 'Unclassified origin main check result']]) {
+    const origin = scriptedOrigin([answer, equalMain]);
+    assert.throws(() => origin.read(), { message }, JSON.stringify(answer));
+    assert.equal(origin.calls.length, 1, JSON.stringify(answer));
+  }
+  assert.throws(() => readCurrentMain('main', { run: () => assert.fail('git must not run') }), { message: 'Exact main revision required' });
+  // The recorded first line never carries URL credentials.
+  const credentials = scriptedOrigin([{ status: 128, stderr: "fatal: unable to access 'https://user:token@github.com/fixture/site/': Failed to connect to github.com port 443\n" }, equalMain]);
+  assert.equal(credentials.read().attempts[0].stderrFirstLine, "fatal: unable to access 'https://***@github.com/fixture/site/': Failed to connect to github.com port 443");
+});
+// A fake git first on PATH: each call is counted, its arguments and git environment recorded,
+// and its behaviour comes from the answer file for that call number.
+const gitAnswers = {
+  equal: String.raw`printf '%s\trefs/heads/main\n' ` + revision + '\nexit 0\n',
+  different: String.raw`printf '%s\trefs/heads/main\n' ` + oldRevision + '\nexit 0\n',
+  reset: String.raw`printf '%s\n' "fatal: unable to access 'https://github.com/fixture/site/': GnuTLS recv error (-110): The TLS connection was non-properly terminated." >&2` + '\nexit 128\n',
+  forbidden: String.raw`printf '%s\n' "fatal: unable to access 'https://github.com/fixture/site/': The requested URL returned error: 403" >&2` + '\nexit 128\n',
+  malformed: String.raw`printf 'not an answer\n'` + '\nexit 0\n',
+  stall: 'exec sleep 30\n',
+};
+function fakeGit(t) {
+  const directory = temp(t), bin = path.join(directory, 'bin'), state = path.join(directory, 'state');
+  fs.mkdirSync(bin); fs.mkdirSync(state);
+  fs.writeFileSync(path.join(bin, 'git'), [
+    '#!/bin/sh',
+    'n=$(cat "$FAKE_GIT_STATE/count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_GIT_STATE/count"',
+    String.raw`printf '%s\n' "$*" >> "$FAKE_GIT_STATE/args"`,
+    String.raw`env | grep -E '^(GIT_TERMINAL_PROMPT|LC_ALL|GIT_HTTP_LOW_SPEED_LIMIT|GIT_HTTP_LOW_SPEED_TIME)=' | sort > "$FAKE_GIT_STATE/env-$n"`,
+    'answer="$FAKE_GIT_STATE/answer-$n"; [ -f "$answer" ] || answer="$FAKE_GIT_STATE/answer"',
+    '. "$answer"', '',
+  ].join('\n'), { mode: 0o755 });
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  return {
+    state, environment: { ...process.env, PATH: bin + path.delimiter + process.env.PATH, FAKE_GIT_STATE: state },
+    answer: (body, call) => fs.writeFileSync(path.join(state, call ? 'answer-' + call : 'answer'), body),
+    read: name => { try { return fs.readFileSync(path.join(state, name), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return ''; throw error; } },
+    reset: () => { for (const name of fs.readdirSync(state)) fs.rmSync(path.join(state, name)); },
+  };
+}
+test('INC-006 T-R8 current main: a stalled git is killed at the attempt timeout and the next attempt answers', t => {
+  const git = fakeGit(t); git.answer(gitAnswers.stall, 1); git.answer(gitAnswers.equal);
+  const saved = { PATH: process.env.PATH, FAKE_GIT_STATE: process.env.FAKE_GIT_STATE };
+  Object.assign(process.env, { PATH: git.environment.PATH, FAKE_GIT_STATE: git.state });
+  try {
+    const started = performance.now();
+    const result = readCurrentMain(revision, { policy: { maxAttempts: 2, attemptTimeoutMs: 2000, backoffMs: [100], deadlineMs: 20000 } });
+    assert.ok(performance.now() - started < 15000, 'the stalled attempt ended at its own timeout');
+    assert.deepEqual(result.attempts.map(item => [item.kind, item.timedOut, item.signal]), [['timeout', true, 'SIGKILL'], ['equal', false, null]]);
+    assert.equal(git.read('count'), '2\n');
+  } finally { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+});
+test('INC-006 T-R11 current-main action: the workflow pre-check passes only an equal answer, with the bounded git environment', t => {
+  const git = fakeGit(t), script = path.join(projectRoot, 'scripts/deployment.mjs');
+  const cli = (sha = revision) => cp.spawnSync(process.execPath, [script, 'current-main', sha], { env: git.environment, encoding: 'utf8', timeout: 120000 });
+  git.reset(); git.answer(gitAnswers.equal);
+  let run = cli(); assert.equal(run.status, 0, run.stderr);
+  const answer = JSON.parse(run.stdout);
+  assert.equal(answer.currentMain, 'equal'); assert.equal(answer.revision, revision); assert.equal(answer.attempts.length, 1);
+  assert.equal(git.read('args'), 'ls-remote --exit-code origin refs/heads/main\n');
+  assert.equal(git.read('env-1'), 'GIT_HTTP_LOW_SPEED_LIMIT=1000\nGIT_HTTP_LOW_SPEED_TIME=10\nGIT_TERMINAL_PROMPT=0\nLC_ALL=C\n');
+  for (const [name, message] of [['different', 'Stale main revision'], ['forbidden', 'Origin refused the main check (authentication or not found)'], ['malformed', 'Malformed origin main answer']]) {
+    git.reset(); git.answer(gitAnswers[name]);
+    run = cli(); assert.equal(run.status, 1, name); assert.equal(run.stderr.split('\n')[0], message, name);
+    assert.match(run.stderr, /^Origin main attempts: \[/m, name); assert.equal(git.read('count'), '1\n', name);
+  }
+  // One reset, the real 5 s backoff (Atomics.wait), then the equal answer.
+  git.reset(); git.answer(gitAnswers.reset, 1); git.answer(gitAnswers.equal);
+  const started = performance.now(); run = cli(); const elapsed = performance.now() - started;
+  assert.equal(run.status, 0, run.stderr); assert.equal(JSON.parse(run.stdout).attempts.length, 2); assert.ok(elapsed >= 5000, 'the backoff slept ' + elapsed);
+  assert.equal(git.read('args'), 'ls-remote --exit-code origin refs/heads/main\n'.repeat(2));
+  // An invalid revision never reaches git.
+  git.reset(); run = cli('main');
+  assert.equal(run.status, 1); assert.equal(run.stderr, 'Exact main revision required\n'); assert.equal(git.read('count'), '');
+});
+test('INC-006 T-R11 the workflow runs the current-main action before npm ci, and the module needs Node builtins only', () => {
+  const workflow = fs.readFileSync(path.join(projectRoot, '.github/workflows/deploy.yml'), 'utf8');
+  const call = '          node scripts/deployment.mjs current-main "$DEPLOY_REVISION"\n';
+  assert.equal(workflow.includes('ls-remote'), false); assert.equal(workflow.split(call).length, 2);
+  assert.ok(workflow.indexOf(call) > workflow.indexOf('name: Refuse stale or unconfigured deployment') && workflow.indexOf(call) < workflow.indexOf('npm ci'));
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  const specifiers = [...source.matchAll(/^import\s.*?\sfrom\s+'([^']+)';$/gm)].map(match => match[1]);
+  assert.ok(specifiers.length >= 5 && specifiers.every(name => name.startsWith('node:')), specifiers.join(','));
+  assert.doesNotMatch(source, /\bimport\(/);
+});
+test('INC-006 T-R9 deploy(): a transient post-migrate main check is retried and the run deploys', async () => {
+  const f = fixture(), origin = scriptedOrigin([equalMain, gnutlsReset, equalMain]);
+  f.adapter.assertCurrent = async () => { f.calls.push(['assertCurrent']); origin.read(); };
+  assert.equal((await deploy(f.adapter, config, revision, 14)).status, 'deployed');
+  const names = f.calls.map(call => call[0] + (typeof call[1] === 'string' ? ':' + call[1] : ''));
+  assert.equal(names.filter(name => name === 'assertCurrent').length, 2);
+  assert.ok(names.indexOf('migrate') < names.lastIndexOf('assertCurrent') && names.lastIndexOf('assertCurrent') < names.indexOf('start:pocketbase'));
+  assert.equal(origin.calls.length, 3); assert.deepEqual(origin.sleeps, [5000]);
+  assert.equal(f.calls.some(call => call[0] === 'failure'), false); assert.equal(f.calls.some(call => call[0] === 'record'), true);
+});
+test('INC-006 T-R9 deploy(): a persistent or different post-migrate main answer records the failure and starts nothing', async () => {
+  for (const [answers, reason, calls] of [[[equalMain, gnutlsReset], /^Latest main unavailable after 6 transport failures/, 7], [[equalMain, otherMain], /^Stale main revision$/, 2]]) {
+    const f = fixture(), origin = scriptedOrigin(answers);
+    f.adapter.assertCurrent = async () => { f.calls.push(['assertCurrent']); origin.read(); };
+    await assert.rejects(deploy(f.adapter, config, revision, 15), error => reason.test(error.message));
+    assert.equal(origin.calls.length, calls);
+    const failures = f.calls.filter(call => call[0] === 'failure'); assert.equal(failures.length, 1);
+    const record = failures[0][1];
+    assert.equal(record.phase, 'assertCurrent:post-migrate'); assert.equal(record.servicesMayBeStopped, true); assert.match(record.reason, reason);
+    assert.deepEqual(record.completedPhases.slice(-2), ['install', 'migrate']);
+    assert.ok(record.recovery.some(text => /restore the application and backend\/pb_data from this run's own backup/.test(text)));
+    assert.equal(f.calls.some(call => call[0] === 'start'), false); assert.equal(f.calls.some(call => call[0] === 'record'), false);
+    assert.equal(f.calls.at(-1)[0], 'unlock');
+  }
+});
+test('INC-006 T-R10 production adapter: a GnuTLS reset of git ls-remote is retried and the records carry the attempt history', async t => productionFixture(t, f => {
+  const original = cp.execFileSync, gitCalls = [];
+  let resets = 1, persistent = false;
+  cp.execFileSync = (file, args, options) => {
+    if (file === 'git') {
+      gitCalls.push({ args, options });
+      if (resets-- > 0 || persistent) { f.commands.push([file, ...args]); throw Object.assign(new Error('Command failed: git ' + args.join(' ') + '\n' + gnutlsReset.stderr), { status: 128, signal: null, stdout: '', stderr: gnutlsReset.stderr }); }
+    }
+    return original(file, args, options);
+  }; syncBuiltinESMExports();
+  try {
+    const clock = fakeClock(), adapter = productionAdapter(f.bundle, f.config, revision, 2, f.configFile, { clock });
+    adapter.verify(); adapter.lock(); adapter.assertCurrent();
+    assert.deepEqual(clock.sleeps, [5000]); assert.equal(gitCalls.length, 2);
+    for (const call of gitCalls) {
+      assert.deepEqual(call.args, ['ls-remote', '--exit-code', 'origin', 'refs/heads/main']);
+      assert.equal(call.options.timeout, 30000); assert.equal(call.options.killSignal, 'SIGKILL');
+      assert.deepEqual([call.options.env.GIT_TERMINAL_PROMPT, call.options.env.LC_ALL, call.options.env.GIT_HTTP_LOW_SPEED_LIMIT, call.options.env.GIT_HTTP_LOW_SPEED_TIME], ['0', 'C', '1000', '10']);
+    }
+    adapter.record({ status: 'deployed', revision, runNumber: 2 });
+    let state = JSON.parse(fs.readFileSync(f.state));
+    assert.equal(state.currentMainChecks[0].result, 'equal');
+    assert.deepEqual(state.currentMainChecks[0].attempts.map(item => [item.kind, item.status, item.timedOut]), [['transport', 128, false], ['equal', 0, false]]);
+    assert.match(state.currentMainChecks[0].attempts[0].stderrFirstLine, /GnuTLS recv error \(-110\)/);
+    persistent = true;
+    assert.throws(() => adapter.assertCurrent(), /Latest main unavailable after 6 transport failures/);
+    adapter.failure({ status: 'failed', revision, reason: 'fixture' });
+    state = JSON.parse(fs.readFileSync(f.state));
+    assert.equal(state.currentMainChecks[1].result, 'refused'); assert.equal(state.currentMainChecks[1].attempts.length, 6);
+    assert.ok(state.currentMainChecks[1].attempts.every(item => item.kind === 'transport' && /GnuTLS/.test(item.stderrFirstLine)));
+    adapter.unlock();
+  } finally { cp.execFileSync = original; syncBuiltinESMExports(); }
+}));
+
+test('INC-006 CC-2 host commands carry a per-class timeout with SIGKILL', async t => productionFixture(t, f => {
+  const original = cp.execFileSync, seen = [];
+  cp.execFileSync = (file, args, options) => {
+    seen.push([path.basename(file), args[0] === '-n' ? args[1] : args[0], options?.timeout, options?.killSignal]);
+    if (file === 'python3') return '{}';
+    if (file.endsWith('/backend/pocketbase') && args[0] === 'migrate') return '';
+    return original(file, args, options);
+  }; syncBuiltinESMExports();
+  try {
+    const adapter = f.adapter;
+    adapter.verify(); adapter.velocity(); adapter.stop('pocketbase'); adapter.start('map-proxy');
+    assert.deepEqual(checkDatabases(f.webRoot), {});
+    // This isolated call has no backup directory, so it stops right after the migrate command.
+    assert.throws(() => adapter.migrate(), { code: 'ERR_INVALID_ARG_TYPE' });
+    const kind = ([file, first]) => file === 'python3' ? 'database' : file === 'pocketbase' && first === 'migrate' ? 'migrate' : file === 'sudo' ? 'serviceControl' : 'query';
+    for (const call of seen) { assert.equal(call[2], hostCommandTimeouts[kind(call)], call.join(' ')); assert.equal(call[3], 'SIGKILL', call.join(' ')); }
+    assert.deepEqual([...new Set(seen.map(kind))].sort(), ['database', 'migrate', 'query', 'serviceControl']);
+    assert.deepEqual(hostCommandTimeouts, { query: 60000, serviceControl: 300000, database: 600000, migrate: 600000 });
+  } finally { cp.execFileSync = original; syncBuiltinESMExports(); }
+}));
+test('INC-006 CC-2 a host command timeout reaches the failure record and the lock is released', async t => productionFixture(t, async f => {
+  const original = cp.execFileSync;
+  cp.execFileSync = (file, args, options) => {
+    if (file === 'sudo' && args[1] === 'systemctl' && args[2] === 'stop' && args[3] === 'pocketbase') { f.commands.push([file, ...args]); throw Object.assign(new Error('spawnSync sudo ETIMEDOUT'), { code: 'ETIMEDOUT', signal: 'SIGKILL', status: null }); }
+    return original(file, args, options);
+  }; syncBuiltinESMExports();
+  try {
+    const reason = 'Host command timed out after 300 s: sudo -n systemctl stop pocketbase';
+    await assert.rejects(deploy(f.adapter, f.config, revision, 2), error => error.message === reason && error.cause?.code === 'ETIMEDOUT');
+    const failed = JSON.parse(fs.readFileSync(f.state));
+    assert.equal(failed.status, 'failed'); assert.equal(failed.reason, reason); assert.equal(failed.phase, 'stop:pocketbase'); assert.equal(failed.servicesMayBeStopped, true);
+    assert.deepEqual(failed.completedPhases, ['verify', 'lock', 'assertCurrent:pre-stop', 'velocity', 'stop:velocity-sync', 'guard']);
+    assert.match(failed.recovery[0], /^1\. The PocketBase stop did not complete/);
+    assert.ok(failed.recovery.some(text => /install did not run/.test(text)) && failed.recovery.some(text => /velocity-sync runtime leaf/.test(text)));
+    assert.equal(failed.currentMainChecks[0].result, 'equal');
+    assert.equal(fs.existsSync(path.join(f.config.stateRoot, 'deployment.lock')), false);
+    assert.equal(f.commands.some(call => call[0] === 'sudo' && ['start', 'restart'].includes(call[3])), false);
+  } finally { cp.execFileSync = original; syncBuiltinESMExports(); }
+}));
+
+test('INC-006 CC-3 pre-lock free space and inode floors refuse before any command or lock', async t => productionFixture(t, f => {
+  const required = assertCapacity(f.config, f.bundle, { statfs: () => ampleFilesystem() });
+  // The small fixture is below the measured attempt, so the floor is 2 x 2.6 GB.
+  assert.equal(required.requiredBytes, capacityPolicy.safetyFactor * capacityPolicy.measuredAttemptBytes);
+  assert.equal(required.liveEntries, 5);
+  assert.equal(required.requiredInodes, capacityPolicy.safetyFactor * (capacityPolicy.copiesPerAttempt * 5 + inventory(f.bundle).length));
+  const enough = { bavail: Math.ceil(required.requiredBytes / 4096), ffree: required.requiredInodes };
+  for (const [name, low] of [['bytes', { bavail: enough.bavail - 1 }], ['inodes', { ffree: required.requiredInodes - 1 }]]) for (const root of [f.config.webRoot, f.config.backupRoot]) {
+    fs.statfsSync = file => ampleFilesystem(file === root ? { ...enough, ...low } : enough);
+    const commands = f.commands.length;
+    assert.throws(() => f.createAdapter().verify(), error => error.message.startsWith('Insufficient free space on the filesystem of ' + root + ':'), name + ' ' + root);
+    assert.equal(f.commands.length, commands, name + ' ' + root);
+  }
+  fs.statfsSync = () => ampleFilesystem(enough); f.createAdapter().verify();
+  // A filesystem without a fixed inode table (no inode totals) is judged on bytes only.
+  fs.statfsSync = () => ampleFilesystem({ ...enough, files: 0, ffree: 0 }); f.createAdapter().verify();
+  for (const file of [f.state, f.guard, path.join(f.config.stateRoot, 'deployment.lock')]) assert.equal(fs.existsSync(file), false);
+}));
+test('INC-006 CC-3 the root child closure cap is checked before the lock for the live tree and the candidate', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), webRoot = path.join(root, 'site'), backupRoot = path.join(root, 'backup');
+  fs.mkdirSync(bundle); createBundle(bundle); fs.mkdirSync(backupRoot);
+  fs.mkdirSync(path.join(webRoot, 'backend/pb_data/storage'), { recursive: true }); fs.writeFileSync(path.join(webRoot, 'backend/pb_data/data.db'), 'data');
+  fs.writeFileSync(path.join(webRoot, 'backend/pocketbase'), 'binary'); fs.cpSync(path.join(bundle, 'dist'), path.join(webRoot, 'dist'), { recursive: true });
+  const statfs = () => ampleFilesystem(), settings = { webRoot, backupRoot };
+  const counts = assertCapacity(settings, bundle, { statfs });
+  // Live: dist (2) + pb_data, storage, data.db (3) + binary (1); candidate: bundle + the same data and binary.
+  assert.equal(counts.liveEntries, 6); assert.equal(counts.candidateEntries, inventory(bundle).length + 4);
+  assertCapacity(settings, bundle, { statfs, cap: counts.candidateEntries });
+  assert.throws(() => assertCapacity(settings, bundle, { statfs, cap: counts.candidateEntries - 1 }), { message: `Candidate application closure would have ${counts.candidateEntries} entries; the next run's root child refuses more than ${counts.candidateEntries - 1}` });
+  assert.throws(() => assertCapacity(settings, bundle, { statfs, cap: 5 }), { message: 'Live application closure has 6 entries; the root child refuses more than 5 after the stop' });
+  // The JS cap is the root child's own cap.
+  const source = fs.readFileSync(path.join(projectRoot, 'scripts/deployment.mjs'), 'utf8');
+  assert.equal(rawClosureCap, 20000); assert.ok(source.includes(`len(raw_manifest['application'])<=${rawClosureCap}`));
+  // The fields read from a real statfs exist on this Node version.
+  const real = fs.statfsSync(root); for (const key of ['bavail', 'bsize', 'ffree', 'files']) assert.equal(typeof real[key], 'number', key);
+});
+
+test('INC-006 CC-11 pb_data entries the runner cannot remove are refused before the lock with a bounded sample', { skip: process.geteuid() === 0 && 'root bypasses directory permissions' }, async t => productionFixture(t, f => {
+  const data = path.join(f.webRoot, 'backend/pb_data'), storage = path.join(data, 'storage'), records = path.join(storage, 'records');
+  fs.mkdirSync(records, { recursive: true });
+  const uploads = Array.from({ length: 12 }, (_, index) => path.join(records, 'upload-' + String(index).padStart(2, '0') + '.bin'));
+  for (const file of uploads) fs.writeFileSync(file, 'upload made by PocketBase');
+  // A read-only file in a writable directory is removable.
+  fs.writeFileSync(path.join(data, 'read-only.db'), 'data'); fs.chmodSync(path.join(data, 'read-only.db'), 0o400);
+  assertPbDataRemovable(f.webRoot); f.createAdapter().verify();
+  fs.chmodSync(records, 0o555); t.after(() => { try { fs.chmodSync(records, 0o755); } catch (error) { if (error.code !== 'ENOENT') throw error; } });
+  const blocked = [storage, records, ...uploads];
+  const commands = f.commands.length;
+  assert.throws(() => f.createAdapter().verify(), { message: `backend/pb_data entries not removable by runner (14): ${blocked.slice(0, 10).join(', ')}, ...` });
+  assert.equal(f.commands.length, commands);
+  for (const file of [f.state, f.guard, path.join(f.config.stateRoot, 'deployment.lock')]) assert.equal(fs.existsSync(file), false);
+}));
+
+// Loopback answers after the start: health, auth-with-password and protected reads are scripted.
+function loopbackFixture(f, script) {
+  const identities = [{ id: 'adminfixture001', role: 'admin' }, { id: 'svcfixture00001', role: 'service' }];
+  f.config.recoveryIdentities = identities;
+  f.config.targetAuthentication = identities.map(item => ({ ...item, identity: item.role + '@example.invalid', passwordEnv: 'INC006_FIXTURE_PASSWORD', ...(item.role === 'service' ? { services: ['velocity-sync'] } : {}) }));
+  const requests = [], original = globalThis.fetch, password = process.env.INC006_FIXTURE_PASSWORD, clock = fakeClock();
+  process.env.INC006_FIXTURE_PASSWORD = 'fixture-only';
+  globalThis.fetch = async (url, init = {}) => {
+    const route = new URL(url).pathname, kind = route === '/api/health' ? 'health' : route.endsWith('/auth-with-password') ? 'auth' : 'read';
+    requests.push({ kind, route, signal: init.signal });
+    const scripted = script(kind, requests.filter(item => item.kind === kind).length);
+    if (scripted instanceof Error) throw scripted;
+    let answer = scripted;
+    if (!answer && kind === 'health') answer = { status: 200, body: { code: 200 } };
+    if (!answer && kind === 'auth') { const item = identities.find(value => value.role + '@example.invalid' === JSON.parse(init.body).identity); answer = { status: 200, body: { token: 'token-' + item.id, record: { id: item.id, is_admin: true, service_account: item.role === 'service', verified: true } } }; }
+    if (!answer) answer = { status: 200, body: { items: [] } };
+    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'Content-Type': 'application/json' } });
+  };
+  return { requests, clock, adapter: productionAdapter(f.bundle, f.config, revision, 2, f.configFile, { clock }), count: kind => requests.filter(item => item.kind === kind).length,
+    restore: () => { globalThis.fetch = original; if (password === undefined) delete process.env.INC006_FIXTURE_PASSWORD; else process.env.INC006_FIXTURE_PASSWORD = password; } };
+}
+test('INC-006 CC-5 health is decided by the loop success flag: healthy at the third request, then no further health request', async t => productionFixture(t, async f => {
+  const loop = loopbackFixture(f, (kind, count) => kind !== 'health' || count === 3 ? undefined : count === 2 ? { status: 503, body: { code: 503 } } : new TypeError('fetch failed'));
+  try {
+    await loop.adapter.health();
+    assert.equal(loop.count('health'), 3); assert.deepEqual(loop.clock.sleeps, [500, 500]);
+    assert.equal(loop.count('auth'), 2); assert.equal(loop.count('read'), 2);
+    assert.ok(loop.requests.every(item => item.signal instanceof AbortSignal));
+  } finally { loop.restore(); }
+}));
+test('INC-006 CC-5 health that never answers 200 refuses after 30 bounded requests without authenticating', async t => productionFixture(t, async f => {
+  const loop = loopbackFixture(f, kind => kind === 'health' ? new TypeError('fetch failed') : undefined);
+  try {
+    await assert.rejects(loop.adapter.health(), { message: 'PocketBase startup health failed' });
+    assert.equal(loop.requests.length, 30); assert.equal(loop.clock.sleeps.length, 30);
+  } finally { loop.restore(); }
+}));
+test('INC-006 CC-5 loopback authentication retries a network error, a 5xx and a 429 boundedly', async t => productionFixture(t, async f => {
+  for (const [name, failure] of [['network', () => new TypeError('fetch failed')], ['5xx', () => ({ status: 503, body: { message: 'unavailable' } })], ['429', () => ({ status: 429, body: { message: 'Too Many Requests.' } })]]) {
+    const loop = loopbackFixture(f, (kind, count) => kind === 'auth' && count === 1 ? failure() : undefined);
+    try {
+      await loop.adapter.health();
+      assert.equal(loop.count('auth'), 3, name); assert.deepEqual(loop.clock.sleeps, [loopbackPolicy.retryDelayMs], name);
+    } finally { loop.restore(); }
+  }
+}));
+test('INC-006 CC-5 any other loopback answer is final; persistent failures stop after three attempts', async t => productionFixture(t, async f => {
+  for (const [script, message, kind, attempts, sleeps] of [
+    [kind => kind === 'auth' ? { status: 401, body: { message: 'Failed to authenticate.' } } : undefined, 'Target authentication failed', 'auth', 1, []],
+    [kind => kind === 'auth' ? { status: 400, body: { message: 'Failed to authenticate.' } } : undefined, 'Target authentication failed', 'auth', 1, []],
+    [kind => kind === 'auth' ? { status: 503, body: { message: 'unavailable' } } : undefined, 'Target authentication failed', 'auth', 3, [3000, 3000]],
+    [kind => kind === 'read' ? new TypeError('fetch failed') : undefined, 'fetch failed', 'read', 3, [3000, 3000]],
+  ]) {
+    const loop = loopbackFixture(f, script);
+    try {
+      await assert.rejects(loop.adapter.health(), { message });
+      assert.equal(loop.count(kind), attempts, message + ' ' + attempts); assert.deepEqual(loop.clock.sleeps, sleeps);
+    } finally { loop.restore(); }
+  }
+}));
+
+const deployPhase = { assertCurrent: 'assertCurrent:pre-stop', 'stop-velocity-sync': 'stop:velocity-sync', 'stop-pocketbase': 'stop:pocketbase', 'start-pocketbase': 'start:pocketbase', 'start-velocity-sync': 'start:velocity-sync', 'start-map-proxy': 'start:map-proxy' };
+const deployOrder = ['verify', 'lock', 'assertCurrent:pre-stop', 'velocity', 'stop:velocity-sync', 'guard', 'stop:pocketbase', 'backup', 'rehearse', 'baseline', 'install', 'migrate', 'assertCurrent:post-migrate', 'start:pocketbase', 'health', 'start:velocity-sync', 'start:map-proxy', 'assertVelocity', 'record'];
+test('INC-006 CC-6 the failure record names the phase reached, the completed phases, servicesMayBeStopped and an ordered recovery plan', async () => {
+  const has = (plan, pattern) => pattern.test(plan.join('\n'));
+  for (const stage of ['guard', 'stop-pocketbase', 'backup', 'rehearse', 'baseline', 'install', 'migrate', 'start-pocketbase', 'health', 'start-velocity-sync', 'start-map-proxy', 'assertVelocity', 'record']) {
+    const f = fixture(stage); await assert.rejects(deploy(f.adapter, config, revision, 16), /injected/);
+    const failures = f.calls.filter(call => call[0] === 'failure'); assert.equal(failures.length, 1, stage);
+    const record = failures[0][1], phase = deployPhase[stage] ?? stage, plan = record.recovery;
+    assert.equal(record.phase, phase, stage); assert.deepEqual(record.completedPhases, deployOrder.slice(0, deployOrder.indexOf(phase)), stage);
+    assert.equal(record.servicesMayBeStopped, !['assertVelocity', 'record'].includes(stage), stage);
+    assert.ok(plan.every((text, index) => text.startsWith(index + 1 + '. ')), stage);
+    const among = (...stages) => stages.includes(stage);
+    assert.equal(has(plan, /restore the application and backend\/pb_data from this run's own backup/), among('install', 'migrate', 'start-pocketbase'), stage + ' restore');
+    assert.equal(has(plan, /install did not run, so the live application tree and backend\/pb_data are unchanged/), among('stop-pocketbase', 'backup', 'rehearse', 'baseline'), stage + ' no restore');
+    assert.equal(has(plan, /Start PocketBase \(sudo systemctl start pocketbase\)/), among('stop-pocketbase', 'backup', 'rehearse', 'baseline', 'install', 'migrate', 'start-pocketbase'), stage + ' start');
+    assert.equal(has(plan, /started on the installed and migrated candidate/), among('health', 'start-velocity-sync', 'start-map-proxy'), stage + ' candidate');
+    assert.equal(has(plan, /Every website service was started again by this run/), among('assertVelocity', 'record'), stage + ' all started');
+    assert.equal(has(plan, /velocity-sync runtime leaf/), !among('start-map-proxy', 'assertVelocity', 'record'), stage + ' sync leaf');
+    assert.equal(has(plan, /map-proxy was not restarted by this run: check that each runs from the live backend\/scripts/), among('install', 'migrate', 'start-pocketbase', 'health', 'start-velocity-sync', 'start-map-proxy'), stage + ' proxy cwd');
+    assert.equal(has(plan, /map-proxy was not touched by this run/), among('guard', 'stop-pocketbase', 'backup', 'rehearse', 'baseline'), stage + ' proxy untouched');
+    assert.match(plan.at(-1), /archive \/fixture\/state\/deployment\.json \(for example as deployment\.failed-run-16\.json\)/);
+  }
+});
+test('INC-006 CC-6 the recovery plan follows the runtime leaves the finite child still owns', () => {
+  const completed = deployOrder.slice(0, deployOrder.indexOf('start:velocity-sync'));
+  const plan = maintenance => recoveryPlan({ phase: 'start:velocity-sync', completed, config, maintenance, runNumber: 17 }).join('\n');
+  let text = plan({ changed: true, leaves: { velocity: [1, 2] }, frozen: true, killed: true, stopped: true });
+  assert.doesNotMatch(text, /velocity-sync runtime leaf/); assert.match(text, /velocity \(Java\) runtime leaf/); assert.doesNotMatch(text, /uncertain|still frozen/);
+  text = plan({ changed: true, leaves: {}, frozen: true, killed: true, stopped: true });
+  assert.doesNotMatch(text, /runtime leaf/); assert.match(text, /Start velocity-sync/);
+  text = plan({ changed: true, uncertain: true });
+  assert.match(text, /finite stop state is uncertain/); assert.match(text, /velocity-sync runtime leaf/); assert.match(text, /velocity \(Java\) runtime leaf/);
+  text = recoveryPlan({ phase: 'stop:velocity-sync', completed: deployOrder.slice(0, 4), config, maintenance: { changed: true, leaves: { velocity: [1], 'velocity-sync': [2] }, frozen: true, killed: false }, runNumber: 17 }).join('\n');
+  assert.match(text, /still frozen/); assert.doesNotMatch(text, /PocketBase/); assert.match(text, /map-proxy was not touched/);
+  assert.deepEqual(recoveryPlan({ phase: 'velocity', completed: deployOrder.slice(0, 3), config, maintenance: null, runNumber: 17 }), ['1. Nothing was stopped or written by this run; no recovery is needed.']);
+});
+test('INC-006 CC-6 errors thrown by failure() or unlock() are reported after the original reason, never instead of it', async () => {
+  let f = fixture('migrate');
+  f.adapter.failure = async record => { f.calls.push(['failure', record]); throw new Error('state write failed: ENOSPC'); };
+  await assert.rejects(deploy(f.adapter, config, revision, 18), error => error.message === 'injected migrate' && JSON.stringify(error.secondaryErrors) === JSON.stringify([{ step: 'failure', message: 'state write failed: ENOSPC' }]));
+  assert.equal(f.calls.at(-1)[0], 'unlock');
+  f = fixture('install');
+  f.adapter.unlock = async () => { f.calls.push(['unlock']); throw new Error('Maintenance lock changed'); };
+  let rejected;
+  await assert.rejects(deploy(f.adapter, config, revision, 19), error => { rejected = error; return error.message === 'injected install'; });
+  assert.deepEqual(rejected.secondaryErrors, [{ step: 'unlock', message: 'Maintenance lock changed' }]);
+  assert.equal(f.calls.filter(call => call[0] === 'failure').length, 1);
+  assert.equal(failureReport(rejected), 'injected install\nSecondary failure in unlock (the reason above is the original one): Maintenance lock changed\n');
+  f = fixture('health');
+  f.adapter.failure = async () => { throw new Error('record refused'); };
+  f.adapter.unlock = async () => { throw new Error('unlock refused'); };
+  await assert.rejects(deploy(f.adapter, config, revision, 20), error => error.message === 'injected health' && error.secondaryErrors.map(item => item.step).join() === 'failure,unlock');
+  // After success an unlock failure still fails the run, as before.
+  f = fixture();
+  f.adapter.unlock = async () => { throw new Error('unlock refused after success'); };
+  await assert.rejects(deploy(f.adapter, config, revision, 21), { message: 'unlock refused after success' });
+  assert.equal(f.calls.some(call => call[0] === 'record'), true);
+  // The origin attempt history follows the reason.
+  let refused; try { scriptedOrigin([gnutlsReset]).read(); } catch (error) { refused = error; }
+  const report = failureReport(refused).split('\n');
+  assert.match(report[0], /^Latest main unavailable after 6 transport failures/);
+  assert.equal(JSON.parse(report[1].slice('Origin main attempts: '.length)).length, 6);
+});
+test('INC-006 CC-6 a failed state write leaves the previous record intact and no partial file', async t => productionFixture(t, f => {
+  const adapter = f.adapter; adapter.verify(); adapter.lock();
+  adapter.record({ status: 'deployed', revision, runNumber: 1 });
+  const previous = fs.readFileSync(f.state), firstInode = fs.statSync(f.state).ino, originalWrite = fs.writeFileSync;
+  fs.writeFileSync = (target, data, ...rest) => {
+    if (typeof target !== 'number') return originalWrite(target, data, ...rest);
+    originalWrite(target, String(data).slice(0, 16)); // part of the new record reaches the disk
+    throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+  };
+  try { assert.throws(() => adapter.failure({ status: 'failed', revision, reason: 'fixture' }), { code: 'ENOSPC' }); }
+  finally { fs.writeFileSync = originalWrite; }
+  assert.deepEqual(fs.readFileSync(f.state), previous); assert.equal(JSON.parse(previous).status, 'deployed');
+  assert.deepEqual(fs.readdirSync(f.config.stateRoot).filter(name => name !== 'deployment.lock'), ['deployment.json']);
+  // A successful write replaces the record by rename: complete bytes, private mode, a new inode.
+  adapter.failure({ status: 'failed', revision, reason: 'fixture' });
+  assert.equal(JSON.parse(fs.readFileSync(f.state)).status, 'failed'); assert.equal(fs.statSync(f.state).mode & 0o777, 0o600);
+  assert.notEqual(fs.statSync(f.state).ino, firstInode);
+  adapter.unlock();
+}));
+
+test('INC-006 CC-7 install refills backend/scripts in place: same inode, bundle content and modes, stale entries gone', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live'), scripts = path.join(bundle, 'backend/scripts');
+  fs.mkdirSync(bundle); createBundle(bundle);
+  fs.mkdirSync(path.join(scripts, 'lib')); fs.writeFileSync(path.join(scripts, 'lib/proxy.js'), 'candidate library'); fs.chmodSync(path.join(scripts, 'lib/proxy.js'), 0o640);
+  fs.symlinkSync('sync_velocity.js', path.join(scripts, 'current.js')); fs.chmodSync(scripts, 0o750);
+  fs.writeFileSync(path.join(bundle, 'release.json'), JSON.stringify({ revision, paths: artifactPaths, files: inventory(bundle) }));
+  const target = path.join(live, 'backend/scripts');
+  fs.mkdirSync(path.join(target, 'stale-dir'), { recursive: true }); fs.writeFileSync(path.join(target, 'stale-dir/old.js'), 'old');
+  fs.writeFileSync(path.join(target, 'sync_velocity.js'), 'old daemon'); fs.symlinkSync('sync_velocity.js', path.join(target, 'old-link.js')); fs.chmodSync(target, 0o700);
+  const before = fs.statSync(target);
+  installBundle(bundle, live, revision);
+  const after = fs.statSync(target);
+  assert.deepEqual([after.dev, after.ino], [before.dev, before.ino]);
+  assert.deepEqual(inventory(live, ['backend/scripts']), inventory(bundle, ['backend/scripts']));
+  assert.equal(after.mode & 0o777, 0o750); assert.equal(fs.statSync(path.join(target, 'lib/proxy.js')).mode & 0o777, 0o640);
+  assert.equal(fs.readlinkSync(path.join(target, 'current.js')), 'sync_velocity.js');
+  for (const stale of ['stale-dir', 'old-link.js']) assert.equal(fs.lstatSync(path.join(target, stale), { throwIfNoEntry: false }), undefined, stale);
+  assert.equal(fs.readFileSync(path.join(target, 'sync_velocity.js'), 'utf8'), 'candidate protected daemon');
+});
+test('INC-006 CC-7 an aliased backend/scripts is refused before any artifact is touched; a directory the runner does not own is replaced as before', t => {
+  const root = temp(t), bundle = path.join(root, 'bundle'), live = path.join(root, 'live'), elsewhere = path.join(root, 'elsewhere');
+  fs.mkdirSync(bundle); createBundle(bundle);
+  fs.mkdirSync(path.join(live, 'dist'), { recursive: true }); fs.writeFileSync(path.join(live, 'dist/old.js'), 'old frontend');
+  fs.mkdirSync(path.join(live, 'backend')); fs.mkdirSync(elsewhere); fs.writeFileSync(path.join(elsewhere, 'keep.js'), 'unrelated');
+  fs.symlinkSync(elsewhere, path.join(live, 'backend/scripts'));
+  assert.throws(() => installBundle(bundle, live, revision), /Symlink/);
+  assert.equal(fs.readFileSync(path.join(live, 'dist/old.js'), 'utf8'), 'old frontend'); assert.deepEqual(fs.readdirSync(elsewhere), ['keep.js']);
+  fs.unlinkSync(path.join(live, 'backend/scripts')); fs.mkdirSync(path.join(live, 'backend/scripts')); fs.writeFileSync(path.join(live, 'backend/scripts/old.js'), 'old');
+  const target = path.join(live, 'backend/scripts'), before = fs.statSync(target), lstat = fs.lstatSync;
+  // Foreign ownership needs root to create; only the lstat owner of this one directory is substituted.
+  fs.lstatSync = (file, ...args) => { const value = lstat(file, ...args); return file === target ? new Proxy(value, { get: (v, k) => k === 'uid' ? v.uid + 1 : Reflect.get(v, k) }) : value; };
+  syncBuiltinESMExports();
+  try { installBundle(bundle, live, revision); } finally { fs.lstatSync = lstat; syncBuiltinESMExports(); }
+  assert.notEqual(fs.statSync(target).ino, before.ino);
+  assert.deepEqual(inventory(live, ['backend/scripts']), inventory(bundle, ['backend/scripts']));
+});
+
+let removedFixture;
+test('INC-006 CC-4 fixtures live in the run sandbox; RUNNER_TEMP is used when the runner sets it', t => {
+  const root = temp(t); removedFixture = root;
+  assert.equal(path.dirname(root), sandbox); assert.equal(os.tmpdir(), sandbox); assert.equal(process.env.TMPDIR, sandbox);
+  fs.mkdirSync(path.join(root, 'read-only/nested'), { recursive: true }); fs.writeFileSync(path.join(root, 'read-only/nested/file'), 'fixture');
+  fs.chmodSync(path.join(root, 'read-only/nested'), 0o555); fs.chmodSync(path.join(root, 'read-only'), 0o555);
+  const runnerTemp = path.join(root, 'runner-temp'); fs.mkdirSync(runnerTemp);
+  assert.equal(fixtureBase({ RUNNER_TEMP: runnerTemp }), fs.realpathSync(runnerTemp));
+  assert.equal(fixtureBase({}), os.tmpdir()); assert.equal(fixtureBase({ RUNNER_TEMP: '' }), os.tmpdir());
+  assert.throws(() => fixtureBase({ RUNNER_TEMP: 'relative/runner-temp' }), /Invalid RUNNER_TEMP for test fixtures/);
+  assert.throws(() => fixtureBase({ RUNNER_TEMP: path.join(root, 'missing') }), { code: 'ENOENT' });
+});
+test('INC-006 CC-4 the previous fixture, read-only parts included, is gone after its test', { skip: retainFixtures && 'fixtures retained on request' }, () => {
+  assert.ok(removedFixture); assert.equal(fs.existsSync(removedFixture), false);
+});
+// Keep this the last test of the file.
+test('INC-006 CC-4 suite-level check: every fixture and PocketBase test directory of this file was removed', { skip: retainFixtures && 'fixtures retained on request' }, t => {
+  assert.deepEqual(fixtureRoots.filter(root => fs.existsSync(root)), []);
+  const fixtures = () => fs.readdirSync(sandbox).filter(name => /^hololive-(deployment|pb-test)-/.test(name));
+  assert.deepEqual(fixtures(), []);
+  // The check sees a leftover.
+  const leftover = fs.mkdtempSync(path.join(sandbox, 'hololive-deployment-'));
+  try { assert.deepEqual(fixtures(), [path.basename(leftover)]); } finally { removeFixture(leftover); }
+  assert.deepEqual(fixtures(), []);
+  for (const name of fs.readdirSync(sandbox)) t.diagnostic('other sandbox entry, removed with the sandbox: ' + name);
+});
