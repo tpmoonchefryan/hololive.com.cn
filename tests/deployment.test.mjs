@@ -801,7 +801,7 @@ async function closeOutcomeCases() {
   }
 }
 const originals={readFileSync:fs.readFileSync,statSync:fs.statSync,lstatSync:fs.lstatSync,existsSync:fs.existsSync,realpathSync:fs.realpathSync,cpSync:fs.cpSync};
-const environment={...process.env}, forwardOutputs=[], ownedChildren=[];
+const environment={...process.env}, forwardOutputs=[], ownedChildren=[], pinnedHandles=[];
 const ownedFilesystem={root,removed:false,retainedForwardOutputs:[],errors:[]};
 let bound, primaryError, closeoutError;
 function observe(id,expected,details){observations.push({id,expected,...details});write(path.join(evidence,'probes-003.json'),{candidate,root,production:false,lifecycleContext,guardCoverage,observations});}
@@ -1022,9 +1022,11 @@ const attempt=async callback=>{try{return {accepted:true,value:await callback()}
       const record=read(path.join(domain.config.stateRoot,'deployment.json'));
       const names=['backup.json','expected-recovery-contract.json','safe-recovery/backup.json'];
       const files=[...names.map(name=>path.join(record.backup,name)),...['velocity','velocity-sync'].map(unit=>path.join(domain.local,'runtime',unit+'.service.d','99-hololive-release-guard.conf'))];
-      return files.map(file=>({file,bytes:fs.readFileSync(file),mode:fs.lstatSync(file).mode,ino:fs.lstatSync(file).ino}));
+      // INC-007: an open handle pins each file: its inode number cannot be handed to a replacement (ext4 reuses
+      // freed numbers), and its link count drops to 0 if the file is unlinked. Closed in the closeout below.
+      return files.map(file=>{const fd=fs.openSync(file,'r');pinnedHandles.push(fd);return {file,fd,bytes:fs.readFileSync(file),mode:fs.lstatSync(file).mode,ino:fs.lstatSync(file).ino};});
     };
-    const unchangedFailureDomain=entries=>{for(const entry of entries){assert.deepEqual(fs.readFileSync(entry.file),entry.bytes);assert.equal(fs.lstatSync(entry.file).mode,entry.mode);assert.equal(fs.lstatSync(entry.file).ino,entry.ino);}};
+    const unchangedFailureDomain=entries=>{for(const entry of entries){const pinned=fs.fstatSync(entry.fd),now=fs.lstatSync(entry.file);assert.deepEqual(fs.readFileSync(entry.file),entry.bytes);assert.equal(now.mode,entry.mode);assert.equal(pinned.ino,entry.ino);assert.equal(pinned.nlink,1,entry.file);assert.deepEqual([now.dev,now.ino],[pinned.dev,pinned.ino],entry.file);}};
     const roleRetained=retainFailureDomain(roleDomain);
     const roleFailedBytes=fs.readFileSync(path.join(roleDomain.config.stateRoot,'deployment.json'));
     const roleGuardBytes=fs.readFileSync(path.join(roleDomain.webRoot,'backend/.velocity-maintenance'));
@@ -1204,6 +1206,8 @@ const attempt=async callback=>{try{return {accepted:true,value:await callback()}
   let childrenClosed=true;
   try {if(bound?.running){const service=await bound.running;await service.close();bound.running=null;}}
   catch(error){childrenClosed=false;closeoutFailure('child-close',error);}
+  // INC-007: release every failure-domain pin; a failed close is recorded like any other closeout failure.
+  for(const fd of pinnedHandles.splice(0)){try{fs.closeSync(fd);}catch(error){closeoutFailure('pinned-close',error);}}
   // Restoration and evidence persistence still run when setup or child close fails.
   try {Object.assign(fs,originals);cp.execFileSync=rawExec;syncBuiltinESMExports();for(const key of ['DISPOSABLE_HUMAN_TOKEN','DISPOSABLE_TARGET_PASSWORD','GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_EVENT_NAME','GITHUB_SERVER_URL'])if(environment[key]===undefined)delete process.env[key];else process.env[key]=environment[key];}
   catch(error){closeoutFailure('restore',error);}
@@ -2305,10 +2309,16 @@ test('INC-006 CC-7 install refills backend/scripts in place: same inode, bundle 
   const target = path.join(live, 'backend/scripts');
   fs.mkdirSync(path.join(target, 'stale-dir'), { recursive: true }); fs.writeFileSync(path.join(target, 'stale-dir/old.js'), 'old');
   fs.writeFileSync(path.join(target, 'sync_velocity.js'), 'old daemon'); fs.symlinkSync('sync_velocity.js', path.join(target, 'old-link.js')); fs.chmodSync(target, 0o700);
-  const before = fs.statSync(target);
-  installBundle(bundle, live, revision);
-  const after = fs.statSync(target);
-  assert.deepEqual([after.dev, after.ino], [before.dev, before.ino]);
+  // INC-007: the open handle pins the original directory; while it is open no other directory can get
+  // its inode number, so equal path and pinned identities prove the directory was never replaced.
+  const before = fs.statSync(target), held = fs.openSync(target, 'r');
+  let after;
+  try {
+    installBundle(bundle, live, revision);
+    const pinned = fs.fstatSync(held); after = fs.statSync(target);
+    assert.deepEqual([pinned.dev, pinned.ino], [before.dev, before.ino]);
+    assert.deepEqual([after.dev, after.ino], [pinned.dev, pinned.ino], 'backend/scripts is still the original directory');
+  } finally { fs.closeSync(held); }
   assert.deepEqual(inventory(live, ['backend/scripts']), inventory(bundle, ['backend/scripts']));
   assert.equal(after.mode & 0o777, 0o750); assert.equal(fs.statSync(path.join(target, 'lib/proxy.js')).mode & 0o777, 0o640);
   assert.equal(fs.readlinkSync(path.join(target, 'current.js')), 'sync_velocity.js');
@@ -2325,12 +2335,19 @@ test('INC-006 CC-7 an aliased backend/scripts is refused before any artifact is 
   assert.equal(fs.readFileSync(path.join(live, 'dist/old.js'), 'utf8'), 'old frontend'); assert.deepEqual(fs.readdirSync(elsewhere), ['keep.js']);
   fs.unlinkSync(path.join(live, 'backend/scripts')); fs.mkdirSync(path.join(live, 'backend/scripts')); fs.writeFileSync(path.join(live, 'backend/scripts/old.js'), 'old');
   const target = path.join(live, 'backend/scripts'), before = fs.statSync(target), lstat = fs.lstatSync;
-  // Foreign ownership needs root to create; only the lstat owner of this one directory is substituted.
-  fs.lstatSync = (file, ...args) => { const value = lstat(file, ...args); return file === target ? new Proxy(value, { get: (v, k) => k === 'uid' ? v.uid + 1 : Reflect.get(v, k) }) : value; };
-  syncBuiltinESMExports();
-  try { installBundle(bundle, live, revision); } finally { fs.lstatSync = lstat; syncBuiltinESMExports(); }
-  assert.notEqual(fs.statSync(target).ino, before.ino);
-  assert.deepEqual(inventory(live, ['backend/scripts']), inventory(bundle, ['backend/scripts']));
+  // INC-007: the open handle pins the old directory, so the new one cannot get its inode number
+  // (ext4 hands a freed number to the next directory created in the same parent; APFS never reuses one).
+  const held = fs.openSync(target, 'r');
+  try {
+    // Foreign ownership needs root to create; only the lstat owner of this one directory is substituted.
+    fs.lstatSync = (file, ...args) => { const value = lstat(file, ...args); return file === target ? new Proxy(value, { get: (v, k) => k === 'uid' ? v.uid + 1 : Reflect.get(v, k) }) : value; };
+    syncBuiltinESMExports();
+    try { installBundle(bundle, live, revision); } finally { fs.lstatSync = lstat; syncBuiltinESMExports(); }
+    const pinned = fs.fstatSync(held), after = fs.statSync(target);
+    assert.deepEqual([pinned.dev, pinned.ino], [before.dev, before.ino]);
+    assert.notDeepEqual([after.dev, after.ino], [pinned.dev, pinned.ino], 'backend/scripts is a different directory');
+    assert.deepEqual(inventory(live, ['backend/scripts']), inventory(bundle, ['backend/scripts']));
+  } finally { fs.closeSync(held); }
 });
 
 let removedFixture;
