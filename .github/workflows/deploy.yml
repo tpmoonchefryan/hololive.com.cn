@@ -34,7 +34,7 @@ jobs:
           test -n "$DEPLOY_CONFIG"
           test -f "$DEPLOY_CONFIG"
           test "$(git rev-parse HEAD)" = "$DEPLOY_REVISION"
-          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$DEPLOY_REVISION"
+          node scripts/deployment.mjs current-main "$DEPLOY_REVISION"
           node scripts/deployment-inputs.mjs host "$DEPLOY_CONFIG"
           node --version
           npm --version
