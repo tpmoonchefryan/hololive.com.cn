@@ -178,20 +178,21 @@ function interrupted(s, limit, how) {
   return spawnSync('python3', ['-I', '-c', interrupter, String(limit), how, tool, 'apply', BACKUP, '--root', s.root], { encoding: 'utf8', timeout: 120000 });
 }
 
-// Every path, type, mode, inode and modification time, and the bytes of every file.
+// Every path, type, mode, inode, modification and change time, and the bytes of every file. The change
+// time (INC-007) cannot be set by a copy, so a re-created entry differs even where ext4 reuses its inode number.
 function state(directory) {
   const out = {};
   const walk = relative => {
     const file = relative ? `${directory}/${relative}` : directory, info = fs.lstatSync(file);
-    if (info.isSymbolicLink()) out[relative] = ['link', fs.readlinkSync(file), info.ino];
+    if (info.isSymbolicLink()) out[relative] = ['link', fs.readlinkSync(file), info.ino, info.ctimeMs];
     else if (info.isDirectory()) {
-      out[relative] = ['directory', info.mode & 0o7777, info.ino, info.mtimeMs];
+      out[relative] = ['directory', info.mode & 0o7777, info.ino, info.mtimeMs, info.ctimeMs];
       for (const name of fs.readdirSync(file).sort()) walk(relative ? `${relative}/${name}` : name);
     } else if (info.isFile()) {
       let digest;
       try { digest = sha(fs.readFileSync(file)); } catch { digest = 'unreadable'; }
-      out[relative] = ['file', info.mode & 0o7777, info.ino, info.mtimeMs, info.size, digest];
-    } else out[relative] = ['special', info.mode, info.ino];
+      out[relative] = ['file', info.mode & 0o7777, info.ino, info.mtimeMs, info.ctimeMs, info.size, digest];
+    } else out[relative] = ['special', info.mode, info.ino, info.ctimeMs];
   };
   walk('');
   return out;
@@ -208,7 +209,7 @@ function assertRestored(s) {
 }
 const neighbours = s => ['backend/pocketbase', 'backend/.velocity-maintenance', 'backend/LICENSE.md', 'README.md'].map(name => {
   const info = fs.lstatSync(`${s.web}/${name}`);
-  return [name, info.ino, info.mode, info.mtimeMs, sha(fs.readFileSync(`${s.web}/${name}`))];
+  return [name, info.ino, info.mode, info.mtimeMs, info.ctimeMs, sha(fs.readFileSync(`${s.web}/${name}`))];
 });
 const systemctlCalls = s => fs.readFileSync(`${s.root}/systemctl.log`, 'utf8').trim().split('\n');
 const plan = (overrides = {}) => ({ dist: 'replace', 'backend/pb_migrations': 'replace', 'backend/pb_hooks': 'replace', 'backend/scripts': 'sync', 'package.json': 'keep', 'package-lock.json': 'keep', node_modules: 'keep', 'backend/pb_data': 'replace', ...overrides });
@@ -223,39 +224,47 @@ test('the known names are the deployment.mjs artifact paths plus the data and th
 test('a failed run is restored completely, backend/scripts keeps its inode and a second apply changes nothing', t => {
   const s = failedRun(t);
   const scripts = fs.lstatSync(`${s.web}/backend/scripts`).ino, before = neighbours(s), host = hostState(s);
-  const check = restore(s, 'check');
-  assert.equal(check.status, 0, check.raw);
-  assert.equal(check.out.ok, true);
-  assert.deepEqual(check.out.plan, plan());
-  assert.equal(check.out.changed, false);
-  assert.ok(check.out.differences.dist > 0 && check.out.differences.node_modules === 0);
-  assert.deepEqual(hostState(s), host, 'check writes nothing');
+  // INC-007: the open handle pins the original directory: while it is open no other directory can get its
+  // inode number (ext4 reuses freed numbers), so equal path and pinned identities prove it was kept. The
+  // pin also makes the tool's own scriptsDirectoryKept comparison exact.
+  const held = fs.openSync(`${s.web}/backend/scripts`, 'r');
+  try {
+    const check = restore(s, 'check');
+    assert.equal(check.status, 0, check.raw);
+    assert.equal(check.out.ok, true);
+    assert.deepEqual(check.out.plan, plan());
+    assert.equal(check.out.changed, false);
+    assert.ok(check.out.differences.dist > 0 && check.out.differences.node_modules === 0);
+    assert.deepEqual(hostState(s), host, 'check writes nothing');
 
-  const outside = outsideWebRoot(s);
-  const apply = restore(s, 'apply');
-  assert.equal(apply.status, 0, apply.raw);
-  assert.equal(apply.out.ok, true);
-  assert.deepEqual(outsideWebRoot(s), outside, 'backup, deployment record and configuration are never written');
-  assert.deepEqual(apply.out.completed, ['dist', 'backend/pb_migrations', 'backend/pb_hooks', 'backend/scripts', 'backend/pb_data']);
-  assert.equal(apply.out.mismatchedCount, 0);
-  assert.equal(apply.out.scriptsDirectoryKept, true);
-  assert.equal(apply.out.changed, true);
-  assertRestored(s);
-  assert.equal(fs.lstatSync(`${s.web}/backend/scripts`).ino, scripts, 'synchronized in place');
-  assert.equal(fs.existsSync(`${s.web}/backend/scripts/lib/candidate-only`), false);
-  assert.equal(fs.readFileSync(`${s.web}/backend/scripts/lib/old-only.js`, 'utf8'), 'removed by the candidate');
-  assert.equal(fs.readFileSync(`${s.web}/backend/pb_data/data.db`, 'utf8'), 'database before the deploy');
-  assert.equal(fs.existsSync(`${s.web}/backend/pb_data/data.db-wal`), false, 'the migration log does not survive');
-  assert.deepEqual(neighbours(s), before, 'binary, guard and other neighbours untouched');
+    const outside = outsideWebRoot(s);
+    const apply = restore(s, 'apply');
+    assert.equal(apply.status, 0, apply.raw);
+    assert.equal(apply.out.ok, true);
+    assert.deepEqual(outsideWebRoot(s), outside, 'backup, deployment record and configuration are never written');
+    assert.deepEqual(apply.out.completed, ['dist', 'backend/pb_migrations', 'backend/pb_hooks', 'backend/scripts', 'backend/pb_data']);
+    assert.equal(apply.out.mismatchedCount, 0);
+    assert.equal(apply.out.scriptsDirectoryKept, true);
+    assert.equal(apply.out.changed, true);
+    assertRestored(s);
+    const pinned = fs.fstatSync(held), now = fs.lstatSync(`${s.web}/backend/scripts`);
+    assert.equal(pinned.ino, scripts);
+    assert.deepEqual([now.dev, now.ino], [pinned.dev, pinned.ino], 'synchronized in place');
+    assert.equal(fs.existsSync(`${s.web}/backend/scripts/lib/candidate-only`), false);
+    assert.equal(fs.readFileSync(`${s.web}/backend/scripts/lib/old-only.js`, 'utf8'), 'removed by the candidate');
+    assert.equal(fs.readFileSync(`${s.web}/backend/pb_data/data.db`, 'utf8'), 'database before the deploy');
+    assert.equal(fs.existsSync(`${s.web}/backend/pb_data/data.db-wal`), false, 'the migration log does not survive');
+    assert.deepEqual(neighbours(s), before, 'binary, guard and other neighbours untouched');
 
-  const settled = hostState(s);
-  const again = restore(s, 'apply');
-  assert.equal(again.status, 0, again.raw);
-  assert.deepEqual(again.out.plan, allKeep);
-  assert.deepEqual(again.out.completed, []);
-  assert.equal(again.out.changed, false);
-  assert.deepEqual(hostState(s), settled, 'an apply with nothing to do changes nothing');
-  assert.ok(systemctlCalls(s).every(line => line === SHOW), 'the tool only reads the PocketBase state');
+    const settled = hostState(s);
+    const again = restore(s, 'apply');
+    assert.equal(again.status, 0, again.raw);
+    assert.deepEqual(again.out.plan, allKeep);
+    assert.deepEqual(again.out.completed, []);
+    assert.equal(again.out.changed, false);
+    assert.deepEqual(hostState(s), settled, 'an apply with nothing to do changes nothing');
+    assert.ok(systemctlCalls(s).every(line => line === SHOW), 'the tool only reads the PocketBase state');
+  } finally { fs.closeSync(held); }
 });
 
 test('a dependency change (package.json, package-lock.json, node_modules) is restored and converges', t => {
@@ -345,17 +354,22 @@ test('an apply killed with SIGKILL mid-copy converges on the next run and a thir
 
 test('a run killed inside the in-place scripts synchronization converges and keeps the directory inode', t => {
   const s = failedRun(t);
-  const scripts = fs.lstatSync(`${s.web}/backend/scripts`).ino;
-  // dist (4), migrations (1), hooks (1), then the second scripts file is cut off.
-  const killed = interrupted(s, 7, 'kill');
-  assert.equal(killed.signal, 'SIGKILL');
-  const second = restore(s, 'apply');
-  assert.equal(second.status, 0, second.raw);
-  assert.equal(second.out.plan['backend/scripts'], 'sync');
-  assert.equal(second.out.scriptsDirectoryKept, true);
-  assert.equal(fs.lstatSync(`${s.web}/backend/scripts`).ino, scripts);
-  assertRestored(s);
-  assert.deepEqual(restore(s, 'apply').out.plan, allKeep);
+  // INC-007: pinned across the killed run and the second apply, as in the test above.
+  const scripts = fs.lstatSync(`${s.web}/backend/scripts`).ino, held = fs.openSync(`${s.web}/backend/scripts`, 'r');
+  try {
+    // dist (4), migrations (1), hooks (1), then the second scripts file is cut off.
+    const killed = interrupted(s, 7, 'kill');
+    assert.equal(killed.signal, 'SIGKILL');
+    const second = restore(s, 'apply');
+    assert.equal(second.status, 0, second.raw);
+    assert.equal(second.out.plan['backend/scripts'], 'sync');
+    assert.equal(second.out.scriptsDirectoryKept, true);
+    const pinned = fs.fstatSync(held), now = fs.lstatSync(`${s.web}/backend/scripts`);
+    assert.equal(pinned.ino, scripts);
+    assert.deepEqual([now.dev, now.ino], [pinned.dev, pinned.ino], 'synchronized in place');
+    assertRestored(s);
+    assert.deepEqual(restore(s, 'apply').out.plan, allKeep);
+  } finally { fs.closeSync(held); }
 });
 
 test('preflight succeeds while PocketBase runs; check and apply refuse without changing anything', t => {

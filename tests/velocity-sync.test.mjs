@@ -235,7 +235,22 @@ async function realVelocityFiles(t, originals) {
     const file = nodePath.join(directory, name);
     return [name, { ino: (await fsp.stat(file)).ino, bytes: await fsp.readFile(file) }];
   })));
-  return { directory, identity, files: createVelocityFiles({ fs: fsp, directory, join: nodePath.join }) };
+  // INC-007: open handles pin the original files: while a handle is open no other file can get its inode
+  // number (ext4 hands freed numbers out again), and its link count drops to 0 if the file is unlinked.
+  const pin = async () => {
+    const held = await Promise.all(Object.keys(originals).map(async name => [name, await fsp.open(nodePath.join(directory, name), 'r')]));
+    return {
+      verify: async message => {
+        for (const [name, handle] of held) {
+          const pinned = await handle.stat(), now = await fsp.lstat(nodePath.join(directory, name));
+          assert.equal(pinned.nlink, 1, `${message}: ${name}`);
+          assert.deepEqual([now.dev, now.ino], [pinned.dev, pinned.ino], `${message}: ${name}`);
+        }
+      },
+      close: async () => { for (const [, handle] of held) await handle.close(); },
+    };
+  };
+  return { directory, identity, pin, files: createVelocityFiles({ fs: fsp, directory, join: nodePath.join }) };
 }
 
 test('C1 live-shaped settings accept zero connection/read timeouts and render them literally', () => {
@@ -261,19 +276,22 @@ test('C1 timeouts still reject -1, 1.5 and 2147483648 at stage generate without 
 test('unchanged live-shaped sync over real files with the new-format marker: no download, no restart, ok, no .bak left', async (t) => {
   const prepared = prepareVelocityConfig(liveShaped, liveServers, liveForcedHosts);
   const v = await realVelocityFiles(t, { 'velocity.toml': prepared.content, 'velocity.jar': Buffer.from([0x50, 0x4b, 3, 4]), 'forwarding.secret': `${prepared.secret}\n`, '.velocity_jar_ref': `${liveShaped.id}:${liveShaped.velocity_jar}\n` });
-  const before = await v.identity(), calls = [], reports = [];
-  // The daemon's JAR contract (syncJarIfNeeded): download only when the marker differs from "<settings.id>:<velocity_jar>".
-  // The actual daemon path is exercised against real PocketBase below.
-  const applyJar = async settings => {
-    if ((await fsp.readFile(nodePath.join(v.directory, '.velocity_jar_ref'), 'utf8')).trim() === `${settings.id}:${settings.velocity_jar}`) return false;
-    calls.push('download'); return true;
-  };
-  const result = await runVelocitySync({ ...v.files, read: liveRead, applyJar, restart: async () => { calls.push('restart'); }, report: async (...args) => { reports.push(args); } }, { restartIfChanged: true });
-  assert.deepEqual(result, { status: 'unchanged', configChanged: false, jarChanged: false, secretChanged: false, restarted: false, appliedHash: sha256(prepared.content) });
-  assert.deepEqual(calls, []);
-  assert.deepEqual(reports, [['ok', '', sha256(prepared.content)]]);
-  assert.deepEqual(await v.identity(), before, 'bytes and inodes unchanged');
-  assert.deepEqual((await fsp.readdir(v.directory)).sort(), Object.keys(before).sort(), 'C2: no .bak after success');
+  const before = await v.identity(), pins = await v.pin(), calls = [], reports = [];
+  try {
+    // The daemon's JAR contract (syncJarIfNeeded): download only when the marker differs from "<settings.id>:<velocity_jar>".
+    // The actual daemon path is exercised against real PocketBase below.
+    const applyJar = async settings => {
+      if ((await fsp.readFile(nodePath.join(v.directory, '.velocity_jar_ref'), 'utf8')).trim() === `${settings.id}:${settings.velocity_jar}`) return false;
+      calls.push('download'); return true;
+    };
+    const result = await runVelocitySync({ ...v.files, read: liveRead, applyJar, restart: async () => { calls.push('restart'); }, report: async (...args) => { reports.push(args); } }, { restartIfChanged: true });
+    assert.deepEqual(result, { status: 'unchanged', configChanged: false, jarChanged: false, secretChanged: false, restarted: false, appliedHash: sha256(prepared.content) });
+    assert.deepEqual(calls, []);
+    assert.deepEqual(reports, [['ok', '', sha256(prepared.content)]]);
+    assert.deepEqual(await v.identity(), before, 'bytes and inodes unchanged');
+    await pins.verify('not swapped');
+    assert.deepEqual((await fsp.readdir(v.directory)).sort(), Object.keys(before).sort(), 'C2: no .bak after success');
+  } finally { await pins.close(); }
 });
 test('C2 applied sync removes all four .bak files only after the ok report', async (t) => {
   const prepared = prepareVelocityConfig(liveShaped, liveServers, liveForcedHosts);
@@ -346,6 +364,10 @@ for (const [version, binary] of binaries) test(`C1-C3 actual daemon: a settings 
     for (const [file, bytes] of Object.entries(originals)) await fsp.writeFile(nodePath.join(velocity, file), bytes, { mode: file === 'forwarding.secret' ? 0o600 : 0o644 });
     const identity = async () => Object.fromEntries(await Promise.all(Object.keys(originals).map(async file => [file, { ino: (await fsp.stat(nodePath.join(velocity, file))).ino, bytes: await fsp.readFile(nodePath.join(velocity, file)) }])));
     const before = await identity();
+    // INC-007: open handles pin the original files while the daemon runs (as in realVelocityFiles). They are
+    // closed after the check below; the hook closes them if the test stops earlier.
+    const held = await Promise.all(Object.keys(originals).map(async file => [file, await fsp.open(nodePath.join(velocity, file), 'r')]));
+    t.after(async () => { for (const [, handle] of held) await handle.close().catch(() => {}); });
     const restarts = async () => {
       try { return (await fsp.readFile(controls, 'utf8')).split('\n').filter(line => line.startsWith('restart')); }
       catch (error) { if (error.code === 'ENOENT') return []; throw error; }
@@ -376,6 +398,12 @@ for (const [version, binary] of binaries) test(`C1-C3 actual daemon: a settings 
     assert.match(daemon.output(), /Config change detected before settings were loaded\. Syncing without forced restart/);
     assert.doesNotMatch(daemon.output(), /Restarting Velocity service|velocity\.jar updated|\[Sync\] Failed/);
     assert.deepEqual(await identity(), before, 'no download or file swap');
+    for (const [file, handle] of held) {
+      const pinned = await handle.stat(), now = await fsp.lstat(nodePath.join(velocity, file));
+      assert.equal(pinned.nlink, 1, `not swapped: ${file}`);
+      assert.deepEqual([now.dev, now.ino], [pinned.dev, pinned.ino], `not swapped: ${file}`);
+    }
+    for (const [, handle] of held) await handle.close();
     assert.deepEqual((await fsp.readdir(velocity)).sort(), Object.keys(originals).sort());
     assert.deepEqual(await restarts(), []);
     // Negative: with settings loaded, a changed restart_trigger is a known request and still forces a restart.
